@@ -25,7 +25,12 @@ type Product = {
 
 function matchTemplate(category: string, templates: Template[]): Template {
   if (templates.length === 1) return templates[0];
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  // Fold accents so "Décor" ↔ "Decor" before stripping to alphanumerics — this
+  // MUST match the server's findBestTemplate (zip.ts) exactly, or this preview
+  // will disagree with the actual export (e.g. falsely warn a category will be
+  // excluded when the server matches it fine).
+  const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  const norm = (s: string) => fold(s).replace(/[^a-z0-9]+/g, " ").trim();
 
   // Prefer a generic catch-all over first-in-array when no specific match exists
   const isGeneric = (t: Template) => /\bother(s)?\b|\bgeneral\b|\bdefault\b/i.test(t.name);
