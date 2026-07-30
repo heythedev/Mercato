@@ -29,30 +29,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No rows found in the file" }, { status: 400 });
   }
 
+  // Create the project first, then insert products in chunks.
+  // Prisma nested create sends all rows as a single parameterised statement;
+  // PostgreSQL's 65 535-parameter cap silently truncates files with 6 k+ products
+  // (~11 cols × 6 k rows = 66 k params). Chunked createMany stays well under the limit.
   const project = await prisma.project.create({
-    data: {
-      userId: user!.id,
-      name,
-      marketplace,
-      status: "uploaded",
-      isNewListing,
-      products: {
-        create: rows.map((r) => ({
-          name: r.name ?? "Unknown",
-          vendorSku: r.sku ?? null,
-          upc: r.upc ?? null,
-          asin: r.asin ?? null,
-          brand: r.brand ?? null,
-          description: r.description ?? null,
-          price: r.price ?? null,
-          imageUrl: r.imageUrl ?? null,
-          verifyStatus: r.discontinued === true ? "discontinued" : null,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          vendorData: r as any,
-        })),
-      },
-    },
+    data: { userId: user!.id, name, marketplace, status: "uploaded", isNewListing },
   });
+
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await prisma.product.createMany({
+      data: rows.slice(i, i + CHUNK).map((r) => ({
+        projectId: project.id,
+        name: r.name ?? "Unknown",
+        vendorSku: r.sku ?? null,
+        upc: r.upc ?? null,
+        asin: r.asin ?? null,
+        brand: r.brand ?? null,
+        description: r.description ?? null,
+        price: r.price ?? null,
+        imageUrl: r.imageUrl ?? null,
+        verifyStatus: r.discontinued === true ? "discontinued" : null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        vendorData: r as any,
+      })),
+    });
+  }
 
   return NextResponse.json({ id: project.id, count: rows.length });
 }
