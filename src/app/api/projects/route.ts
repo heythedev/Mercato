@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { parseVendorFile } from "@/lib/vendor/parse";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
 
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
   const { user, response } = await authGuard();
   if (response) return response;

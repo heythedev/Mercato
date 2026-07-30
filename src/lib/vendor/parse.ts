@@ -15,7 +15,7 @@ export type VendorRow = {
   [key: string]: unknown;
 };
 
-const MAX_FILE_ROWS = 2000;
+const MAX_FILE_ROWS = 15000;
 const MAX_FILE_COLS = 64;
 const HEADER_SCAN_ROWS = 25;
 
