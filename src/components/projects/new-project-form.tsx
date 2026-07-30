@@ -15,7 +15,7 @@ const MARKETPLACE_TILES = [
   { id: "temu", label: "Temu", domain: "temu.com" },
   { id: "mathis", label: "Mathis", domain: "mathishome.com" },
   { id: "sears", label: "Sears", domain: "sears.com" },
-  { id: "wayfair", label: "Wayfair", domain: "wayfair.com" },
+  // { id: "wayfair", label: "Wayfair", domain: "wayfair.com" },
 ] as const;
 
 function MarketplaceLogo({ domain, className }: { domain: string; className?: string }) {
