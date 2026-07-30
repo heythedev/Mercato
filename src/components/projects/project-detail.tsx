@@ -329,42 +329,57 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   const categorizedCount = products.filter((p) => p.marketplaceCategory).length;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header. Extra right padding on large screens keeps the delete button
-          clear of the fixed top-right action pill. */}
-      <div className="border-b py-5 shrink-0">
-        <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 sm:gap-4 sm:px-8">
-          <Link
-            href="/projects"
-            title="Back to projects"
-            aria-label="Back to projects"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border text-muted-foreground transition hover:bg-accent hover:text-foreground"
-          >
-            <ArrowLeft className="w-4.5 h-4.5" />
-          </Link>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <h1 className="font-bold text-lg truncate">{project.name}</h1>
-              <span className="flex items-center gap-1.5 text-muted-foreground text-sm shrink-0">
-                <MarketplaceLogo marketplace={project.marketplace} className="w-4 h-4" />
-                {MARKETPLACE_LABELS[project.marketplace]}
-              </span>
+    // The (app) layout insets <main> on the right (lg:pr-52) so content clears
+    // The page scrolls on the window (the app shell uses min-h-screen, not a
+    // fixed-height inner scroller), so we DON'T set overflow here — an inner
+    // overflow context would break `position: sticky` on the header. bg-muted/30
+    // tints the whole page; -mr-52 cancels the layout's right inset so the tint
+    // fills edge-to-edge with no mismatched strip. Content stays centered via
+    // its max-w-6xl columns, clear of the top-right pill.
+    <div className="relative flex flex-col min-h-screen bg-muted/30 lg:-mr-52">
+      {/* Header — sticky against the window scroll so it stays pinned at the top.
+          The stepper and step content below scroll under it. The solid bg (page
+          tint over the base background) keeps scrolling content from showing
+          through the padding gaps around the header card. lg:pr-52 re-insets its
+          content to match the other rows now that the root cancels the padding. */}
+      <div className="sticky top-14 lg:top-0 z-20 pt-5 pb-2 shrink-0 bg-background lg:pr-52">
+        <div className="pointer-events-none absolute inset-0 bg-muted/30" aria-hidden />
+        <div className="relative mx-auto max-w-6xl px-4 sm:px-8">
+          <div className="flex items-center gap-3 sm:gap-4 rounded-3xl bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.08)] px-4 py-3 sm:px-5">
+            <Link
+              href="/projects"
+              title="Back to projects"
+              aria-label="Back to projects"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border text-muted-foreground transition hover:bg-accent hover:text-foreground"
+            >
+              <ArrowLeft className="w-4.5 h-4.5" />
+            </Link>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="font-bold text-lg truncate">{project.name}</h1>
+                <span className="flex items-center gap-1.5 text-muted-foreground text-sm shrink-0">
+                  <MarketplaceLogo marketplace={project.marketplace} className="w-4 h-4" />
+                  {MARKETPLACE_LABELS[project.marketplace]}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">{products.length} products</p>
             </div>
-            <p className="text-xs text-muted-foreground">{products.length} products</p>
+            <button
+              onClick={handleDelete}
+              title="Delete project"
+              className="ml-2 w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-red-50 hover:text-red-600 hover:border hover:border-red-200 transition-all"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
           </div>
-          <button
-            onClick={handleDelete}
-            title="Delete project"
-            className="ml-2 w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-red-50 hover:text-red-600 hover:border hover:border-red-200 transition-all"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
         </div>
       </div>
 
-      {/* Stepper */}
-      <div className="py-4 shrink-0">
-        <div className="mx-auto flex max-w-6xl items-center gap-0 overflow-x-auto px-4 sm:px-8">
+      {/* Stepper — lg:pr-52 re-insets to match the header row now that the root
+          cancels the layout's right padding. */}
+      <div className="relative z-10 py-4 shrink-0 lg:pr-52">
+        <div className="mx-auto max-w-6xl px-4 sm:px-8">
+          <div className="flex items-center gap-0 overflow-x-auto rounded-3xl bg-muted/30 p-2 sm:p-3">
           {STEPS.map((step, idx) => {
             const Icon = step.icon;
             const isSkipVerifyStep = skipVerify && idx === 1;
@@ -423,12 +438,18 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
               </div>
             );
           })}
+          </div>
         </div>
       </div>
 
-      {/* Step content */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-6xl">
+      {/* Step content — wrapped in a section card so each step reads as one
+          structured block rather than loose floating elements. The step
+          components already supply their own inner p-4/sm:p-8 padding.
+          Scrolls with the page (the root is the scroll container now).
+          lg:pr-52 re-insets to match the header/stepper rows. */}
+      <div className="relative z-10 pb-6 lg:pr-52">
+        <div className="mx-auto max-w-6xl px-4 sm:px-8">
+          <div className="rounded-3xl bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.08)] overflow-hidden">
         {activeStep === 0 && (
           <ProductsTable
             products={products}
@@ -485,6 +506,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             projectStatus={project.status}
           />
         )}
+          </div>
         </div>
       </div>
     </div>

@@ -186,15 +186,15 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
       {/* Progress */}
       {hasResults && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
-          <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+          <div className="rounded-2xl p-5 bg-green-50/70 dark:bg-green-950/20">
             <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categorized.length}</p>
             <p className="text-sm text-muted-foreground">Categorized</p>
           </div>
-          <div className={`rounded-xl p-4 ${uncategorized.length > 0 ? "bg-orange-50 dark:bg-orange-950/30" : "bg-muted/50"}`}>
+          <div className={`rounded-2xl p-5 ${uncategorized.length > 0 ? "bg-orange-50/70 dark:bg-orange-950/20" : "bg-muted/30"}`}>
             <p className={`text-2xl font-bold ${uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : ""}`}>{uncategorized.length}</p>
             <p className="text-sm text-muted-foreground">Uncategorized</p>
           </div>
-          <div className="rounded-xl p-4 bg-muted/50">
+          <div className="rounded-2xl p-5 bg-muted/30">
             <p className="text-2xl font-bold">{total}</p>
             <p className="text-sm text-muted-foreground">Total products</p>
           </div>
@@ -203,7 +203,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
       {/* Uncategorized warning banner */}
       {hasResults && uncategorized.length > 0 && (
-        <div className="mb-6 rounded-xl border border-orange-200 bg-orange-50 p-4">
+        <div className="mb-6 rounded-2xl bg-orange-50/70 dark:bg-orange-950/20 p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
             <div>
@@ -247,9 +247,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
       {/* Results table */}
       {hasResults && !loading && (
-        <div className="rounded-xl border overflow-x-auto overflow-y-hidden">
+        <div className="rounded-2xl bg-muted/20 overflow-x-auto overflow-y-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-muted/50">
+            <thead className="bg-muted/40">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Product</th>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Category</th>
@@ -257,7 +257,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                 <th className="text-center px-4 py-3 font-medium text-muted-foreground">Status</th>
               </tr>
             </thead>
-            <tbody className="divide-y">
+            <tbody className="divide-y divide-border/40">
               {products.map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
                 return (

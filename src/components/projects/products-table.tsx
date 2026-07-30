@@ -82,9 +82,9 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
       </div>
 
       {/* Table */}
-      <div className="rounded-xl border overflow-x-auto overflow-y-hidden">
+      <div className="rounded-2xl bg-muted/20 overflow-x-auto overflow-y-hidden">
         <table className="w-full text-sm">
-          <thead className="bg-muted/50">
+          <thead className="bg-muted/30">
             <tr>
               <th className="text-left px-4 py-3 font-medium text-muted-foreground">Product</th>
               <th className="text-left px-4 py-3 font-medium text-muted-foreground">SKU</th>
@@ -93,7 +93,7 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
               <th className="text-center px-4 py-3 font-medium text-muted-foreground">Status</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
+          <tbody className="divide-y divide-border/40">
             {filtered.map((p) => (
               <tr key={p.id} className="hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3">

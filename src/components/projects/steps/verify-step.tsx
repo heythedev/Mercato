@@ -42,9 +42,9 @@ const STATUS_CONFIG = {
 };
 
 const AI_NOTE_STYLE = {
-  ok:       { wrap: "border-green-200 bg-green-50", badge: "bg-green-500", pill: "bg-green-100 text-green-700", text: "text-green-900" },
-  warning:  { wrap: "border-yellow-200 bg-yellow-50", badge: "bg-yellow-500", pill: "bg-yellow-100 text-yellow-700", text: "text-yellow-900" },
-  mismatch: { wrap: "border-red-200 bg-red-50", badge: "bg-red-500", pill: "bg-red-100 text-red-700", text: "text-red-900" },
+  ok:       { wrap: "bg-green-50/70 dark:bg-green-950/20", badge: "bg-green-500", pill: "bg-green-100 text-green-700", text: "text-green-900" },
+  warning:  { wrap: "bg-yellow-50/70 dark:bg-yellow-950/20", badge: "bg-yellow-500", pill: "bg-yellow-100 text-yellow-700", text: "text-yellow-900" },
+  mismatch: { wrap: "bg-red-50/70 dark:bg-red-950/20", badge: "bg-red-500", pill: "bg-red-100 text-red-700", text: "text-red-900" },
 };
 
 const FIELD_SEVERITY = {
@@ -200,11 +200,11 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3">
             {[
-              { label: "Match",        status: "ok",           count: verifiedCount,    color: "bg-green-50 dark:bg-green-950/30",    text: "text-green-700 dark:text-green-400",   ring: "ring-green-400" },
-              { label: "Warning",      status: "warning",      count: warningCount,     color: "bg-yellow-50 dark:bg-yellow-950/30",  text: "text-yellow-700 dark:text-yellow-400",  ring: "ring-yellow-400" },
-              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,    color: "bg-red-50 dark:bg-red-950/30",        text: "text-red-700 dark:text-red-400",     ring: "ring-red-400" },
-              { label: "Not Found",    status: "not_found",    count: notFoundCount,    color: "bg-muted/50",      text: "text-gray-600 dark:text-gray-400",    ring: "ring-gray-400" },
-              { label: "Discontinued", status: "discontinued", count: discontinuedCount, color: "bg-purple-50 dark:bg-purple-950/30", text: "text-purple-700 dark:text-purple-400",  ring: "ring-purple-400" },
+              { label: "Match",        status: "ok",           count: verifiedCount,    color: "bg-green-50/70 dark:bg-green-950/20",    text: "text-green-700 dark:text-green-400",   ring: "ring-green-400" },
+              { label: "Warning",      status: "warning",      count: warningCount,     color: "bg-yellow-50/70 dark:bg-yellow-950/20",  text: "text-yellow-700 dark:text-yellow-400",  ring: "ring-yellow-400" },
+              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,    color: "bg-red-50/70 dark:bg-red-950/20",        text: "text-red-700 dark:text-red-400",     ring: "ring-red-400" },
+              { label: "Not Found",    status: "not_found",    count: notFoundCount,    color: "bg-muted/30",      text: "text-gray-600 dark:text-gray-400",    ring: "ring-gray-400" },
+              { label: "Discontinued", status: "discontinued", count: discontinuedCount, color: "bg-purple-50/70 dark:bg-purple-950/20", text: "text-purple-700 dark:text-purple-400",  ring: "ring-purple-400" },
             ].map((s) => {
               const isActive = activeFilter === s.status;
               return (
@@ -212,7 +212,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                   key={s.label}
                   onClick={() => { setActiveFilter(isActive ? null : s.status); setExpanded(null); }}
                   className={cn(
-                    "rounded-xl p-4 text-left transition-all w-full",
+                    "rounded-2xl p-4 text-left transition-all w-full",
                     s.color,
                     isActive ? `ring-2 ${s.ring} shadow-sm` : "hover:shadow-sm hover:brightness-95",
                   )}
@@ -269,7 +269,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             const isOpen = expanded === p.id;
 
             return (
-              <div key={p.id} className="border rounded-xl overflow-hidden">
+              <div key={p.id} className="bg-muted/20 rounded-2xl overflow-hidden">
                 <div
                   role="button"
                   tabIndex={0}
@@ -418,7 +418,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                             const style = AI_NOTE_STYLE[f.severity];
                             const noteText = f.note.replace(/^\s*ai visual check:?\s*/i, "");
                             return (
-                              <div className={cn("col-span-3 flex items-start gap-2 rounded-lg border px-3 py-2", style.wrap)}>
+                              <div className={cn("col-span-3 flex items-start gap-2 rounded-lg px-3 py-2", style.wrap)}>
                                 <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-sm", style.badge)}>
                                   <Sparkles className="h-3 w-3 text-white" />
                                 </span>

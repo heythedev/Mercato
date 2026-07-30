@@ -341,7 +341,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         const allMissing = [...new Set([...preExportMissingCategories, ...missingTemplateCategories])];
         if (allMissing.length === 0) return null;
         return (
-          <div className="mb-5 rounded-xl bg-amber-50 dark:bg-amber-950/30 p-4">
+          <div className="mb-5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 p-4">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
               <div className="min-w-0">
@@ -387,15 +387,15 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
         {usesCategoryZip ? (
           <>
-            <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+            <div className="rounded-2xl p-4 bg-green-50/70 dark:bg-green-950/20">
               <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categories.length}</p>
               <p className="text-sm text-muted-foreground">Categories → files</p>
             </div>
-            <div className="rounded-xl p-4 bg-muted/50">
+            <div className="rounded-2xl p-4 bg-muted/30">
               <p className="text-2xl font-bold">{exportableCount}</p>
               <p className="text-sm text-muted-foreground">Products to export</p>
             </div>
-            <div className="rounded-xl p-4 bg-muted/50">
+            <div className="rounded-2xl p-4 bg-muted/30">
               <div className="flex items-center justify-between">
                 <p className="text-2xl font-bold">{templates.length}</p>
                 <button
@@ -412,15 +412,15 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           </>
         ) : (
           <>
-            <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+            <div className="rounded-2xl p-4 bg-green-50/70 dark:bg-green-950/20">
               <p className="text-2xl font-bold text-green-700 dark:text-green-400">{products.length}</p>
               <p className="text-sm text-muted-foreground">Products to export</p>
             </div>
-            <div className="rounded-xl p-4 bg-muted/50">
+            <div className="rounded-2xl p-4 bg-muted/30">
               <p className="text-2xl font-bold">{categories.length}</p>
               <p className="text-sm text-muted-foreground">Categories detected</p>
             </div>
-            <div className="rounded-xl p-4 bg-muted/50">
+            <div className="rounded-2xl p-4 bg-muted/30">
               <p className="text-2xl font-bold">{templates.length}</p>
               <p className="text-sm text-muted-foreground">Templates available</p>
             </div>
@@ -430,7 +430,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
       {/* Uncategorized warning banner */}
       {usesCategoryZip && !fetching && uncategorizedCount > 0 && (
-        <div className="mb-4 rounded-xl border border-orange-200 bg-orange-50 p-4">
+        <div className="mb-4 rounded-2xl bg-orange-50/70 dark:bg-orange-950/20 p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
             <div>
@@ -458,7 +458,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
           {/* ── CATEGORY-SPLIT (Mathis / Temu / Best Buy) ── */}
           {usesCategoryZip && isMathis && !hasTemplates && (
-            <div className="flex flex-col items-center justify-center py-12 text-center border rounded-xl">
+            <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <FileSpreadsheet className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No templates uploaded yet</p>
               <p className="text-xs text-muted-foreground max-w-xs">
@@ -468,7 +468,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           )}
 
           {usesCategoryZip && !isMathis && !hasTemplates && categories.length > 0 && (
-            <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4">
+            <div className="mb-4 rounded-2xl bg-blue-50/70 dark:bg-blue-950/20 p-4">
               <div className="flex items-start gap-3">
                 <FileSpreadsheet className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
                 <div>
@@ -482,7 +482,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           )}
 
           {usesCategoryZip && categories.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-12 text-center border rounded-xl">
+            <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <Package className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No categorized products</p>
               <p className="text-xs text-muted-foreground">Run the Categorize step first before exporting.</p>
@@ -492,7 +492,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           {usesCategoryZip && categories.length > 0 && (
             <div>
               <h3 className="text-sm font-medium mb-2">Files that will be created</h3>
-              <div className="border rounded-xl divide-y overflow-hidden">
+              <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
                 {categories.map(([category, count]) => {
                   const matched = hasTemplates ? matchTemplate(category, templates) : null;
                   return (
@@ -520,7 +520,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
           {/* ── SINGLE-TEMPLATE MARKETPLACES ── */}
           {!usesCategoryZip && products.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-12 text-center border rounded-xl">
+            <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <Package className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No products to export</p>
               <p className="text-xs text-muted-foreground">Upload and verify products first.</p>
@@ -528,7 +528,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           )}
 
           {!usesCategoryZip && products.length > 0 && !hasTemplates && (
-            <div className="flex flex-col items-center justify-center py-12 text-center border rounded-xl">
+            <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <FileSpreadsheet className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No templates uploaded yet</p>
               <p className="text-xs text-muted-foreground max-w-xs">
@@ -544,7 +544,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                 All {products.length} product{products.length !== 1 ? "s" : ""} will be exported into one file.
                 {templates.some((t) => t.userId === null) && " Admin templates are available by default — no upload needed."}
               </p>
-              <div className="border rounded-xl divide-y overflow-hidden">
+              <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
                 {templates.map((t) => (
                   <label
                     key={t.id}
