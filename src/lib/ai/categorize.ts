@@ -172,19 +172,23 @@ export async function categorizeProducts(
 
   const allResults: CategorizeResult[] = [];
 
+  // For constrained-taxonomy marketplaces the fallback must be "Uncategorized" so
+  // a failed batch surfaces visibly for review instead of silently taking the first
+  // CSV entry (which happens to be "Appliances > Major Appliances > Refrigerators").
+  const batchFallback = isConstrained ? "Uncategorized" : (availableCategories?.[0] ?? "General");
+
   for (let i = 0; i < batches.length; i += PARALLEL) {
     const group = batches.slice(i, i + PARALLEL);
     const settled = await Promise.allSettled(
       group.map((b) => categorizeBatch(b, marketplace, model, availableCategories))
     );
     settled.forEach((s, gi) => {
-      const fallback = availableCategories?.[0] ?? "General";
       if (s.status === "rejected") {
         console.error(`[categorize] Batch ${i + gi} failed (${marketplace}, model=${model}):`, s.reason);
       }
       allResults.push(...(s.status === "fulfilled"
         ? s.value
-        : group[gi].map((p) => ({ productId: p.id, category: fallback, path: fallback, confidence: 0.1 }))));
+        : group[gi].map((p) => ({ productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1 }))));
     });
     // Report progress after every parallel wave. The job store's updatedAt advances,
     // so the client's stall detector sees a live run instead of one frozen phase string
@@ -507,7 +511,9 @@ ${noInventRule}
   // noun first, THEN look up the taxonomy) lives in system, and the user message
   // re-states "work through the steps for EACH product first" right before the
   // product list — keeping the reason-first behavior without the ordering hack.
-  const systemPrompt = (isTemu || isBestBuy)
+  const useStepByStep = isTemu || isBestBuy || isSears;
+
+  const systemPrompt = useStepByStep
     ? `${storeContext}
 
 ${reasoningInstruction}
@@ -521,7 +527,7 @@ ${reasoningInstruction}
 You will categorize each product into ${categorySection}
 ${rules}`;
 
-  const userPrompt = (isTemu || isBestBuy)
+  const userPrompt = useStepByStep
     ? `Work through STEP 1→2→3 for EACH product below before answering.
 
 Products to categorize:
@@ -594,7 +600,7 @@ ${pathHint}
     maxOutputTokens,
   });
 
-  const fallbackCat = availableCategories?.[0] ?? "General";
+  const fallbackCat = usesTaxonomySheet ? "Uncategorized" : (availableCategories?.[0] ?? "General");
   const allowedSet = availableCategories ? new Set([...availableCategories, "Uncategorized"]) : null;
 
   const mapResult = (r: { index: number; category: string; path: string; confidence: number }) => {
