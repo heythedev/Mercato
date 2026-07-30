@@ -98,6 +98,56 @@ function buildCategoryGuide(categories: string[]): string {
   return lines.join("\n");
 }
 
+// ── Failure classification ────────────────────────────────────────────────────
+// A systemic failure (bad/expired API key, no credit, provider outage, model
+// name rejected) makes EVERY batch fail the same way. Without detecting it, the
+// per-batch fallback silently marks every product "Uncategorized" and the run
+// looks like it "succeeded" with zero matches — indistinguishable from a real
+// categorization that found no fits. We classify these errors so the caller can
+// throw a real, actionable error instead of returning all-Uncategorized.
+
+/** Thrown when categorization fails systemically (auth, quota, outage) rather
+ *  than a single product being genuinely uncategorizable. The route turns this
+ *  into a user-visible error banner instead of a "0 categorized" success. */
+export class CategorizationServiceError extends Error {
+  constructor(message: string, readonly kind: "auth" | "quota" | "provider") {
+    super(message);
+    this.name = "CategorizationServiceError";
+  }
+}
+
+/** Inspect a batch rejection and return a systemic-failure kind, or null if it
+ *  looks like an ordinary transient/parse error worth tolerating per-batch. */
+function classifySystemicError(reason: unknown): CategorizationServiceError | null {
+  const err = reason as { statusCode?: number; message?: string; data?: { error?: { type?: string } } } | undefined;
+  const status = err?.statusCode;
+  const msg = String(err?.message ?? reason ?? "");
+  const providerType = err?.data?.error?.type ?? "";
+
+  // 401/403 or an explicit authentication error type → invalid/expired key.
+  if (status === 401 || status === 403 || providerType === "authentication_error" || /api key is invalid|authentication/i.test(msg)) {
+    return new CategorizationServiceError(
+      "Categorization service rejected the API key (invalid or expired).",
+      "auth",
+    );
+  }
+  // Billing / quota exhaustion.
+  if (status === 402 || providerType === "billing_error" || /credit|quota|billing|insufficient/i.test(msg)) {
+    return new CategorizationServiceError(
+      "Categorization service is out of credit or over quota. Check the Anthropic account balance, then re-run.",
+      "quota",
+    );
+  }
+  // A rejected/unknown model id fails every batch identically.
+  if (status === 404 && /model/i.test(msg)) {
+    return new CategorizationServiceError(
+      "Categorization model was not found.",
+      "provider",
+    );
+  }
+  return null;
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export type CategorizeProgress = (done: number, total: number, note?: string) => void;
@@ -177,6 +227,11 @@ export async function categorizeProducts(
   // CSV entry (which happens to be "Appliances > Major Appliances > Refrigerators").
   const batchFallback = isConstrained ? "Uncategorized" : (availableCategories?.[0] ?? "General");
 
+  // Track batch failures so a systemic outage (bad key, no credit, provider down)
+  // is reported as a real error instead of silently marking everything Uncategorized.
+  let failedBatches = 0;
+  let systemicError: CategorizationServiceError | null = null;
+
   for (let i = 0; i < batches.length; i += PARALLEL) {
     const group = batches.slice(i, i + PARALLEL);
     const settled = await Promise.allSettled(
@@ -184,16 +239,35 @@ export async function categorizeProducts(
     );
     settled.forEach((s, gi) => {
       if (s.status === "rejected") {
+        failedBatches++;
         console.error(`[categorize] Batch ${i + gi} failed (${marketplace}, model=${model}):`, s.reason);
+        // An auth/quota/model error means every remaining batch will fail the same
+        // way — capture it so we can abort with an actionable message rather than
+        // grinding through the whole run producing all-Uncategorized results.
+        systemicError ??= classifySystemicError(s.reason);
       }
       allResults.push(...(s.status === "fulfilled"
         ? s.value
         : group[gi].map((p) => ({ productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1 }))));
     });
+    // Bail out early on a systemic failure — no point calling the API hundreds of
+    // more times with a key/quota/model that will reject every one of them.
+    if (systemicError) throw systemicError;
     // Report progress after every parallel wave. The job store's updatedAt advances,
     // so the client's stall detector sees a live run instead of one frozen phase string
     // for the whole (multi-minute) categorization of a large project.
     onProgress?.(Math.min(allResults.length, products.length), products.length);
+  }
+
+  // No systemic error was classified, but EVERY batch still failed (e.g. a
+  // network error we didn't specifically classify). That is not a legitimate
+  // "nothing matched" result — surface it as a provider failure so the run
+  // doesn't report success with 100% Uncategorized.
+  if (failedBatches > 0 && failedBatches === batches.length) {
+    throw new CategorizationServiceError(
+      "Categorization failed for every batch — the AI provider is unreachable or returning errors. Check the server logs and API configuration, then re-run.",
+      "provider",
+    );
   }
 
   // ── Validation pass ────────────────────────────────────────────────────────
