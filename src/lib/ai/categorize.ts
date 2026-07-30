@@ -5,6 +5,7 @@ import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai
 import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
 import { formatBestBuyTaxonomyForPrompt, loadBestBuyCategoryPaths } from "@/lib/ai/bestbuy-taxonomy";
 import { formatSearsTaxonomyForPrompt, loadSearsCategoryPaths } from "@/lib/ai/sears-taxonomy";
+import { formatWayfairTaxonomyForPrompt, loadWayfairCategoryPaths, hasWayfairTaxonomy } from "@/lib/ai/wayfair-taxonomy";
 
 const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -164,6 +165,7 @@ export async function categorizeProducts(
   const isTemuTop = mpLower === "temu";
   const isWalmartTop = mpLower === "walmart";
   const isSearsTop = mpLower === "sears";
+  const isWayfairTop = mpLower === "wayfair";
 
   // Temu: full taxonomy from temu_categories.csv
   if (isTemuTop) {
@@ -194,9 +196,25 @@ export async function categorizeProducts(
     availableCategories = loadWalmartCategoryPaths();
   }
 
-  // Constrained mode = AI must pick from a fixed list (Temu/Best Buy/Sears/Mathis/Walmart taxonomy)
+  // Wayfair: constrained to the real Wayfair class list (wayfair_categories.csv).
+  // The CSV ships empty on purpose — until it is populated from Wayfair's real
+  // taxonomy we must NOT free-form categorize (that would invent categories, the
+  // exact reason the prior integration was reverted). Fail loudly instead so the
+  // route surfaces a clear "Wayfair taxonomy not configured" banner.
+  if (isWayfairTop) {
+    if (!hasWayfairTaxonomy()) {
+      throw new CategorizationServiceError(
+        "Wayfair categorization is not configured yet: wayfair_categories.csv has no " +
+        "class rows. Add Wayfair's real class taxonomy before categorizing Wayfair projects.",
+        "provider",
+      );
+    }
+    availableCategories = loadWayfairCategoryPaths();
+  }
+
+  // Constrained mode = AI must pick from a fixed list (Temu/Best Buy/Sears/Mathis/Walmart/Wayfair taxonomy)
   const isConstrained =
-    (isMathis || isBestBuyTop || isTemuTop || isWalmartTop || isSearsTop) && !!availableCategories?.length;
+    (isMathis || isBestBuyTop || isTemuTop || isWalmartTop || isSearsTop || isWayfairTop) && !!availableCategories?.length;
 
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
@@ -366,6 +384,7 @@ async function categorizeBatchWithContext(
   const isBestBuy = mpLower === "bestbuy";
   const isWalmart = mpLower === "walmart";
   const isSears = mpLower === "sears";
+  const isWayfair = mpLower === "wayfair";
 
   const list = products.map((p, idx) => {
     let line = `${idx + 1}. "${p.name}"`;
@@ -434,6 +453,17 @@ ${closestMatchRule}`;
 ${taxonomy}
 
 Assign every real, sellable product to its closest match — only use "Uncategorized" when nothing fits at all.`;
+  } else if (isWayfair && availableCategories?.length) {
+    // Wayfair classes (wayfair_categories.csv → "Class Code - Class Name").
+    // Each class maps to its own Wayfair upload template at export, so the class
+    // string must be copied verbatim. Only real classes from the sheet are allowed —
+    // the dispatch above already throws if the taxonomy sheet is empty.
+    const taxonomy = formatWayfairTaxonomyForPrompt();
+    categorySection = `${strictMode ? "EXACTLY" : "exactly"} one Wayfair class from this list (copy character-for-character as "Class Code - Class Name"):
+
+${taxonomy}
+
+Match by what the product physically IS (its core noun). If no listed class fits at all, use "Uncategorized".`;
   } else if (isMathis && availableCategories?.length) {
     // Full taxonomy from mathis_categories.csv (sourced from the official Mirakl fwd sheets).
     // Paths are 2–4 levels: Department > Category > Subcategory > Product Type

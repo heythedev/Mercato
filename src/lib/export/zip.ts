@@ -3,6 +3,7 @@ import type { Product, ExportTemplate } from "@prisma/client";
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { matchDropdownValues, dropdownKey, type DropdownQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
+import { applyWayfairEligibility } from "./wayfair-eligibility";
 import { ASIN_RE } from "../barcode";
 import { readXlsxGrid } from "../vendor/xlsx-lite";
 
@@ -451,11 +452,21 @@ export async function generateExportZip(
   return zip.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>;
 }
 
-function eligibleProducts(products: Product[], _marketplace: string): Product[] {
+function eligibleProducts(products: Product[], marketplace: string): Product[] {
+  let base = products;
   const anyVerified = products.some((p) => p.verifyStatus != null);
-  if (!anyVerified) return products;
   // Only exclude hard API errors — ok, warning, not_found, and un-verified (null) all export.
-  return products.filter((p) => p.verifyStatus !== "error");
+  if (anyVerified) base = base.filter((p) => p.verifyStatus !== "error");
+
+  // Wayfair has extra pre-listing gates (category/shipping/brand-risk). Excluded
+  // products are removed here; flagged-but-kept products stay in the export and are
+  // surfaced separately via the review report (see applyWayfairEligibility / the
+  // export route's Wayfair branch). See wayfair-eligibility.ts.
+  if (marketplace.toLowerCase() === "wayfair") {
+    base = applyWayfairEligibility(base).eligible;
+  }
+
+  return base;
 }
 
 // Fallback when the uploaded template can't be parsed. Produces a bare workbook

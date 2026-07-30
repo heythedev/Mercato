@@ -31,6 +31,9 @@ export function groupsByDepartment(marketplace: string): boolean {
  * The export-file group a category belongs to for the given marketplace.
  * Mathis  → top-level department  ("Rugs > Rug Type > Indoor Rugs" → "Rugs")
  * Temu    → Category > Sub-Category (drops Product Type to avoid hundreds of tiny files)
+ * Wayfair → the full class string ("6115 - Luggage Racks"); one file per Wayfair
+ *           class, since each class has its own upload template. Falls through to
+ *           the default below (no special-casing needed).
  * Others  → the full category path unchanged
  */
 export function exportGroupOf(category: string, marketplace: string): string {

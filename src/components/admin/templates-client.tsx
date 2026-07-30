@@ -41,6 +41,23 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Accordion state per marketplace group; collapsed by default to keep the
+  // long template list scannable.
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  function toggleGroup(label: string) {
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
+  /** Open the group a template belongs to (e.g. right after adding one). */
+  function revealGroup(marketplace: string) {
+    const label = MARKETPLACES.includes(marketplace) ? marketplace : "other";
+    setOpenGroups((prev) => new Set(prev).add(label));
+  }
+
   // Inline edit state
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ name: "", marketplace: "", category: "" });
@@ -136,6 +153,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
       if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Failed"); }
       const tpl = await res.json();
       setTemplates((prev) => [tpl, ...prev]);
+      revealGroup(tpl.marketplace);
       setUploadFile(null);
       setFileForm({ name: "", marketplace: "amazon", category: "" });
       setDetectedCategory(null);
@@ -167,6 +185,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
       if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? "Failed"); }
       const tpl = await res.json();
       setTemplates((prev) => [tpl, ...prev]);
+      revealGroup(tpl.marketplace);
       setManualForm({ name: "", marketplace: "amazon", category: "", fileFormat: "xlsx", columnsRaw: "title,brand,price,upc,asin" });
       setShowAdd(false);
     } catch (e) {
@@ -369,15 +388,29 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
         </div>
       )}
 
-      {/* Grouped list */}
+      {/* Grouped list — each marketplace is an accordion section */}
       <div className="space-y-4">
-        {allGroups.map(({ label, items }) => (
+        {allGroups.map(({ label, items }) => {
+          const isGroupOpen = openGroups.has(label);
+          return (
           <div key={label} className="rounded-xl border overflow-hidden">
-            <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/40 border-b">
+            <button
+              type="button"
+              onClick={() => toggleGroup(label)}
+              aria-expanded={isGroupOpen}
+              className="flex w-full items-center gap-2 px-4 py-2.5 bg-muted/40 text-left transition-colors hover:bg-muted/60"
+            >
               <span className="text-sm font-semibold capitalize">{label}</span>
               <span className="text-xs text-muted-foreground ml-1">{items.length}</span>
-            </div>
-            <div className="divide-y">
+              <ChevronDown
+                className={cn(
+                  "ml-auto w-4 h-4 text-muted-foreground transition-transform duration-200",
+                  isGroupOpen && "rotate-180"
+                )}
+              />
+            </button>
+            {isGroupOpen && (
+            <div className="divide-y border-t">
               {items.map((tpl) => {
                 const cols = parseColumns(tpl.columns);
                 const isOpen = expanded === tpl.id;
@@ -476,8 +509,10 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
                 );
               })}
             </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

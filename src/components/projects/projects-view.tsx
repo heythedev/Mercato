@@ -52,6 +52,7 @@ const MARKETPLACE_DOMAIN: Record<string, string> = {
   temu: "temu.com",
   mathis: "mathishome.com",
   sears: "sears.com",
+  wayfair: "wayfair.com",
 };
 
 const MARKETPLACE_LABELS: Record<string, string> = {
@@ -62,6 +63,7 @@ const MARKETPLACE_LABELS: Record<string, string> = {
   temu: "Temu",
   mathis: "Mathis",
   sears: "Sears",
+  wayfair: "Wayfair",
 };
 
 function MarketplaceLogo({ marketplace, className }: { marketplace: string; className?: string }) {

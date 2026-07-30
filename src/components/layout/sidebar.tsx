@@ -47,13 +47,16 @@ export function Sidebar({ role }: Props) {
 
       {/* Backdrop branding — sits BEHIND the card (lower z-index), so the
           sliding card physically covers it when open and uncovers it when
-          tucked away. Positioned below the edge-riding toggle so the two
-          never overlap while collapsed. */}
+          tucked away. Mirrors the card's exact geometry: 17px = card offset
+          (16px) + its 1px border, then the same h-14 px-5 brand row, so the
+          uncovered wordmark lands on the very same pixels as the card's own
+          brand text. (No transparent border here — the global `* { border-
+          color }` rule would repaint it visible.) */}
       <div
         aria-hidden
-        className="pointer-events-none fixed left-16 top-16 z-10 hidden select-none md:block"
+        className="pointer-events-none fixed left-[17px] top-[17px] z-10 hidden h-14 select-none items-center px-5 md:flex"
       >
-        <span className="text-xl font-semibold tracking-wide text-foreground/80 [font-family:var(--font-brand)]">
+        <span className="text-xl font-semibold tracking-wide [font-family:var(--font-brand)]">
           Mercato
         </span>
       </div>
@@ -67,14 +70,17 @@ export function Sidebar({ role }: Props) {
           "shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.12)]",
           "transition-transform duration-300 ease-in-out",
           mobileOpen ? "translate-x-0" : "-translate-x-[120%]",
-          collapsed ? "md:-translate-x-56" : "md:translate-x-0"
+          // Collapsed leaves a 16px sliver so the wordmark it uncovers (at the
+          // card's own brand position) keeps clear air beside it.
+          collapsed ? "md:-translate-x-60" : "md:translate-x-0"
         )}
       >
-        {/* Collapse toggle: rides the card's right edge so it stays reachable
-            while the card is tucked away */}
+        {/* Collapse toggle: rides the card's right edge, aligned with the brand
+            row. When collapsed the card slides left so the toggle ends up to
+            the right of the uncovered wordmark — clear of it. */}
         <button
           onClick={toggleCollapsed}
-          className="absolute -right-3.5 top-5 z-10 hidden h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground shadow-md transition hover:text-foreground md:flex"
+          className="absolute -right-3.5 top-3.5 z-10 hidden h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground shadow-md transition hover:text-foreground md:flex"
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
