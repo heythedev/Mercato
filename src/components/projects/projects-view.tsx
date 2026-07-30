@@ -82,7 +82,7 @@ const PROGRESS: Record<string, number> = {
 };
 
 const fieldClass =
-  "h-9 rounded-lg border border-border bg-background px-3 text-sm text-foreground shadow-sm transition " +
+  "h-9 rounded-full border border-border bg-background px-3 text-sm text-foreground transition " +
   "hover:border-foreground/20 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40";
 
 function useDismissible(open: boolean, onClose: () => void, rootRef: React.RefObject<HTMLDivElement | null>) {
@@ -531,7 +531,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
 
   return (
     <div className="p-4 sm:p-8 max-w-6xl mx-auto">
-      {/* Header */}
+      {/* Header — extra right padding on large screens clears the fixed pill */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
@@ -543,7 +543,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
         <button
           type="button"
           onClick={() => setNewProjectOpen(true)}
-          className="inline-flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
+          className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
         >
           <Plus className="w-4 h-4" />
           New project
@@ -593,7 +593,10 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
       {/* Search + filters — single row */}
       {projects.length > 0 && (
         <div className="mb-6 flex flex-wrap items-center gap-2">
-          <div className="relative min-w-48 flex-1 basis-48 max-w-xs">
+          {/* Match the first card's width: the card grid is 3 columns with a
+              1rem gap at lg, so one column = (100% - 2rem)/3. Stays flexible
+              below lg where the grid isn't 3-up. */}
+          <div className="relative min-w-48 flex-1 basis-48 max-w-xs lg:w-[calc((100%-2rem)/3)] lg:max-w-none lg:flex-none lg:basis-auto">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
             <input
               type="text"
@@ -631,7 +634,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
             type="button"
             onClick={clearFilters}
             disabled={!hasActiveFilters}
-            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border text-sm text-muted-foreground shadow-sm transition enabled:hover:bg-muted enabled:hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+            className="ml-auto inline-flex items-center gap-1.5 h-9 px-4 rounded-full border border-border text-sm text-muted-foreground transition enabled:hover:bg-muted enabled:hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <X className="w-3.5 h-3.5" />
             Clear
@@ -652,7 +655,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
           <button
             type="button"
             onClick={() => setNewProjectOpen(true)}
-            className="inline-flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
+            className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
           >
             <Plus className="w-4 h-4" />
             Create your first project

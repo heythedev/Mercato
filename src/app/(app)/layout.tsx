@@ -12,6 +12,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <div className="flex min-h-screen">
         <Sidebar role={role} />
         <SidebarInset>
+          {/* Floating action pill (theme + user menu) — replaces the old navbar */}
           <AppNavbar
             user={{
               id: user.id,
@@ -20,7 +21,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               role,
             }}
           />
-          <main className="flex-1">{children}</main>
+          {/* Clearance for the fixed action pill (top-right) + mobile sidebar
+              pill (top-left). Below lg the pills sit above the content (pt);
+              at lg+ the whole content region is inset on the right so every
+              row — headers, cards, tables — shares one boundary clear of the
+              pill. Applied once here so nothing has to pad itself. */}
+          <main className="flex-1 pt-14 lg:pt-0 lg:pr-52">{children}</main>
         </SidebarInset>
       </div>
     </SidebarProvider>

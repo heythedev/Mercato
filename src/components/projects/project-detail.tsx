@@ -330,7 +330,8 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
+      {/* Header. Extra right padding on large screens keeps the delete button
+          clear of the fixed top-right action pill. */}
       <div className="border-b py-5 shrink-0">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 sm:gap-4 sm:px-8">
           <Link
