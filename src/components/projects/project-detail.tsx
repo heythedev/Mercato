@@ -342,8 +342,16 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
           tint over the base background) keeps scrolling content from showing
           through the padding gaps around the header card. lg:pr-52 re-insets its
           content to match the other rows now that the root cancels the padding. */}
-      <div className="sticky top-14 lg:top-0 z-20 pt-5 pb-2 shrink-0 bg-background lg:pr-52">
-        <div className="pointer-events-none absolute inset-0 bg-muted/30" aria-hidden />
+      <div className="sticky top-14 lg:top-0 z-20 pt-5 pb-2 shrink-0 lg:pr-52">
+        {/* Opaque backdrop for the sticky band. On mobile it extends up over
+            the 56px pill strip (-top-14) so scrolling content can't peek
+            through between the floating pills and the header card. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 -top-14 bottom-0 bg-background lg:top-0"
+        >
+          <div className="absolute inset-0 bg-muted/30" />
+        </div>
         <div className="relative mx-auto max-w-6xl px-4 sm:px-8">
           <div className="flex items-center gap-3 sm:gap-4 rounded-3xl bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.08)] px-4 py-3 sm:px-5">
             <Link
