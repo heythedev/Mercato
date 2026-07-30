@@ -15,7 +15,6 @@ export type VendorRow = {
   [key: string]: unknown;
 };
 
-const MAX_FILE_ROWS = 15000;
 const MAX_FILE_COLS = 64;
 const HEADER_SCAN_ROWS = 25;
 
@@ -292,7 +291,6 @@ function gridToRows(grid: string[][]): VendorRow[] {
     if (row.every((c) => c === "")) continue;
     while (row.length < width) row.push("");
     dataRows.push(row);
-    if (dataRows.length >= MAX_FILE_ROWS) break;
   }
 
   if (!dataRows.length) return [];
@@ -407,9 +405,7 @@ function parseCsv(buffer: Buffer): VendorRow[] {
   const text = buffer.toString("utf-8").replace(/^﻿/, "");
   const lines = text.split(/\r?\n/);
   const delim = detectDelimiter(lines[0] ?? "");
-  const grid = lines
-    .slice(0, MAX_FILE_ROWS + HEADER_SCAN_ROWS)
-    .map((l) => parseCsvLine(l, delim));
+  const grid = lines.map((l) => parseCsvLine(l, delim));
   return gridToRows(grid);
 }
 
@@ -423,7 +419,7 @@ export async function parseVendorFile(buffer: Buffer, filename: string): Promise
   }
 
   try {
-    const { grid } = await readXlsxGrid(buffer, MAX_FILE_ROWS + HEADER_SCAN_ROWS);
+    const { grid } = await readXlsxGrid(buffer, Number.MAX_SAFE_INTEGER);
     return gridToRows(grid);
   } catch {
     throw new Error(
