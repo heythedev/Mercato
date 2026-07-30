@@ -3,9 +3,9 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
-import { LogOut, ChevronDown, Menu } from "lucide-react";
+import { useTheme } from "next-themes";
+import { LogOut, ChevronDown, Menu, Moon, Sun } from "lucide-react";
 import { useSidebar } from "./sidebar-context";
-import { ThemeToggle } from "@/components/theme-toggle";
 
 type User = { id: string; name?: string | null; email?: string | null; role: string };
 
@@ -18,6 +18,10 @@ export function AppNavbar({ user }: { user: User }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const { toggleMobile } = useSidebar();
+  // Safe without a mounted guard: the flyout only renders after a click,
+  // which is always post-hydration.
+  const { resolvedTheme, setTheme } = useTheme();
+  const isDark = resolvedTheme === "dark";
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -58,8 +62,6 @@ export function AppNavbar({ user }: { user: User }) {
 
       <div className="pointer-events-none fixed right-4 top-4 z-30">
         <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border/60 bg-background/70 p-1 shadow-lg backdrop-blur-md supports-[backdrop-filter]:bg-background/50">
-          <ThemeToggle className="rounded-full" />
-
         <div className="relative" ref={menuRef}>
           <button
             onClick={() => setMenuOpen((o) => !o)}
@@ -84,6 +86,13 @@ export function AppNavbar({ user }: { user: User }) {
                 </span>
               </div>
               <div className="p-1">
+                <button
+                  onClick={() => setTheme(isDark ? "light" : "dark")}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-accent"
+                >
+                  {isDark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+                  {isDark ? "Light mode" : "Dark mode"}
+                </button>
                 <button
                   onClick={async () => {
                     setMenuOpen(false);
