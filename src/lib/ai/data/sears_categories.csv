@@ -73,6 +73,7 @@ Clothing,Men's Clothing,Men's Suits & Blazers
 Clothing,Men's Clothing,Men's Outerwear & Jackets
 Clothing,Men's Clothing,Men's Sweaters & Hoodies
 Clothing,Men's Clothing,Men's Underwear & Socks
+Clothing,Men's Clothing,Men's Athletic & Activewear
 Clothing,Women's Clothing,Women's Tops & Blouses
 Clothing,Women's Clothing,Women's Pants & Jeans
 Clothing,Women's Clothing,Women's Skirts
@@ -81,6 +82,7 @@ Clothing,Women's Clothing,Women's Outerwear & Jackets
 Clothing,Women's Clothing,Women's Sweaters & Hoodies
 Clothing,Women's Clothing,Women's Intimates & Sleepwear
 Clothing,Women's Clothing,Women's Swimwear
+Clothing,Women's Clothing,Women's Athletic & Activewear
 Clothing,Kids' Clothing,Boys' Tops & T-Shirts
 Clothing,Kids' Clothing,Boys' Pants & Shorts
 Clothing,Kids' Clothing,Girls' Tops & Dresses
@@ -126,6 +128,10 @@ Electronics,Cameras,Digital & Mirrorless Cameras
 Electronics,Cameras,Indoor & Outdoor Security Cameras
 Electronics,Cameras,Action Cameras & Drones
 Electronics,Cameras,Camera Accessories
+Electronics,Networking,Wi-Fi Routers & Extenders
+Electronics,Networking,Modems & Gateways
+Electronics,GPS & Navigation,Portable GPS Devices
+Electronics,GPS & Navigation,Dash Cams
 Electronics,Smart Home,Smart Speakers & Displays
 Electronics,Smart Home,Smart Doorbells & Security Systems
 Electronics,Smart Home,Smart Thermostats
@@ -270,3 +276,33 @@ Health & Beauty,Vitamins & Supplements,Protein & Fitness Supplements
 Health & Beauty,Personal Care,Electric Toothbrushes
 Health & Beauty,Personal Care,Electric Shavers & Trimmers
 Health & Beauty,Personal Care,Deodorant & Body Care
+Mattresses,Mattresses,Innerspring Mattresses
+Mattresses,Mattresses,Memory Foam Mattresses
+Mattresses,Mattresses,Hybrid Mattresses
+Mattresses,Mattresses,Pillow Top Mattresses
+Mattresses,Mattresses,Firm & Extra Firm Mattresses
+Mattresses,Foundations & Frames,Box Springs & Foundations
+Mattresses,Foundations & Frames,Bed Frames & Bases
+Mattresses,Foundations & Frames,Adjustable Bases
+Mattresses,Mattress Accessories,Mattress Protectors & Toppers
+Pet Supplies,Dogs,Dog Food & Treats
+Pet Supplies,Dogs,Dog Beds & Furniture
+Pet Supplies,Dogs,Dog Crates & Carriers
+Pet Supplies,Dogs,Dog Collars Leashes & Harnesses
+Pet Supplies,Dogs,Dog Toys & Chews
+Pet Supplies,Dogs,Dog Grooming Supplies
+Pet Supplies,Cats,Cat Food & Treats
+Pet Supplies,Cats,Cat Trees & Furniture
+Pet Supplies,Cats,Cat Beds & Carriers
+Pet Supplies,Cats,Cat Litter & Accessories
+Pet Supplies,Cats,Cat Toys
+Pet Supplies,Small Animals & Fish,Cages & Aquariums
+Pet Supplies,Small Animals & Fish,Small Animal Bedding & Habitat
+Luggage & Travel,Luggage,Hardside Luggage
+Luggage & Travel,Luggage,Softside Luggage
+Luggage & Travel,Luggage,Luggage Sets
+Luggage & Travel,Bags,Travel Duffel Bags
+Luggage & Travel,Bags,Backpacks
+Luggage & Travel,Bags,Laptop & School Bags
+Luggage & Travel,Travel Accessories,Luggage Tags & Locks
+Luggage & Travel,Travel Accessories,Travel Pillows & Blankets
