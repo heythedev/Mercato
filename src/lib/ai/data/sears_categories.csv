@@ -89,6 +89,17 @@ Clothing,Kids' Clothing,Girls' Tops & Dresses
 Clothing,Kids' Clothing,Girls' Pants & Leggings
 Clothing,Kids' Clothing,Baby & Infant Clothing
 Clothing,Kids' Clothing,Toddler Clothing
+Clothing,Hats & Headwear,Baseball Caps & Snapbacks
+Clothing,Hats & Headwear,Beanies & Winter Hats
+Clothing,Hats & Headwear,Sun Hats & Straw Hats
+Clothing,Hats & Headwear,Novelty & Costume Hats
+Clothing,Hats & Headwear,Fedoras & Fashion Hats
+Clothing,Accessories,Scarves & Wraps
+Clothing,Accessories,Gloves & Mittens
+Clothing,Accessories,Belts
+Clothing,Accessories,Ties & Bow Ties
+Clothing,Accessories,Wallets & Cardholders
+Clothing,Accessories,Suspenders & Braces
 Clothing,Workwear,Work Shirts & Hi-Vis Tops
 Clothing,Workwear,Work Pants & Overalls
 Clothing,Workwear,Safety Vests & Protective Gear
@@ -271,11 +282,22 @@ Health & Beauty,Skincare,Sunscreen & SPF
 Health & Beauty,Hair Care,Shampoo & Conditioner
 Health & Beauty,Hair Care,Hair Styling Products
 Health & Beauty,Hair Care,Hair Dryers & Styling Tools
+Health & Beauty,Hair Care,Wigs & Hair Extensions
+Health & Beauty,Hair Care,Hair Accessories & Clips
 Health & Beauty,Vitamins & Supplements,Multivitamins
 Health & Beauty,Vitamins & Supplements,Protein & Fitness Supplements
 Health & Beauty,Personal Care,Electric Toothbrushes
 Health & Beauty,Personal Care,Electric Shavers & Trimmers
 Health & Beauty,Personal Care,Deodorant & Body Care
+Costumes & Party,Halloween Costumes,Adult Costumes
+Costumes & Party,Halloween Costumes,Kids' Costumes
+Costumes & Party,Halloween Costumes,Costume Accessories
+Costumes & Party,Wigs & Hair Pieces,Adult Wigs
+Costumes & Party,Wigs & Hair Pieces,Kids' Wigs
+Costumes & Party,Wigs & Hair Pieces,Novelty & Costume Wigs
+Costumes & Party,Party Supplies,Decorations & Banners
+Costumes & Party,Party Supplies,Tableware & Serveware
+Costumes & Party,Party Supplies,Balloons & Confetti
 Mattresses,Mattresses,Innerspring Mattresses
 Mattresses,Mattresses,Memory Foam Mattresses
 Mattresses,Mattresses,Hybrid Mattresses
