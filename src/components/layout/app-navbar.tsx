@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Link from "next/link";
 import { signOut } from "next-auth/react";
 import { LogOut, ChevronDown, Menu } from "lucide-react";
 import { useSidebar } from "./sidebar-context";
@@ -40,6 +41,19 @@ export function AppNavbar({ user }: { user: User }) {
         >
           <Menu className="h-5 w-5" />
         </button>
+      </div>
+
+      {/* Brand pill — centered between the sidebar trigger and the action
+          pill. Mobile only: on desktop the sidebar carries the branding. */}
+      <div className="pointer-events-none fixed left-1/2 top-4 z-30 -translate-x-1/2 md:hidden">
+        <Link
+          href="/projects"
+          className="pointer-events-auto flex h-[42px] items-center rounded-full border border-border/60 bg-background/70 px-5 shadow-lg backdrop-blur-md supports-[backdrop-filter]:bg-background/50"
+        >
+          <span className="text-base font-semibold tracking-wide [font-family:var(--font-brand)]">
+            Mercato
+          </span>
+        </Link>
       </div>
 
       <div className="pointer-events-none fixed right-4 top-4 z-30">

@@ -790,7 +790,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="inline-flex items-center gap-1 h-8 px-2 sm:px-3 rounded-lg border text-sm font-medium hover:bg-muted transition disabled:opacity-40 disabled:pointer-events-none"
+              className="inline-flex items-center gap-1 h-8 px-2 sm:px-3 rounded-full border text-sm font-medium hover:bg-muted transition disabled:opacity-40 disabled:pointer-events-none"
               aria-label="Previous page"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
@@ -808,7 +808,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
                   onClick={() => setPage(n)}
                   aria-current={n === currentPage ? "page" : undefined}
                   className={cn(
-                    "inline-flex items-center justify-center h-8 min-w-8 px-2 rounded-lg border text-sm font-medium transition",
+                    "inline-flex items-center justify-center h-8 min-w-8 px-2 rounded-full border text-sm font-medium transition",
                     n === currentPage
                       ? "bg-primary text-primary-foreground border-primary"
                       : "hover:bg-muted"
@@ -822,7 +822,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
-              className="inline-flex items-center gap-1 h-8 px-2 sm:px-3 rounded-lg border text-sm font-medium hover:bg-muted transition disabled:opacity-40 disabled:pointer-events-none"
+              className="inline-flex items-center gap-1 h-8 px-2 sm:px-3 rounded-full border text-sm font-medium hover:bg-muted transition disabled:opacity-40 disabled:pointer-events-none"
               aria-label="Next page"
             >
               <span className="hidden sm:inline">Next</span>

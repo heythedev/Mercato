@@ -45,47 +45,51 @@ export function Sidebar({ role }: Props) {
         />
       )}
 
+      {/* Backdrop branding — sits BEHIND the card (lower z-index), so the
+          sliding card physically covers it when open and uncovers it when
+          tucked away. Positioned below the edge-riding toggle so the two
+          never overlap while collapsed. */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed left-16 top-16 z-10 hidden select-none md:block"
+      >
+        <span className="text-xl font-semibold tracking-wide text-foreground/80 [font-family:var(--font-brand)]">
+          Mercato
+        </span>
+      </div>
+
+      {/* Floating card. Open: floats detached from the edges. Collapsed
+          (desktop): slides left with only a sliver of the card + the arrow
+          peeking in from the edge. Mobile: slides fully off-screen. */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r bg-card transition-[transform,width] duration-200 md:translate-x-0",
-          collapsed ? "md:w-16" : "md:w-60",
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
+          "fixed bottom-4 left-4 top-4 z-50 flex w-60 flex-col rounded-3xl border border-border/50 bg-card",
+          "shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.12)]",
+          "transition-transform duration-300 ease-in-out",
+          mobileOpen ? "translate-x-0" : "-translate-x-[120%]",
+          collapsed ? "md:-translate-x-56" : "md:translate-x-0"
         )}
       >
-        {/* Collapse toggle: floats on the sidebar's edge */}
+        {/* Collapse toggle: rides the card's right edge so it stays reachable
+            while the card is tucked away */}
         <button
           onClick={toggleCollapsed}
-          className="absolute -right-3 top-4 z-10 hidden h-6 w-6 items-center justify-center rounded-full border bg-card text-muted-foreground shadow-sm transition hover:text-foreground md:flex"
+          className="absolute -right-3.5 top-5 z-10 hidden h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground shadow-md transition hover:text-foreground md:flex"
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           {collapsed ? (
-            <ChevronsRight className="h-3.5 w-3.5" />
+            <ChevronsRight className="h-4 w-4" />
           ) : (
-            <ChevronsLeft className="h-3.5 w-3.5" />
+            <ChevronsLeft className="h-4 w-4" />
           )}
         </button>
 
         {/* Brand */}
-        <div
-          className={cn(
-            "flex h-14 shrink-0 items-center gap-3 border-b px-4",
-            collapsed && "md:justify-center md:px-2"
-          )}
-        >
-          <span
-            className={cn(
-              "truncate text-xl font-semibold tracking-wide [font-family:var(--font-brand)]",
-              collapsed && "md:hidden"
-            )}
-          >
+        <div className="flex h-14 shrink-0 items-center gap-3 border-b border-border/50 px-5">
+          <span className="truncate text-xl font-semibold tracking-wide [font-family:var(--font-brand)]">
             Mercato
           </span>
-          {collapsed && (
-            <span className="hidden text-xl font-semibold tracking-wide [font-family:var(--font-brand)] md:block">
-              M
-            </span>
-          )}
 
           <button
             onClick={closeMobile}
@@ -105,17 +109,15 @@ export function Sidebar({ role }: Props) {
                 key={href}
                 href={href}
                 onClick={closeMobile}
-                title={collapsed ? label : undefined}
                 className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                  collapsed && "md:justify-center md:px-0",
+                  "flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium transition-colors",
                   active
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:bg-accent hover:text-foreground"
                 )}
               >
                 <Icon className="h-4 w-4 shrink-0" />
-                <span className={cn(collapsed && "md:hidden")}>{label}</span>
+                <span>{label}</span>
               </Link>
             );
           })}

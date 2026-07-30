@@ -55,11 +55,15 @@ export function useSidebar() {
 
 export function SidebarInset({ children }: { children: ReactNode }) {
   const { collapsed } = useSidebar();
+  // Sidebar card: left-4 (16px) + w-60 (240px) → right edge at 256px, so open
+  // content starts at ml-68 (272px) leaving a 16px gutter. Collapsed, the card
+  // slides to a ~32px sliver and uncovers the backdrop "Mercato" wordmark
+  // (left-16, ends ~152px), so content stops at ml-44 (176px) to leave it room.
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-1 flex-col transition-[margin] duration-200",
-        collapsed ? "md:ml-16" : "md:ml-60"
+        "flex min-w-0 flex-1 flex-col transition-[margin] duration-300 ease-in-out",
+        collapsed ? "md:ml-44" : "md:ml-68"
       )}
     >
       {children}
