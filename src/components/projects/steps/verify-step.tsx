@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ShieldCheck, Loader2, ChevronDown, ChevronUp,
-  CheckCircle2, AlertTriangle, XCircle, HelpCircle, Download, ThumbsUp, Ban, Sparkles,
+  CheckCircle2, AlertTriangle, XCircle, HelpCircle, Download, ThumbsUp, Ban, Sparkles, RefreshCw,
 } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
 import { LottieLoader } from "@/components/ui/lottie-loader";
@@ -53,7 +54,7 @@ const FIELD_SEVERITY = {
   mismatch: "text-red-600",
 };
 
-export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, onRunVerify, onApproveProduct, onMarkDiscontinued, onNext }: {
+export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onNext }: {
   projectId: string;
   projectName: string;
   marketplace: string;
@@ -70,12 +71,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   onRunVerify: (force?: boolean) => void;
   onApproveProduct: (productId: string) => Promise<void>;
   onMarkDiscontinued: (productId: string) => Promise<void>;
+  onReverifyProduct: (productId: string) => Promise<void>;
   onNext: () => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [approving, setApproving] = useState<string | null>(null);
   const [discontinuing, setDiscontinuing] = useState<string | null>(null);
+  const [reverifying, setReverifying] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   // A product can carry verifyStatus="discontinued" straight from import (the
@@ -317,6 +320,19 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                       Discontinued
                     </button>
                   )}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setReverifying(p.id);
+                      onReverifyProduct(p.id).finally(() => setReverifying(null));
+                    }}
+                    disabled={reverifying === p.id}
+                    title="Re-verify this product"
+                    className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border hover:bg-accent transition shrink-0 disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-3 h-3", reverifying === p.id && "animate-spin")} />
+                    Re-verify
+                  </button>
                   {isOpen ? <ChevronUp className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />}
                 </div>
 
@@ -445,10 +461,13 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         </div>
       )}
 
-      {/* Image preview modal — opens when a thumbnail is clicked */}
-      {previewImage && (
+      {/* Image preview modal — opens when a thumbnail is clicked. Rendered
+          through a portal to <body>: inside the step card it would sit in the
+          page's z-10 stacking context and be painted UNDER the sticky header
+          (z-20) and floating pills (z-30). z-[100] also clears the sidebar. */}
+      {previewImage && createPortal(
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
           onClick={() => setPreviewImage(null)}
         >
           <div className="relative max-h-full max-w-3xl" onClick={(e) => e.stopPropagation()}>
@@ -466,7 +485,8 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               className="max-h-[80vh] max-w-full rounded-lg bg-white object-contain shadow-xl"
             />
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

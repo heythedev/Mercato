@@ -13,6 +13,7 @@ const MARKETPLACE_LABELS: Record<string, string> = {
   temu: "Temu",
   mathis: "Mathis",
   sears: "Sears",
+  wayfair: "Wayfair",
 };
 
 export default async function ProjectsPage() {

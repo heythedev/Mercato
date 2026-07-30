@@ -53,7 +53,7 @@ const STEPS = [
 
 const AMAZON_SKIP_CATEGORIZE = true;
 // These marketplaces have no public API for verification — skip straight to Categorize
-const SKIP_VERIFY = new Set(["temu", "bestbuy", "mathis", "sears"]);
+const SKIP_VERIFY = new Set(["temu", "bestbuy", "mathis", "sears", "wayfair"]);
 
 
 function stepIndex(status: string) {
@@ -65,12 +65,12 @@ function stepIndex(status: string) {
 
 const MARKETPLACE_LABELS: Record<string, string> = {
   amazon_us: "Amazon US", amazon: "Amazon", bestbuy: "Best Buy", walmart: "Walmart",
-  temu: "Temu", mathis: "Mathis", sears: "Sears",
+  temu: "Temu", mathis: "Mathis", sears: "Sears", wayfair: "Wayfair",
 };
 
 const MARKETPLACE_DOMAIN: Record<string, string> = {
   amazon_us: "amazon.com", amazon: "amazon.com", bestbuy: "bestbuy.com", walmart: "walmart.com",
-  temu: "temu.com", mathis: "mathishome.com", sears: "sears.com",
+  temu: "temu.com", mathis: "mathishome.com", sears: "sears.com", wayfair: "wayfair.com",
 };
 
 function MarketplaceLogo({ marketplace, className }: { marketplace: string; className?: string }) {
@@ -307,6 +307,35 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     setProducts((prev) => prev.map((p) => p.id === productId ? { ...p, verifyStatus: "discontinued" } : p));
   }
 
+  async function handleReverifyProduct(productId: string) {
+    const res = await fetch(`/api/projects/${project.id}/verify/product`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast.error(data.error ?? "Failed to re-verify product");
+      return;
+    }
+    const u = data.product as {
+      id: string; asin: string | null; upc: string | null;
+      verifyStatus: string | null; verifyFields: Record<string, unknown>[] | null;
+      verifiedAt: string | null;
+    };
+    setProducts((prev) => prev.map((p) => p.id === productId
+      ? {
+          ...p,
+          asin: u.asin,
+          upc: u.upc,
+          verifyStatus: u.verifyStatus,
+          verifyFields: u.verifyFields,
+          verifiedAt: u.verifiedAt ? new Date(u.verifiedAt) : p.verifiedAt,
+        }
+      : p));
+    toast.success("Product re-verified");
+  }
+
   async function handleDelete() {
     const ok = await confirm({
       title: `Delete "${project.name}"?`,
@@ -336,7 +365,11 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     // tints the whole page; -mr-52 cancels the layout's right inset so the tint
     // fills edge-to-edge with no mismatched strip. Content stays centered via
     // its max-w-6xl columns, clear of the top-right pill.
-    <div className="relative flex flex-col min-h-screen bg-muted/30 lg:-mr-52">
+    <div className="relative flex flex-col min-h-screen lg:-mr-52">
+      {/* Full-bleed page tint. A fixed underlay (rather than a bg on this box)
+          so the sidebar gutter on the left gets the same tint — the root only
+          starts at the sidebar inset, which left a white seam beside it. */}
+      <div aria-hidden className="fixed inset-0 -z-10 bg-muted/30" />
       {/* Header — sticky against the window scroll so it stays pinned at the top.
           The stepper and step content below scroll under it. The solid bg (page
           tint over the base background) keeps scrolling content from showing
@@ -483,6 +516,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             onRunVerify={runVerify}
             onApproveProduct={handleApproveProduct}
             onMarkDiscontinued={handleMarkDiscontinued}
+            onReverifyProduct={handleReverifyProduct}
             marketplace={project.marketplace}
             elapsedMs={project.verifyMs ?? null}
             completedAt={project.verifyCompletedAt ?? null}

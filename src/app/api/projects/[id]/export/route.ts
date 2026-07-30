@@ -171,11 +171,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const isBestBuy = mpLower === "bestbuy";
       const isWalmart = mpLower === "walmart";
       const isSears = mpLower === "sears";
+      const isWayfair = mpLower === "wayfair";
       // Category-split marketplaces: products grouped by category, each group filled into
       // the closest matching uploaded template (one output file per template).
-      const usesCategoryExport = isTemu || isBestBuy || isWalmart;
+      // Wayfair is category-split too, but by Wayfair *class* — the 1,305 PL SKUs span
+      // multiple classes, each needing its own class-specific template workbook. The
+      // per-class template fill uses a Wayfair-aware header profile (7 header rows,
+      // data at row 8) inside fillTemplateXlsx — see WAYFAIR_HEADER_PROFILE in zip.ts.
+      const usesCategoryExport = isTemu || isBestBuy || isWalmart || isWayfair;
 
       setJobPhase(jobId, "Building spreadsheet files…");
+
+      // Wayfair's class templates have a 7-row header block (data starts row 8) plus a
+      // hidden validation engine — the shared fillTemplateXlsx would corrupt them. The
+      // dedicated Wayfair filler (wayfair-fill.ts) is not enabled yet, so guard any
+      // template-based Wayfair export rather than silently producing a broken workbook.
+      // The no-template flat export below is safe (standard flat columns).
+      if (isWayfair && ((useTemplateIds && allTemplates.length) || allTemplates.length)) {
+        throw new Error(
+          "Wayfair template export is not enabled yet. The dedicated Wayfair class-template " +
+          "filler requires Wayfair's real Product Addition Template workbook and per-class " +
+          "attribute schemas (see src/lib/export/wayfair-fill.ts). Export without a template " +
+          "to produce a flat column file in the meantime.",
+        );
+      }
 
       let zipBuffer: Buffer;
       let missingTemplateCategories: string[] = [];

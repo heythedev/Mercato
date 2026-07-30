@@ -11,7 +11,10 @@ export default function ProjectLoading() {
     // Mirrors ProjectDetail: window-scrolled page (min-h-screen, no inner
     // overflow so sticky works), bg-muted/30 with -mr-52 to fill edge-to-edge,
     // sticky header card, the rest scrolls under it.
-    <div className="relative flex flex-col min-h-screen bg-muted/30 lg:-mr-52">
+    <div className="relative flex flex-col min-h-screen lg:-mr-52">
+      {/* Full-bleed page tint — mirrors ProjectDetail's fixed underlay so the
+          sidebar gutter is tinted too (no white seam / color flash). */}
+      <div aria-hidden className="fixed inset-0 -z-10 bg-muted/30" />
       {/* Header card — sticky (matches the real layout). */}
       <div className="sticky top-14 lg:top-0 z-20 pt-5 pb-2 shrink-0 bg-background lg:pr-52">
         <div className="pointer-events-none absolute inset-0 bg-muted/30" aria-hidden />

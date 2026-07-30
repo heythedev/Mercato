@@ -117,9 +117,13 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
   for (const r of results) {
     const field = r.fields.find((f) => f.field === "images");
     if (!field || !isUrl(field.stored)) continue;
-    // Collect ALL marketplace images — compare vendor against each angle for best match
+    // Compare ONLY against the primary marketplace image (images[0]) — the exact
+    // shot the UI shows as the thumbnail (see field.liveImage = liveImages[0]).
+    // Comparing extra angles flagged alternate views (e.g. a back shot) the
+    // reviewer never sees, producing "images differ" on rows that look identical
+    // on screen. The verdict must match what the user is actually looking at.
     const liveImages = Array.isArray(r.liveData.images) ? r.liveData.images as string[] : [];
-    const liveImageUrls = liveImages.filter(isUrl);
+    const liveImageUrls = liveImages.filter(isUrl).slice(0, 1);
     if (!liveImageUrls.length) continue;
     targets.push({ result: r, field, liveImageUrls });
   }

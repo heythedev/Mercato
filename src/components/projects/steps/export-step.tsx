@@ -98,9 +98,11 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const isMathis = marketplace === "mathis";
   const isTemu = marketplace === "temu";
   const isBestBuy = marketplace === "bestbuy";
+  const isWayfair = marketplace === "wayfair";
   // Category-split marketplaces: one file per category, matched to template automatically.
   // Walmart uses single-template picker (like Amazon) so users can choose their template.
-  const usesCategoryZip = isMathis || isTemu || isBestBuy;
+  // Wayfair splits per class (one class-specific template workbook per file).
+  const usesCategoryZip = isMathis || isTemu || isBestBuy || isWayfair;
 
   useEffect(() => {
     mountedRef.current = true;

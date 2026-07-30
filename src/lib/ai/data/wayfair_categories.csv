@@ -1,0 +1,8 @@
+Class Code,Class Name
+# ⚠️ PLACEHOLDER — populate from Wayfair's real class taxonomy before use.
+# Shape: "Class Code,Class Name". One row per Wayfair class the PL SKUs map to.
+# Example (from the sample template, DO NOT rely on this single class):
+# 6115,Luggage Racks
+# The loader (wayfair-taxonomy.ts) throws if no real rows are present, so
+# Wayfair categorization stays blocked until this file is filled in — this is
+# deliberate: the previous integration was reverted for inventing categories.
