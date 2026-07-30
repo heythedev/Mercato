@@ -37,6 +37,8 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       id: true,
       userId: true,
       marketplace: true,
+      verifyMs: true,
+      verifyCompletedAt: true,
       products: {
         select: {
           id: true,
@@ -67,9 +69,21 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     ? project.products
     : project.products.filter((p) => p.verifyStatus == null);
 
+  // A fresh run (explicit re-verify, or nothing verified yet) resets the timer;
+  // a resume ("Continue") adds this pass onto the accumulated time.
+  const isFreshStart = force || project.products.every((p) => p.verifyStatus == null);
+  const priorMs = isFreshStart ? 0 : (project.verifyMs ?? 0);
+
   // Nothing left to do — the project is already fully verified.
   if (allProducts.length === 0) {
-    await prisma.project.update({ where: { id }, data: { status: "verified" } });
+    await prisma.project.update({
+      where: { id },
+      data: {
+        status: "verified",
+        // Stamp a completion time if one was never recorded (e.g. legacy runs).
+        ...(project.verifyCompletedAt == null ? { verifyCompletedAt: new Date() } : {}),
+      },
+    });
     return NextResponse.json({
       verified: 0,
       skipped: 0,
@@ -107,7 +121,14 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     }
   }
 
-  await prisma.project.update({ where: { id }, data: { status: "verifying" } });
+  await prisma.project.update({
+    where: { id },
+    data: {
+      status: "verifying",
+      // On a fresh run clear the previous timing so it accumulates from zero.
+      ...(isFreshStart ? { verifyMs: 0, verifyCompletedAt: null } : {}),
+    },
+  });
 
   let totalProcessed = 0;
   let totalSkipped = 0;
@@ -212,11 +233,19 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     const remaining = allProducts.length - attempted;
     const complete = remaining === 0;
 
+    // Active time of this pass, accumulated onto prior passes. Idle gaps between
+    // "Continue" clicks are not counted — only time spent inside a POST.
+    const accumulatedMs = priorMs + (Date.now() - startedAt);
+
     // Only claim "verified" once every product has actually been checked;
     // otherwise leave the project resumable rather than falsely complete.
     await prisma.project.update({
       where: { id },
-      data: { status: complete ? "verified" : "uploaded" },
+      data: {
+        status: complete ? "verified" : "uploaded",
+        verifyMs: accumulatedMs,
+        ...(complete ? { verifyCompletedAt: new Date() } : {}),
+      },
     });
 
     return NextResponse.json({
@@ -230,7 +259,11 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   } catch (err) {
     // Work already committed to the DB is preserved; the project drops back to
     // "uploaded" so the next call resumes with whatever is still unverified.
-    await prisma.project.update({ where: { id }, data: { status: "uploaded" } });
+    // Keep the time spent so far so the accumulator stays accurate on resume.
+    await prisma.project.update({
+      where: { id },
+      data: { status: "uploaded", verifyMs: priorMs + (Date.now() - startedAt) },
+    });
     const msg = err instanceof Error ? err.message : "Verification failed";
     return NextResponse.json(
       { error: msg, verified: totalProcessed, resumable: true },

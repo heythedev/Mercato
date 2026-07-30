@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ShieldCheck, Loader2, ChevronDown, ChevronUp,
   CheckCircle2, AlertTriangle, XCircle, HelpCircle, Download, ThumbsUp, Ban, Sparkles,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatDuration } from "@/lib/utils";
+import { LottieLoader } from "@/components/ui/lottie-loader";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
 
@@ -52,7 +53,7 @@ const FIELD_SEVERITY = {
   mismatch: "text-red-600",
 };
 
-export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, onRunVerify, onApproveProduct, onMarkDiscontinued, onNext }: {
+export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, onRunVerify, onApproveProduct, onMarkDiscontinued, onNext }: {
   projectId: string;
   projectName: string;
   marketplace: string;
@@ -64,6 +65,8 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   discontinuedCount: number;
   loading: boolean;
   projectStatus: string;
+  elapsedMs?: number | null;
+  completedAt?: string | null;
   onRunVerify: (force?: boolean) => void;
   onApproveProduct: (productId: string) => Promise<void>;
   onMarkDiscontinued: (productId: string) => Promise<void>;
@@ -75,13 +78,44 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const [discontinuing, setDiscontinuing] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  const hasResults = products.some((p) => p.verifyStatus);
+  // A product can carry verifyStatus="discontinued" straight from import (the
+  // vendor sheet's status column), so its mere presence does NOT mean
+  // verification has run. Treat the report as available only once the project
+  // has actually been verified, or a product has a status that only
+  // verification produces (ok/warning/mismatch/not_found).
+  // Pre-verification states: the project has been created/imported but
+  // verification has not produced results yet.
+  const preVerify = projectStatus === "processing" || projectStatus === "uploaded";
+  const hasResults =
+    !preVerify ||
+    products.some((p) => p.verifyStatus && p.verifyStatus !== "discontinued");
 
   const marketplaceLabel =
     marketplace === "walmart" ? "Walmart" :
     marketplace === "amazon_us" ? "Amazon US" :
     marketplace === "amazon" ? "Amazon" :
     marketplace.charAt(0).toUpperCase() + marketplace.slice(1);
+
+  // Live running timer while verifying. The server persists elapsedMs only on
+  // completion, so we tick client-side from the moment this pass started.
+  // Verification is resumable, so we add onto any time accumulated so far.
+  const [liveElapsedMs, setLiveElapsedMs] = useState<number | null>(null);
+  const passStartRef = useRef<number | null>(null);
+  const priorMsRef = useRef(0);
+  useEffect(() => {
+    if (loading) {
+      if (passStartRef.current == null) {
+        passStartRef.current = Date.now();
+        priorMsRef.current = completedAt ? 0 : (elapsedMs ?? 0);
+      }
+      const tick = () => setLiveElapsedMs(priorMsRef.current + (Date.now() - passStartRef.current!));
+      tick();
+      const iv = setInterval(tick, 1000);
+      return () => clearInterval(iv);
+    }
+    passStartRef.current = null;
+    setLiveElapsedMs(null);
+  }, [loading, elapsedMs, completedAt]);
 
   const visibleProducts = activeFilter
     ? products.filter((p) => (p.verifyStatus ?? "not_found") === activeFilter)
@@ -118,6 +152,16 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
           <p className="text-sm text-muted-foreground mt-0.5">
             Compare catalog data against live {marketplaceLabel} listings — title, images, description &amp; dimensions
           </p>
+          {loading && formatDuration(liveElapsedMs) && (
+            <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
+              Verifying… {formatDuration(liveElapsedMs)} elapsed
+            </p>
+          )}
+          {!loading && completedAt && formatDuration(elapsedMs) && (
+            <p className="text-xs text-green-700 mt-1 font-medium">
+              Verification done in {formatDuration(elapsedMs)}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:gap-3">
           {hasResults && (
@@ -136,7 +180,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               disabled={loading}
               className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
             >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+              <ShieldCheck className="w-4 h-4" />
               Re-verify
             </button>
           )}
@@ -145,7 +189,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             disabled={loading}
             className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition disabled:opacity-50"
           >
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+            {loading ? <LottieLoader size={20} onDark className="-my-2" /> : <ShieldCheck className="w-4 h-4" />}
             {loading ? "Verifying…" : hasResults ? "Continue →" : "Run verification"}
           </button>
         </div>
@@ -206,9 +250,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
       {loading && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
-          <Loader2 className="w-10 h-10 animate-spin text-primary mb-4" />
+          <LottieLoader size={96} className="mb-2" />
           <p className="text-sm font-medium">Verifying products against {marketplaceLabel}…</p>
           <p className="text-xs text-muted-foreground mt-1">This may take a few minutes</p>
+          {formatDuration(liveElapsedMs) && (
+            <p className="text-sm font-medium mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
+          )}
         </div>
       )}
 

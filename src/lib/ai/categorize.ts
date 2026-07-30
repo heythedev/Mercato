@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generateText, type ModelMessage } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
@@ -100,10 +100,13 @@ function buildCategoryGuide(categories: string[]): string {
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
+export type CategorizeProgress = (done: number, total: number, note?: string) => void;
+
 export async function categorizeProducts(
   marketplace: string,
   products: ProductInput[],
   availableCategories?: string[],
+  onProgress?: CategorizeProgress,
 ): Promise<CategorizeResult[]> {
   const mpLower = marketplace.toLowerCase();
   const isMathis = mpLower === "mathis";
@@ -146,8 +149,19 @@ export async function categorizeProducts(
     (isMathis || isBestBuyTop || isTemuTop || isWalmartTop || isSearsTop) && !!availableCategories?.length;
 
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
-  const BATCH = (isTemuTop || isMathis || isBestBuyTop || isWalmartTop || isSearsTop) ? 5 : isConstrained ? 8 : 20;
-  const PARALLEL = isConstrained ? 2 : 3;
+  // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
+  //
+  // Throughput: batch size × parallelism sets how many products clear per model
+  // round-trip. The old 5×2 meant a 3,000-product Walmart/Mathis run made ~300
+  // serial waves (~25 min) and blew the 300 s request limit. 12×8 processes the
+  // same run in ~30 waves (a few minutes) while keeping each prompt small enough
+  // that the full taxonomy sheet + product context still fits the context window.
+  // Tunable without a redeploy via env for very large sheets.
+  const BATCH = Number(
+    process.env.CATEGORIZE_BATCH_SIZE ??
+      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 12 : isConstrained ? 12 : 20),
+  );
+  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 8 : 6));
 
   const model = availableCategories?.length
     ? (process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-sonnet-5")
@@ -172,6 +186,10 @@ export async function categorizeProducts(
         ? s.value
         : group[gi].map((p) => ({ productId: p.id, category: fallback, path: fallback, confidence: 0.1 }))));
     });
+    // Report progress after every parallel wave. The job store's updatedAt advances,
+    // so the client's stall detector sees a live run instead of one frozen phase string
+    // for the whole (multi-minute) categorization of a large project.
+    onProgress?.(Math.min(allResults.length, products.length), products.length);
   }
 
   // ── Validation pass ────────────────────────────────────────────────────────
@@ -197,6 +215,8 @@ export async function categorizeProducts(
             if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; }
           }
         }
+        // Keep the run visibly alive through the retry pass too.
+        onProgress?.(Math.min(i + batch.length, retryInputs.length), retryInputs.length, "correcting off-list results");
       }
     }
 
@@ -227,6 +247,7 @@ export async function categorizeProducts(
             if (idx !== -1) allResults[idx] = r;
           }
         } catch { /* keep Uncategorized */ }
+        onProgress?.(Math.min(i + batch.length, enriched.length), enriched.length, "web-search rescue");
       }
     }
   }
@@ -413,6 +434,21 @@ MATHIS RULES (mandatory — taxonomy over assumptions):
 5. Use "Uncategorized" only if no listed path's product type matches at all.
 6. Lighting → "Decor > Lighting …". Window treatments → "Decor > Window Treatments …". Holiday decor → "Seasonal > …".` : "";
 
+  // Temu's taxonomy has several branches that cover overlapping objects, which is
+  // where the model most often picks a near-miss leaf. These tie-breakers encode
+  // the rule Temu's own catalog uses: categorize by the item's PRIMARY FUNCTION /
+  // material, not by an adjacent attribute (who it's for, what it attaches to).
+  const temuDisambiguationRule = isTemu ? `
+TEMU DISAMBIGUATION (apply when more than one section could fit — resolve by PRIMARY FUNCTION, not by audience, brand, color, or theme):
+1. AUDIENCE ISN'T A CATEGORY. A hat, shoe, or necklace for a child is still a hat/shoe/necklace → its object section (Jewelry & Accessories, Shoes), NOT "Kids & Baby". Use "Kids & Baby" only for items that are inherently infant/toddler gear (diapers, baby bottles, cribs, strollers).
+2. FUNCTION OVER ATTACHMENT. Categorize by what the item IS, not what it holds or connects to. A phone case → Electronics accessories, NOT Bags & Luggage. A watch band → Jewelry & Accessories, NOT Electronics. A laptop sleeve → Bags & Luggage only if it is a carry bag, else Electronics accessory.
+3. APPAREL vs COSTUME. Everyday wearable clothing → Men's/Women's Clothing. Themed/holiday/character dress-up → "Holidays & Party > Costumes & Dress-Up". A "kids suit" for daily wear is clothing; a "kids pirate outfit" is a costume.
+4. DECOR vs SEASONAL. Generic home decor → "Home & Garden". Items tied to a specific holiday (Christmas, Halloween, Easter) → "Holidays & Party".
+5. MATERIAL/CRAFT vs FINISHED GOOD. Raw supplies to make something → "Arts & Crafts" or "Office & School Supplies". A finished decorated object → its object section.
+6. TOOL vs APPLIANCE. Hand/power tools → "Tools & Home Improvement". Plug-in household machines (blender, vacuum, air fryer) → "Home Appliances". Kitchen-specific electric gadgets → "Kitchen & Dining".
+7. SPORT/OUTDOOR vs GENERAL. Gear used for a specific sport or outdoor activity → "Sports & Outdoors". General-use versions of the same object go to their object section (a plain water bottle → Kitchen & Dining; a hydration pack → Sports & Outdoors).
+8. When two leaves remain equally valid after these rules, pick the MORE SPECIFIC leaf and lower your confidence (≤0.7) so it is flagged for review.` : "";
+
   // Walmart's own category list legitimately includes single-word values like
   // "Other", "Furniture" and "Toys", so the generic "never output these" rule
   // must not apply — only forbid inventing values that aren't on the list.
@@ -425,7 +461,7 @@ RULES:
 ${noInventRule}
 3. "Uncategorized" is only for products that genuinely don't belong in ANY listed category
 4. Use product name, brand, description, vendor category as signals to identify WHAT the product is — then map that to the taxonomy leaf
-5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}` : "";
+5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}${temuDisambiguationRule}` : "";
 
   const usesTaxonomySheet = isTemu || isMathis || isBestBuy || isWalmart || isSears;
   // The fuzzy-match floor: rich multi-word paths need a higher bar than the flat
@@ -454,48 +490,108 @@ ${noInventRule}
     ? `- category and path: must be the exact leaf path from the taxonomy sheet (e.g. "Baby & Kids > Kids Furniture > Daybeds" when the product is a daybed — because that is where Daybeds lives on the sheet)`
     : `- path: full path e.g. "Mathis Brothers > Seasonal"`;
 
-  // For taxonomy-driven marketplaces, put the product list BEFORE the taxonomy so the AI
-  // reasons about each product's type first, then looks up the taxonomy.
-  const prompt = (isTemu || isBestBuy || isSears)
+  // ── Prompt caching split ─────────────────────────────────────────────────
+  // The taxonomy sheet (~10K tokens for Temu, up to ~12K for Mathis/Walmart) is
+  // IDENTICAL for every batch of a given marketplace. Sending it inline on every
+  // request re-bills those tokens each time (a 500-product run = ~100 batches ×
+  // ~10K = ~1M redundant input tokens). We move all the STATIC content — store
+  // context, reasoning steps, the taxonomy, and the rules — into a `system`
+  // message marked with Anthropic prompt caching, and keep only the VARIABLE
+  // product list in the user prompt. On a cache hit the taxonomy costs ~10% of
+  // full price, so throughput/cost improve without touching categorization logic.
+  //
+  // For Temu/BestBuy the previous single-string prompt put products BEFORE the
+  // taxonomy to avoid the model anchoring on the first taxonomy entries. Caching
+  // forces the taxonomy (system) to be the prefix, so we preserve the intent a
+  // different way: the STEP 1→2→3 reasoning instruction (identify the physical
+  // noun first, THEN look up the taxonomy) lives in system, and the user message
+  // re-states "work through the steps for EACH product first" right before the
+  // product list — keeping the reason-first behavior without the ordering hack.
+  const systemPrompt = (isTemu || isBestBuy)
     ? `${storeContext}
 
 ${reasoningInstruction}
 
-Products to categorize:
-${list}
-
-Now assign each product into ${categorySection}.
-
-Respond ONLY with a JSON array — no markdown, no explanation:
-${jsonExample}
-${rules}
-${pathHint}
-- confidence: 0.0–1.0 (how certain you are about the match)
-- Return exactly ${products.length} items in the same order as the product list`
+You will assign each product into ${categorySection}
+${rules}`
     : `${storeContext}
 
 ${reasoningInstruction}
 
-Categorize each product into ${categorySection}.
+You will categorize each product into ${categorySection}
+${rules}`;
 
-Products:
+  const userPrompt = (isTemu || isBestBuy)
+    ? `Work through STEP 1→2→3 for EACH product below before answering.
+
+Products to categorize:
 ${list}
 
 Respond ONLY with a JSON array — no markdown, no explanation:
 ${jsonExample}
-${rules}
+${pathHint}
+- confidence: 0.0–1.0 (how certain you are about the match)
+- Return exactly ${products.length} items in the same order as the product list`
+    : `Products:
+${list}
+
+Respond ONLY with a JSON array — no markdown, no explanation:
+${jsonExample}
 ${pathHint}
 - confidence: 0.0–1.0 (how certain you are)
 - Return exactly ${products.length} items in the same order as the product list`;
 
-  const { text } = await generateText({
+  // Output-token budget scales with batch size. A fixed 2500 truncated the JSON for a
+  // full batch of long Mathis/Temu paths, and a truncated array dropped the tail
+  // products of the batch — the "large batches failing" symptom. ~110 tokens/item plus
+  // headroom keeps the whole array inside the response.
+  const perItemTokens = usesTaxonomySheet ? 110 : 80;
+  const maxOutputTokens = Math.min(8000, Math.max(1500, products.length * perItemTokens + 500));
+
+  // Cache the static system prompt (which carries the multi-thousand-token
+  // taxonomy) so repeated batches for the same marketplace hit the cache instead
+  // of re-billing the sheet. Only the sheet-based marketplaces have a system
+  // prompt large enough to clear Anthropic's ~1024-token cache minimum and
+  // benefit; for the rest, caching is a no-op we skip to avoid needless overhead.
+  //
+  // The cache breakpoint must sit at the END of the static system content and
+  // BEFORE the variable product list, so it must be attached to the system
+  // MESSAGE specifically (a top-level `providerOptions.cacheControl` on
+  // generateText lands the breakpoint after the whole prompt, which re-writes
+  // the cache every call and never reads it — verified empirically). We build an
+  // explicit messages array to place the breakpoint precisely. The system
+  // content is our own static taxonomy (never user input), so the SDK's
+  // system-in-messages injection warning does not apply — suppressed below.
+  const messages: ModelMessage[] = usesTaxonomySheet
+    ? [
+        {
+          role: "system",
+          content: systemPrompt,
+          providerOptions: {
+            anthropic: {
+              // 1h cache: a large categorization run spans many minutes and
+              // hundreds of batches — the longer TTL keeps the sheet warm across
+              // the whole job rather than expiring mid-run (default is 5m).
+              cacheControl: { type: "ephemeral", ttl: "1h" },
+            },
+          },
+        },
+        { role: "user", content: userPrompt },
+      ]
+    : [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ];
+
+  const { text, finishReason } = await generateText({
     model: anthropic(model),
-    prompt,
+    messages,
+    allowSystemInMessages: true,
     // Temu/BestBuy/Mathis use a closed taxonomy — any valid path is correct.
     // A small temperature (0.3) helps the AI reason through niche product types
     // instead of anchoring on the first taxonomy entry seen at temperature=0.
     temperature: usesTaxonomySheet ? 0.3 : 0,
-    maxOutputTokens: usesTaxonomySheet ? 2500 : 2000,
+    maxOutputTokens,
   });
 
   const fallbackCat = availableCategories?.[0] ?? "General";
@@ -544,18 +640,50 @@ ${pathHint}
     };
   };
 
-  try {
-    const parsed = JSON.parse(text.trim()) as { index: number; category: string; path: string; confidence: number }[];
-    return parsed.map(mapResult).filter((r) => r.productId);
-  } catch {
-    const match = text.match(/\[[\s\S]*\]/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]) as { index: number; category: string; path: string; confidence: number }[];
-        return parsed.map(mapResult).filter((r) => r.productId);
-      } catch { /* fall through */ }
+  // Parse whatever valid objects the response contains, tolerating a truncated tail:
+  // pull out every complete {…} object rather than requiring the whole array to parse.
+  const parseLoose = (raw: string): { index: number; category: string; path: string; confidence: number }[] => {
+    const trimmed = raw.trim();
+    for (const candidate of [trimmed, trimmed.match(/\[[\s\S]*\]/)?.[0] ?? ""]) {
+      if (!candidate) continue;
+      try { return JSON.parse(candidate); } catch { /* try object-by-object */ }
     }
-    console.error(`[categorize] JSON parse failed (${marketplace}). Model response:\n${text.slice(0, 500)}`);
-    return products.map((p) => ({ productId: p.id, category: fallbackCat, path: fallbackCat, confidence: 0.1 }));
+    const objs: { index: number; category: string; path: string; confidence: number }[] = [];
+    for (const m of trimmed.matchAll(/\{[^{}]*\}/g)) {
+      try { objs.push(JSON.parse(m[0])); } catch { /* skip malformed */ }
+    }
+    return objs;
+  };
+
+  const parsed = parseLoose(text);
+  const byId = new Map<string, CategorizeResult>();
+  for (const r of parsed.map(mapResult)) if (r.productId) byId.set(r.productId, r);
+
+  // Split-and-retry: the model returned fewer usable items than products in the batch
+  // (usually a truncated response). Re-ask for ONLY the missing products in halves,
+  // rather than discarding the whole batch to the fallback category.
+  const missing = products.filter((p) => !byId.has(p.id));
+  if (missing.length && missing.length < products.length && !strictMode) {
+    const mid = Math.ceil(missing.length / 2);
+    for (const half of [missing.slice(0, mid), missing.slice(mid)]) {
+      if (!half.length) continue;
+      try {
+        for (const r of await categorizeBatch(half, marketplace, model, availableCategories, strictMode)) {
+          byId.set(r.productId, r);
+        }
+      } catch { /* leave for the fallback below */ }
+    }
   }
+
+  if (byId.size < products.length) {
+    console.error(
+      `[categorize] ${products.length - byId.size}/${products.length} products unresolved ` +
+      `(${marketplace}, finishReason=${finishReason}). Assigning fallback.`,
+    );
+  }
+
+  // Guarantee one result per product, in input order — no product is ever dropped.
+  return products.map(
+    (p) => byId.get(p.id) ?? { productId: p.id, category: fallbackCat, path: fallbackCat, confidence: 0.1 },
+  );
 }

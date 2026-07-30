@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { AlertTriangle, Download, FileSpreadsheet, Loader2, Package, Shuffle } from "lucide-react";
+import { AlertTriangle, Download, FileSpreadsheet, Package, Shuffle } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
 import { buildDownloadName } from "@/lib/export/filename";
+import { LottieLoader } from "@/components/ui/lottie-loader";
 
 type Template = {
   id: string;
@@ -302,7 +303,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           disabled={!canExport}
           className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition disabled:opacity-50"
         >
-          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          {loading ? <LottieLoader size={20} onDark className="-my-2" /> : <Download className="w-4 h-4" />}
           {buttonLabel}
         </button>
       </div>
@@ -392,7 +393,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
       {fetching && (
         <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+          <LottieLoader size={64} />
         </div>
       )}
 

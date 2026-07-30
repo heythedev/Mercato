@@ -730,9 +730,20 @@ async function fillTemplateXlsx(
   };
   const alwaysExport = (e: ColEntry): boolean => isCategoryCol(e);
 
-  // Only narrow the export when the banner was actually found — templates
-  // without one keep every mapped column, as before.
-  const exportEntries = sawRequiredBanner && requiredLetters.size
+  // New-listing template detection: it carries a "specProductType" field code
+  // (the MP-item template does not). For the new-listing template we fill EVERY
+  // column the vendor has data for — required and optional alike — so a rich
+  // vendor sheet's description, images, colour, model, etc. all land in the
+  // output. Columns with no resolvable value still come out blank (the row
+  // builder writes an empty styled cell), so "optional and empty" stays empty.
+  const isNewListingTemplate = colEntries.some((e) => {
+    const n = normalizeKey(String(e.col.key ?? ""));
+    return n === "specproducttype";
+  });
+
+  // Only narrow the export when the banner was found AND this isn't the
+  // new-listing template. The new-listing template keeps every mapped column.
+  const exportEntries = sawRequiredBanner && requiredLetters.size && !isNewListingTemplate
     ? colEntries.filter((e) => requiredLetters.has(e.letter) || alwaysExport(e))
     : colEntries;
 
@@ -1475,13 +1486,33 @@ function getProductField(p: Product, key: string): unknown {
     (v) => v != null && String(v).trim() !== "" && !isGlobalId(v) && !isPlaceholder(v),
   ) ?? derivedSku();
 
+  // Vendor sheets often store HTML in description/features (<p>…</p>, <li>…</li>).
+  // Walmart wants plain text, so strip tags and collapse whitespace. Bullet-style
+  // <li> items become "; "-separated so key features stay readable.
+  const stripHtml = (s: string): string =>
+    s
+      .replace(/<\s*li[^>]*>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"')
+      .split("").map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean).join("; ")
+      .replace(/\s+/g, " ")
+      .trim();
+
   // ── Description / details — prefer vendor text, fall back to product name ──
-  const descriptionText =
+  const descriptionRaw =
     p.description ||
     (fromVendor("description", "long_description", "details", "notes", "specs", "specifications") as string | undefined) ||
     p.name ||
     (fromLive("description") as string | undefined) ||
     "";
+  const descriptionText = /<[a-z][\s\S]*>/i.test(descriptionRaw) ? stripHtml(descriptionRaw) : descriptionRaw;
+
+  // Key features / bullet points — vendors store these as HTML <li> lists.
+  const featuresRaw = String(
+    fromVendor("features", "key_features", "product_features", "bullet_points", "highlights") ?? "",
+  );
+  const featuresText = /<[a-z][\s\S]*>/i.test(featuresRaw) ? stripHtml(featuresRaw) : featuresRaw;
 
   const coreMap: Record<string, unknown> = {
     // Name / Title
@@ -1561,7 +1592,13 @@ function getProductField(p: Product, key: string): unknown {
     // Price
     price,
     standard_price: price,
-    msrp: fromVendor("msrp", "list_price", "retail_price") ?? price,
+    // A vendor MSRP of 0 means "not set" — blank it rather than writing a
+    // meaningless 0 (and never fall back to selling price for MSRP).
+    msrp: (() => {
+      const v = fromVendor("msrp", "list_price", "retail_price");
+      const n = parseFloat(String(v ?? "").replace(/[^0-9.]/g, ""));
+      return Number.isFinite(n) && n > 0 ? String(n) : "";
+    })(),
     sale_price: fromVendor("sale_price", "promo_price") ?? price,
     minimum_seller_allowed_price: fromVendor("min_price", "minimum_price", "map_price") ?? price,
     maximum_seller_allowed_price: fromVendor("max_price", "maximum_price") ?? "",
@@ -1615,6 +1652,24 @@ function getProductField(p: Product, key: string): unknown {
     specproducttype: (p as { specProductType?: string | null }).specProductType ?? "",
     spec_product_type: (p as { specProductType?: string | null }).specProductType ?? "",
 
+    // ── Walmart new-listing template field codes (row 5) ──────────────────────
+    // These are the exact camelCase codes the "New listing" template uses; they
+    // don't normalize-match the snake_case coreMap keys, so map them explicitly
+    // from this vendor sheet's columns (and common variants).
+    productname: p.name || fromVendor("title", "product_name", "name") || "",
+    productidtype: p.upc ? (String(p.upc).replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
+    productid: p.upc || fromVendor("upc", "ean", "gtin", "barcode") || "",
+    countryoforiginsubstantialtransformation:
+      fromVendor("origin", "country_of_origin", "country", "made_in", "coo") ?? "",
+    shortdescription: descriptionText || "",
+    keyfeatures: featuresText,
+    mainimageurl: p.imageUrl || fromVendor("imageurl", "image_url", "main_image", "image") || fromLive("image") || "",
+    productsecondaryimageurl:
+      fromVendor("imageurl1", "image_url1", "additional_image_url", "other_image_url1", "image_url2") ?? "",
+    modelnumber: fromVendor("model", "model_number", "model_no", "mpn") ?? "",
+    colorcategory: fromVendor("color_category", "color", "colour") ?? "",
+    manufacturername: fromVendor("manufacturer", "brand", "maker", "branch") ?? p.brand ?? "",
+
     // Category — filled from AI categorisation; blank for "Uncategorized" so no junk text in the cell
     category: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
     category_name: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
@@ -1653,9 +1708,9 @@ function getProductField(p: Product, key: string): unknown {
     short_description: (descriptionText || "").slice(0, 200),
     short_desc: (descriptionText || "").slice(0, 200),
     full_description: descriptionText,
-    product_features: fromVendor("features", "product_features", "key_features", "highlights") ?? descriptionText,
-    features: fromVendor("features", "product_features", "key_features", "highlights") ?? descriptionText,
-    key_features: fromVendor("key_features", "features", "highlights") ?? descriptionText,
+    product_features: featuresText || descriptionText,
+    features: featuresText || descriptionText,
+    key_features: featuresText || descriptionText,
     shelf_description: descriptionText,
     site_description: descriptionText,
 

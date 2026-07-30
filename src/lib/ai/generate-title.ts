@@ -77,12 +77,14 @@ export async function generateMarketplaceTitles(
   if (!products.length) return titleMap;
 
   const cfg = TITLE_RULES[marketplace.toLowerCase()] ?? TITLE_RULES.walmart;
-  const BATCH = 15;
+  const BATCH = Number(process.env.TITLE_BATCH_SIZE ?? 15);
   // Batches were previously awaited one at a time, so a 500-product export made
   // ~34 serial model calls (several minutes) before ZIP generation could even
   // start — the single biggest cause of export timeouts. The batches are fully
-  // independent, so run several in flight at once.
-  const CONCURRENCY = 6;
+  // independent, so run several in flight at once. Raised 6 → 10 so several-
+  // thousand-product Walmart exports finish title generation well inside the
+  // request budget; tunable via env for larger runs.
+  const CONCURRENCY = Number(process.env.TITLE_CONCURRENCY ?? 10);
 
   // Precompute every batch's payload, then run them in bounded-concurrency waves.
   const batches: Product[][] = [];

@@ -50,6 +50,10 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         marketplace: project.marketplace,
         status: project.status,
         isNewListing: project.isNewListing,
+        verifyMs: project.verifyMs,
+        verifyCompletedAt: project.verifyCompletedAt?.toISOString() ?? null,
+        categorizeMs: project.categorizeMs,
+        categorizeCompletedAt: project.categorizeCompletedAt?.toISOString() ?? null,
       }}
       products={project.products.map((p) => ({
         ...p,

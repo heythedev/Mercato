@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   FileSpreadsheet, ShieldCheck, Tag, Download,
-  CheckCircle2, Loader2, ChevronRight, ArrowLeft, Trash2,
+  CheckCircle2, ChevronRight, ArrowLeft, Trash2,
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -38,6 +38,10 @@ type Project = {
   marketplace: string;
   status: string;
   isNewListing?: boolean;
+  verifyMs?: number | null;
+  verifyCompletedAt?: string | null;
+  categorizeMs?: number | null;
+  categorizeCompletedAt?: string | null;
 };
 
 const STEPS = [
@@ -99,6 +103,10 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     return idx;
   });
   const [loading, setLoading] = useState(false);
+  // The step index currently executing, so the spinner shows on the step that
+  // is actually running rather than one derived from the (stale during a run)
+  // project status. null when idle.
+  const [loadingStep, setLoadingStep] = useState<number | null>(null);
   // Cumulative progress across the multi-pass verify loop; null when idle.
   const [verifyProgress, setVerifyProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -122,6 +130,10 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   // server reports work remaining, reporting cumulative progress as we go.
   async function runVerify(force = false) {
     setLoading(true);
+    setLoadingStep(1);
+    // Move to the Verify step up front so its loader shows there — not the
+    // button spinner on whichever step the run was triggered from.
+    setActiveStep(1);
     setVerifyProgress(null);
     try {
       let totalVerified = 0;
@@ -182,39 +194,96 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       toast.error("Verification failed — check the server console for details.");
     } finally {
       setLoading(false);
+      setLoadingStep(null);
       setVerifyProgress(null);
     }
   }
 
   async function runCategorize(force = false) {
     setLoading(true);
+    setLoadingStep(2);
+    // Move to the Categorize step up front so its loader shows there.
+    setActiveStep(2);
     try {
-      const res = await fetch(`/api/projects/${project.id}/categorize`, {
+      // Categorization is a background job (large catalogs make dozens of model
+      // round-trips and run well past the request timeout). POST returns a jobId
+      // immediately; poll GET until done/error rather than holding one long request.
+      const startRes = await fetch(`/api/projects/${project.id}/categorize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force }),
       });
-      const data = await res.json();
-      if (!res.ok) {
+      if (!startRes.ok) {
+        const data = await startRes.json().catch(() => ({ error: "Categorization failed" }));
         toast.error(data.error ?? "Categorization failed");
-      } else {
-        const matched = typeof data.matched === "number" ? data.matched : data.categorized;
-        const unmatched = typeof data.unmatched === "number" ? data.unmatched : 0;
-        if (matched === 0 && unmatched > 0) {
-          toast.warning(`No category match for ${unmatched} product${unmatched === 1 ? "" : "s"}`);
-        } else if (unmatched > 0) {
-          toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"} (${unmatched} unmatched)`);
-        } else {
-          toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"}`);
-        }
-        await refreshProject();
-        setActiveStep(2);
+        return;
       }
+      const { jobId } = (await startRes.json()) as { jobId: string };
+
+      // Give up only when the server stops making progress, not on a fixed clock —
+      // a slow-but-alive run (thousands of products) must not be cut off.
+      const STALL_LIMIT_MS = 5 * 60 * 1000;
+      const HARD_LIMIT_MS = 30 * 60 * 1000;
+      const startedAt = Date.now();
+      let lastProgressAt = Date.now();
+      let lastPhase = "";
+      let lastUpdatedAt = 0;
+
+      while (Date.now() - startedAt < HARD_LIMIT_MS) {
+        await new Promise((r) => setTimeout(r, 2500));
+
+        const pollRes = await fetch(
+          `/api/projects/${project.id}/categorize?jobId=${encodeURIComponent(jobId)}`,
+        );
+        const data = await pollRes.json().catch(() => ({ status: "error", error: "Categorization failed" })) as {
+          status: string; error?: string; phase?: string; updatedAt?: number;
+          matched?: number; unmatched?: number; categorized?: number;
+        };
+
+        if (!pollRes.ok || data.status === "error") {
+          toast.error(data.error ?? "Categorization failed");
+          return;
+        }
+
+        if (data.status === "done") {
+          const matched = typeof data.matched === "number" ? data.matched : (data.categorized ?? 0);
+          const unmatched = typeof data.unmatched === "number" ? data.unmatched : 0;
+          if (matched === 0 && unmatched > 0) {
+            toast.warning(`No category match for ${unmatched} product${unmatched === 1 ? "" : "s"}`);
+          } else if (unmatched > 0) {
+            toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"} (${unmatched} unmatched)`);
+          } else {
+            toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"}`);
+          }
+          await refreshProject();
+          setActiveStep(2);
+          return;
+        }
+
+        // Any forward progress resets the stall window: a changed phase string OR a
+        // newer server-side updatedAt (the job store bumps it on every batch, so even
+        // a repeated phase still counts as a live run).
+        if (data.phase && data.phase !== lastPhase) {
+          lastPhase = data.phase;
+          lastProgressAt = Date.now();
+        }
+        if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAt) {
+          lastUpdatedAt = data.updatedAt;
+          lastProgressAt = Date.now();
+        }
+        if (Date.now() - lastProgressAt > STALL_LIMIT_MS) {
+          toast.error("Categorization stalled — no progress from the server. Please try again.");
+          return;
+        }
+      }
+
+      toast.error("Categorization timed out — please try again");
     } catch (e) {
       console.error("Categorize error:", e);
       toast.error("Categorization failed — check the server console for details.");
     } finally {
       setLoading(false);
+      setLoadingStep(null);
     }
   }
 
@@ -306,8 +375,9 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             // means the Upload step finished), so it stays navigable and shows as done.
             const done = !isSkipped && maxStep >= idx;
             const active = activeStep === idx;
-            const current = currentStepIndex === idx;
-            const isLoading = loading && current;
+            // Spinner belongs on the step actually executing, not one inferred
+            // from project status (which is stale on the client during a run).
+            const isLoading = loading && loadingStep === idx;
 
             return (
               <div key={step.key} className="flex items-center flex-1 last:flex-none">
@@ -327,9 +397,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
                     active ? "bg-primary text-primary-foreground" :
                     "bg-muted text-muted-foreground"
                   )}>
-                    {isLoading ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : done ? (
+                    {done ? (
                       <CheckCircle2 className="w-4 h-4" />
                     ) : (
                       <Icon className="w-4 h-4" />
@@ -386,6 +454,8 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             onApproveProduct={handleApproveProduct}
             onMarkDiscontinued={handleMarkDiscontinued}
             marketplace={project.marketplace}
+            elapsedMs={project.verifyMs ?? null}
+            completedAt={project.verifyCompletedAt ?? null}
             onNext={() => setActiveStep(project.marketplace === "amazon_us" ? 3 : 2)}
           />
         )}
@@ -398,6 +468,8 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             loading={loading}
             projectStatus={project.status}
             marketplace={project.marketplace}
+            elapsedMs={project.categorizeMs ?? null}
+            completedAt={project.categorizeCompletedAt ?? null}
             onRunCategorize={runCategorize}
             onNext={() => setActiveStep(3)}
           />

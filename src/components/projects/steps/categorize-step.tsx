@@ -1,9 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Tag, Loader2, CheckCircle2, AlertTriangle, XCircle, Download, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
+import { LottieLoader } from "@/components/ui/lottie-loader";
+import { formatDuration } from "@/lib/utils";
 
 type Product = {
   id: string;
@@ -15,7 +17,7 @@ type Product = {
   categorizedAt: Date | null;
 };
 
-export function CategorizeStep({ projectId, projectName, products, categorizedCount, loading, projectStatus, marketplace, onRunCategorize, onNext }: {
+export function CategorizeStep({ projectId, projectName, products, categorizedCount, loading, projectStatus, marketplace, elapsedMs, completedAt, onRunCategorize, onNext }: {
   projectId: string;
   projectName: string;
   products: Product[];
@@ -23,6 +25,8 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   loading: boolean;
   projectStatus: string;
   marketplace: string;
+  elapsedMs?: number | null;
+  completedAt?: string | null;
   onRunCategorize: (force?: boolean) => void;
   onNext: () => void;
 }) {
@@ -38,6 +42,22 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
   const categorized = products.filter((p) => p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized");
   const pending = products.filter((p) => !p.marketplaceCategory);
+
+  // Live running timer while categorizing (server persists elapsedMs only on
+  // completion, so we tick client-side from when this run started).
+  const [liveElapsedMs, setLiveElapsedMs] = useState<number | null>(null);
+  const startRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (loading) {
+      if (startRef.current == null) startRef.current = Date.now();
+      const tick = () => setLiveElapsedMs(Date.now() - startRef.current!);
+      tick();
+      const iv = setInterval(tick, 1000);
+      return () => clearInterval(iv);
+    }
+    startRef.current = null;
+    setLiveElapsedMs(null);
+  }, [loading]);
 
   async function handleCsvUpload(file: File) {
     setUploading(true);
@@ -95,6 +115,16 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
               ? "AI matches each product to an exact path from the shared category sheet"
               : `AI assigns each product to the correct ${marketplace} category`}
           </p>
+          {loading && formatDuration(liveElapsedMs) && (
+            <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
+              Categorizing… {formatDuration(liveElapsedMs)} elapsed
+            </p>
+          )}
+          {!loading && completedAt && formatDuration(elapsedMs) && (
+            <p className="text-xs text-green-700 mt-1 font-medium">
+              Categorization done in {formatDuration(elapsedMs)}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:gap-3">
           {isWalmart && (
@@ -138,7 +168,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
               disabled={loading}
               className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
             >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Tag className="w-4 h-4" />}
+              <Tag className="w-4 h-4" />
               Re-categorize
             </button>
           )}
@@ -147,7 +177,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
             disabled={loading}
             className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition disabled:opacity-50"
           >
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Tag className="w-4 h-4" />}
+            {loading ? <LottieLoader size={20} onDark className="-my-2" /> : <Tag className="w-4 h-4" />}
             {loading ? "Categorizing…" : hasResults ? "Continue to Export →" : "Run Categorization"}
           </button>
         </div>
@@ -206,9 +236,12 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
       {loading && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
-          <Loader2 className="w-10 h-10 animate-spin text-primary mb-4" />
+          <LottieLoader size={96} className="mb-2" />
           <p className="text-sm font-medium">Categorizing products with AI…</p>
           <p className="text-xs text-muted-foreground mt-1">This may take a minute for large batches</p>
+          {formatDuration(liveElapsedMs) && (
+            <p className="text-sm font-medium mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
+          )}
         </div>
       )}
 

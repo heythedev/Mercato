@@ -3,8 +3,9 @@
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Upload, FileSpreadsheet, Loader2, X, CheckCircle2 } from "lucide-react";
+import { Upload, FileSpreadsheet, X, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { LottieLoader } from "@/components/ui/lottie-loader";
 
 // Top-level tiles; Amazon expands to a US/International sub-toggle
 const MARKETPLACE_TILES = [
@@ -231,7 +232,7 @@ export function NewProjectForm() {
         disabled={loading || !file || !marketplace}
         className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition disabled:opacity-50"
       >
-        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+        {loading ? <LottieLoader size={20} onDark className="-my-2" /> : <Upload className="w-4 h-4" />}
         {loading ? "Creating project…" : "Create project"}
       </button>
     </form>

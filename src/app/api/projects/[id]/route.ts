@@ -41,5 +41,18 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  return NextResponse.json({ project: { id: project.id, name: project.name, marketplace: project.marketplace, status: project.status }, products: project.products });
+  return NextResponse.json({
+    project: {
+      id: project.id,
+      name: project.name,
+      marketplace: project.marketplace,
+      status: project.status,
+      isNewListing: project.isNewListing,
+      verifyMs: project.verifyMs,
+      verifyCompletedAt: project.verifyCompletedAt,
+      categorizeMs: project.categorizeMs,
+      categorizeCompletedAt: project.categorizeCompletedAt,
+    },
+    products: project.products,
+  });
 }

@@ -48,6 +48,8 @@ type ShopifyProduct = {
   images?: { src?: string }[];
   variants?: { sku?: string }[];
   tags?: string[] | string;
+  /** Shopify's own product classification, e.g. Modway's "\\Living\\Sofas". */
+  product_type?: string;
 };
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // refresh daily
@@ -149,11 +151,15 @@ function buildIndex(products: ShopifyProduct[]): CatalogIndex {
     const image = (p.images ?? []).find((i) => i.src)?.src ?? null;
     const tags = cleanTags(p.tags);
     const handle = (p.handle ?? "").trim();
+    // Prefer Shopify's product_type as the category — it's in products.json already, so
+    // no per-product page fetch is needed. "\\Living\\Sofas" → "Living > Sofas".
+    const productTypeCategory = (p.product_type ?? "")
+      .split(/[\\/]+/).map((s) => s.trim()).filter(Boolean).join(" > ") || null;
 
     for (const v of p.variants ?? []) {
       const sku = (v.sku ?? "").trim();
       if (!sku) continue;
-      const entry: CatalogEntry = { sku, title, brand, description, image, handle, tags, category: null };
+      const entry: CatalogEntry = { sku, title, brand, description, image, handle, tags, category: productTypeCategory };
       const normSku = normalizeSku(sku);
       if (normSku && !bySku.has(normSku)) bySku.set(normSku, entry);
 
@@ -234,6 +240,9 @@ type Vendor = { name: string; domain: string; matches: (sku: string) => boolean 
 
 const VENDORS: Vendor[] = [
   { name: "TOV Furniture", domain: "tovfurniture.com", matches: (sku) => /\btov/i.test(sku) },
+  // Modway sheets use codes like "MODA-EEI1011BEI" / "MOD-7355-TAU"; their Shopify
+  // catalog (modway.com) files each product under a real product_type ("\Living\Sofas").
+  { name: "Modway", domain: "modway.com", matches: (sku) => /\b(moda|modway|eei-?\d|mod-?\d)/i.test(sku) },
 ];
 
 /**
@@ -294,6 +303,9 @@ export async function resolveSkuFromCatalog(sku: string): Promise<CatalogEntry |
     const index = await getIndex(vendor.domain);
     const match = matchInIndex(index, sku);
     if (!match) return null;
+    // If the catalog already gave us a category (Shopify product_type), use it — no need
+    // for the extra per-product breadcrumb page fetch, which is what makes bulk runs slow.
+    if (match.category) return match;
     const category = await fetchCanonicalCategory(vendor.domain, match.handle);
     return category ? { ...match, category } : match;
   } catch {

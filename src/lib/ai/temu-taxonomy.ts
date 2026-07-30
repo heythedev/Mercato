@@ -65,8 +65,10 @@ export function clearTemuCache(): void {
 }
 
 /**
- * Format the taxonomy for the Claude prompt, grouped by top-level category
- * so the model can scan it efficiently (~420 leaf paths).
+ * Format the taxonomy for the Claude prompt, grouped by top-level category so
+ * the model can scan it efficiently. Scales to the full CSV — replacing
+ * temu_categories.csv with a larger export needs no code change (the loader
+ * auto-reloads on file mtime, and the sheet is prompt-cached per marketplace).
  */
 export function formatTemuTaxonomyForPrompt(): string {
   if (cachedPromptBlock) return cachedPromptBlock;

@@ -5,12 +5,45 @@ import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
 import { categorizeProducts, type ProductInput } from "@/lib/ai/categorize";
 import { enrichSkuOnlyProducts, looksLikeSkuName } from "@/lib/ai/resolve-sku";
-import { hasCatalogVendor } from "@/lib/ai/vendor-catalog";
+import {
+  createCategorizeJob,
+  setCategorizeJobPhase,
+  resolveCategorizeJob,
+  rejectCategorizeJob,
+  getCategorizeJob,
+} from "@/lib/categorize/job-store";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
 // Matches rows to products by SKU → vendorSku exact match, then by normalized name.
 // Useful for the workflow: AI categorize → download CSV → verify/edit → re-upload.
+
+// ── GET /api/projects/[id]/categorize?jobId=… ─────────────────────────────────
+// Poll a background categorization job started by POST. Returns the current
+// phase while running, the summary once done, or the error message on failure.
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { response } = await authGuard();
+  if (response) return response;
+  await params; // id not needed — the jobId is unique per run
+
+  const jobId = req.nextUrl.searchParams.get("jobId");
+  if (!jobId) return NextResponse.json({ error: "jobId required" }, { status: 400 });
+
+  const job = getCategorizeJob(jobId);
+  if (!job) return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
+
+  if (job.status === "processing") {
+    return NextResponse.json({
+      status: "processing",
+      phase: job.phase ?? "Preparing…",
+      updatedAt: job.updatedAt,
+    });
+  }
+  if (job.status === "error") {
+    return NextResponse.json({ status: "error", error: job.error }, { status: 500 });
+  }
+  return NextResponse.json({ status: "done", ...job.result });
+}
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { user, response } = await authGuard();
@@ -144,6 +177,10 @@ function extractVendorContext(vendorData: unknown): string | null {
   return parts.length ? parts.join(", ") : null;
 }
 
+// Start a background categorization job — lightweight auth + existence check only,
+// then returns { jobId } immediately. All heavy work (loading every product, the
+// dozens of model round-trips) runs in the background closure so a several-thousand
+// product run is never bound by the 300 s HTTP request limit; the client polls GET.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { user, response } = await authGuard();
   if (response) return response;
@@ -155,34 +192,51 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const body = await req.json().catch(() => ({}));
   const force: boolean = body?.force === true;
 
-  const project = await prisma.project.findUnique({
+  // Lightweight check — ownership only, no heavy product data loaded yet.
+  const projectMeta = await prisma.project.findUnique({
     where: { id },
-    include: {
-      products: {
-        select: {
-          id: true,
-          name: true,
-          brand: true,
-          description: true,
-          vendorSku: true,
-          marketplaceCategory: true,
-          vendorData: true,
-        },
-      },
-    },
+    select: { id: true, userId: true },
+  });
+  if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  const jobId = `${id}_${Date.now()}`;
+  const startedAt = Date.now();
+  createCategorizeJob(jobId);
+  // Clear prior timing on start — each categorize run is a full re-run.
+  await prisma.project.update({
+    where: { id },
+    data: { status: "categorizing", categorizeMs: 0, categorizeCompletedAt: null },
   });
 
-  if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  // Heavy work runs here; the HTTP response returns the jobId below.
+  void (async () => {
+   try {
+    const project = await prisma.project.findUnique({
+      where: { id },
+      include: {
+        products: {
+          select: {
+            id: true,
+            name: true,
+            brand: true,
+            description: true,
+            vendorSku: true,
+            marketplaceCategory: true,
+            vendorData: true,
+          },
+        },
+      },
+    });
+    if (!project) throw new Error("Project not found");
 
-  // Temu & Best Buy share temu_categories.csv; Mathis uses mathis_categories.csv.
-  // These CSV taxonomy sheets drive categorization inside categorizeProducts (not template names).
-  // The top level of each assigned path still fuzzy-matches export templates at export time.
-  const mpLower = project.marketplace.toLowerCase();
+    // Temu & Best Buy share temu_categories.csv; Mathis uses mathis_categories.csv.
+    // These CSV taxonomy sheets drive categorization inside categorizeProducts (not template names).
+    // The top level of each assigned path still fuzzy-matches export templates at export time.
+    const mpLower = project.marketplace.toLowerCase();
 
-  await prisma.project.update({ where: { id }, data: { status: "categorizing" } });
+    setCategorizeJobPhase(jobId, `Categorizing ${project.products.length} products…`);
 
-  try {
     // Build ProductInput with vendor category hint + supplemental context fields
     let productInputs: ProductInput[] = project.products.map((p) => ({
       id: p.id,
@@ -210,14 +264,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (productInputs.length > 0) {
       // SKU-only sheets (common for Mathis): resolve codes like TOVF-TOVL54566 → real
       // product titles (vendor catalog first, then web search) before asking Claude to
-      // categorize. Trigger when the name still looks like a code OR the vendor SKU maps to
-      // a known catalog vendor — the latter lets re-runs correct a previously bad resolution.
-      const skuOnly = productInputs.filter(
-        (p) => looksLikeSkuName(p.name, p.sku) || (p.sku ? hasCatalogVendor(p.sku) : false),
-      );
+      // categorize. Enrichment is a PER-PRODUCT NETWORK CALL (Shopify catalog + product
+      // page fetch), so it must run ONLY for products that actually need it — a product
+      // that already has a real title has nothing to gain and would just add ~1s of
+      // network latency each. Running it for all 2000 products (because they carried a
+      // catalog-vendor SKU) took ~28 min and stalled the run. Trigger only when the
+      // name is still a raw code.
+      const skuOnly = productInputs.filter((p) => looksLikeSkuName(p.name, p.sku));
       if (skuOnly.length > 0) {
-        const { products: enriched, enrichments } = await enrichSkuOnlyProducts(productInputs);
-        productInputs = enriched;
+        setCategorizeJobPhase(jobId, `Resolving ${skuOnly.length} SKU-only products…`);
+        const { products: enriched, enrichments } = await enrichSkuOnlyProducts(
+          skuOnly,
+          (done, total) => setCategorizeJobPhase(jobId, `Resolving SKU-only products ${done}/${total}…`),
+        );
+        // Fold the enriched rows back into the full input list by id.
+        const enrichedById = new Map(enriched.map((e) => [e.id, e]));
+        productInputs = productInputs.map((p) => enrichedById.get(p.id) ?? p);
         enrichedCount = enrichments.length;
         if (enrichments.length > 0) {
           await inChunks(enrichments, (e) =>
@@ -233,7 +295,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         }
       }
 
-      const results = await categorizeProducts(project.marketplace, productInputs);
+      setCategorizeJobPhase(jobId, `Assigning categories to ${productInputs.length} products…`);
+      const results = await categorizeProducts(
+        project.marketplace,
+        productInputs,
+        undefined,
+        // Live progress → job.updatedAt advances every wave, so the client sees a slow
+        // run as alive rather than stalled. Throttled to whole-percent changes so we
+        // don't rewrite the phase on every batch.
+        (done, total, note) => {
+          const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+          setCategorizeJobPhase(
+            jobId,
+            note
+              ? `Categorizing ${done}/${total} (${pct}%) — ${note}…`
+              : `Categorizing ${done}/${total} (${pct}%)…`,
+          );
+        },
+      );
 
       // ── Bulletproofing: route uncertain products to review instead of guessing ──
       // Correctness-first policy — it is always safer to mark a product "Uncategorized"
@@ -299,6 +378,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // API / taxonomy is unavailable — the field is simply left blank.
     if (mpLower === "walmart" && project.isNewListing && productInputs.length > 0) {
       try {
+        setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
         const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");
         const specInputs = productInputs.map((p) => ({
           id: p.id,
@@ -318,13 +398,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
 
-    await prisma.project.update({ where: { id }, data: { status: "categorized" } });
+    await prisma.project.update({
+      where: { id },
+      data: {
+        status: "categorized",
+        categorizeMs: Date.now() - startedAt,
+        categorizeCompletedAt: new Date(),
+      },
+    });
 
     const allCats = [...existingCatById.values()];
     const matched = allCats.filter((c) => c && c !== "Uncategorized").length;
     const unmatched = allCats.length - matched;
 
-    return NextResponse.json({
+    resolveCategorizeJob(jobId, {
       categorized: allCats.length,
       matched,
       unmatched,
@@ -341,9 +428,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
                 ? ["(mathis_categories.csv taxonomy)"]
                 : [],
     });
-  } catch (err) {
-    await prisma.project.update({ where: { id }, data: { status: "verified" } });
+   } catch (err) {
+    await prisma.project.update({ where: { id }, data: { status: "verified" } }).catch(() => {});
     const msg = err instanceof Error ? err.message : "Categorization failed";
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
+    console.error("[categorize] background job failed:", msg);
+    rejectCategorizeJob(jobId, msg);
+   }
+  })();
+
+  return NextResponse.json({ jobId });
 }

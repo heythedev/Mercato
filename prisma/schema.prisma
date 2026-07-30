@@ -72,6 +72,16 @@ model Project {
   // New-listing projects have no live marketplace page to verify against, so the
   // Verify step is skipped and the flow goes straight to Categorize.
   isNewListing Boolean @default(false)
+
+  // Processing timers. Verification is resumable across several "Continue"
+  // requests, so we accumulate the ACTIVE processing time of each pass (idle
+  // gaps between resumes are not counted). `*CompletedAt` is set when the phase
+  // fully finishes, which is also the signal the UI uses to show the summary.
+  verifyMs          Int?      // total active verification time in ms
+  verifyCompletedAt DateTime?
+  categorizeMs          Int?  // total active categorization time in ms
+  categorizeCompletedAt DateTime?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

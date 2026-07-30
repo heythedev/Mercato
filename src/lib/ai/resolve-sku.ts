@@ -1,4 +1,16 @@
-import { resolveSkuFromCatalog } from "./vendor-catalog";
+import { resolveSkuFromCatalog, hasCatalogVendor } from "./vendor-catalog";
+
+/**
+ * Is any usable web-search provider configured?
+ *
+ * Without a SerpAPI key the only remaining backend is DuckDuckGo's HTML endpoint, which
+ * serves a bot-challenge (HTTP 202) to servers and returns ZERO results. Pursuing it
+ * still pays the full timeout for every query variant of every product — ~40s per SKU
+ * that finds nothing. For a 2000-row SKU-only sheet that is ~2 hours of pure dead wait,
+ * which is why categorization "failed after 30 min". When no real provider exists we
+ * skip web search entirely and let the AI categorize from the raw code instead.
+ */
+const WEB_SEARCH_AVAILABLE = !!process.env.SERPAPI_KEY;
 
 export type SkuProductInput = {
   id: string;
@@ -263,13 +275,18 @@ function guessBrand(hits: SearchHit[], name: string | null): string | null {
  */
 export async function enrichSkuOnlyProducts(
   products: SkuProductInput[],
+  onProgress?: (done: number, total: number) => void,
 ): Promise<{ products: SkuProductInput[]; enrichments: SkuEnrichment[] }> {
   const enrichments: SkuEnrichment[] = [];
   const out: SkuProductInput[] = [];
 
-  const PARALLEL = 3;
+  // Enrichment is network-bound (catalog + product-page fetch), so run more of it at
+  // once. The catalog index is cached after the first hit, so the remaining cost is the
+  // per-product breadcrumb fetch; 10-wide keeps a large SKU-only sheet from crawling.
+  const PARALLEL = Number(process.env.SKU_ENRICH_PARALLELISM ?? 10);
   const queue = products.map((p, idx) => ({ p, idx }));
   const results = new Array<SkuProductInput>(products.length);
+  let done = 0;
 
   for (let i = 0; i < queue.length; i += PARALLEL) {
     const slice = queue.slice(i, i + PARALLEL);
@@ -327,6 +344,15 @@ export async function enrichSkuOnlyProducts(
         //    Only pursue this when the name itself still looks like a code — never overwrite
         //    an already-resolved, human-readable name with a loose web guess.
         if (!looksLikeSkuName(p.name, p.sku)) {
+          results[idx] = p;
+          return;
+        }
+
+        // Skip web search when it can't produce anything: a TOV-style code already tried
+        // its own catalog above (and we don't trust generic web results for it), and any
+        // other code has no working provider unless SerpAPI is configured. Pursuing a
+        // dead DuckDuckGo here is the ~40s-per-product stall that broke large runs.
+        if (!WEB_SEARCH_AVAILABLE || hasCatalogVendor(sku)) {
           results[idx] = p;
           return;
         }
@@ -404,6 +430,8 @@ export async function enrichSkuOnlyProducts(
         };
       }),
     );
+    done += slice.length;
+    onProgress?.(Math.min(done, products.length), products.length);
   }
 
   for (let i = 0; i < results.length; i++) out.push(results[i] ?? products[i]!);

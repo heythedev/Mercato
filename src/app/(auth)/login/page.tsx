@@ -4,8 +4,8 @@ import { useState, useEffect } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { LottieLoader } from "@/components/ui/lottie-loader";
 
 const LOGOUT_TOAST_KEY = "mercato:logout-toast";
 
@@ -88,7 +88,7 @@ export default function LoginPage() {
               disabled={loading}
               className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium flex items-center justify-center gap-2 hover:opacity-90 transition disabled:opacity-60 mt-2"
             >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {loading && <LottieLoader size={20} onDark className="-my-2" />}
               {loading ? "Signing in…" : "Sign in"}
             </button>
           </form>
