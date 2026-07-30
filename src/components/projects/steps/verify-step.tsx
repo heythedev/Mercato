@@ -200,11 +200,11 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3">
             {[
-              { label: "Match",        status: "ok",           count: verifiedCount,    color: "border-green-200 bg-green-50",    text: "text-green-700",   ring: "ring-green-400" },
-              { label: "Warning",      status: "warning",      count: warningCount,     color: "border-yellow-200 bg-yellow-50",  text: "text-yellow-700",  ring: "ring-yellow-400" },
-              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,    color: "border-red-200 bg-red-50",        text: "text-red-700",     ring: "ring-red-400" },
-              { label: "Not Found",    status: "not_found",    count: notFoundCount,    color: "border-gray-200 bg-gray-50",      text: "text-gray-600",    ring: "ring-gray-400" },
-              { label: "Discontinued", status: "discontinued", count: discontinuedCount, color: "border-purple-200 bg-purple-50", text: "text-purple-700",  ring: "ring-purple-400" },
+              { label: "Match",        status: "ok",           count: verifiedCount,    color: "bg-green-50 dark:bg-green-950/30",    text: "text-green-700 dark:text-green-400",   ring: "ring-green-400" },
+              { label: "Warning",      status: "warning",      count: warningCount,     color: "bg-yellow-50 dark:bg-yellow-950/30",  text: "text-yellow-700 dark:text-yellow-400",  ring: "ring-yellow-400" },
+              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,    color: "bg-red-50 dark:bg-red-950/30",        text: "text-red-700 dark:text-red-400",     ring: "ring-red-400" },
+              { label: "Not Found",    status: "not_found",    count: notFoundCount,    color: "bg-muted/50",      text: "text-gray-600 dark:text-gray-400",    ring: "ring-gray-400" },
+              { label: "Discontinued", status: "discontinued", count: discontinuedCount, color: "bg-purple-50 dark:bg-purple-950/30", text: "text-purple-700 dark:text-purple-400",  ring: "ring-purple-400" },
             ].map((s) => {
               const isActive = activeFilter === s.status;
               return (
@@ -212,7 +212,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                   key={s.label}
                   onClick={() => { setActiveFilter(isActive ? null : s.status); setExpanded(null); }}
                   className={cn(
-                    "rounded-xl border p-4 text-left transition-all w-full",
+                    "rounded-xl p-4 text-left transition-all w-full",
                     s.color,
                     isActive ? `ring-2 ${s.ring} shadow-sm` : "hover:shadow-sm hover:brightness-95",
                   )}

@@ -186,15 +186,15 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
       {/* Progress */}
       {hasResults && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
-          <div className="rounded-xl border p-4 bg-green-50 border-green-200">
-            <p className="text-2xl font-bold text-green-700">{categorized.length}</p>
+          <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+            <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categorized.length}</p>
             <p className="text-sm text-muted-foreground">Categorized</p>
           </div>
-          <div className={`rounded-xl border p-4 ${uncategorized.length > 0 ? "bg-orange-50 border-orange-200" : ""}`}>
-            <p className={`text-2xl font-bold ${uncategorized.length > 0 ? "text-orange-600" : ""}`}>{uncategorized.length}</p>
+          <div className={`rounded-xl p-4 ${uncategorized.length > 0 ? "bg-orange-50 dark:bg-orange-950/30" : "bg-muted/50"}`}>
+            <p className={`text-2xl font-bold ${uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : ""}`}>{uncategorized.length}</p>
             <p className="text-sm text-muted-foreground">Uncategorized</p>
           </div>
-          <div className="rounded-xl border p-4">
+          <div className="rounded-xl p-4 bg-muted/50">
             <p className="text-2xl font-bold">{total}</p>
             <p className="text-sm text-muted-foreground">Total products</p>
           </div>

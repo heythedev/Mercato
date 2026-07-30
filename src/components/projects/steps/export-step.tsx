@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { AlertTriangle, Download, FileSpreadsheet, Package, Shuffle } from "lucide-react";
+import { AlertTriangle, Download, FileSpreadsheet, Package, RefreshCw, Shuffle } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
@@ -84,6 +84,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
   const [fetching, setFetching] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   // For single-template marketplaces: user picks which template to export with
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [missingTemplateCategories, setMissingTemplateCategories] = useState<string[]>([]);
@@ -101,18 +102,45 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
     return () => { mountedRef.current = false; };
   }, []);
 
-  useEffect(() => {
-    fetch(`/api/templates?marketplace=${marketplace}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const tpls: Template[] = data.templates ?? [];
-        setTemplates(tpls);
-        // Auto-select first template for single-template marketplaces
-        if (!usesCategoryZip && tpls.length > 0) setSelectedTemplateId(tpls[0].id);
+  // Load templates for this marketplace. Extracted so the "Refresh" button can
+  // re-run it after the user uploads a new template in another tab — without a
+  // full page reload. `isRefresh` drives the button spinner (vs. initial fetch)
+  // and lets us report how many templates were found on demand.
+  async function loadTemplates(isRefresh = false) {
+    if (isRefresh) setRefreshing(true);
+    try {
+      const r = await fetch(`/api/templates?marketplace=${marketplace}`, { cache: "no-store" });
+      const data = await r.json();
+      const tpls: Template[] = data.templates ?? [];
+      if (!mountedRef.current) return;
+      const prevCount = templates.length;
+      setTemplates(tpls);
+      // Auto-select first template for single-template marketplaces when none picked yet
+      if (!usesCategoryZip && tpls.length > 0 && !selectedTemplateId) {
+        setSelectedTemplateId(tpls[0].id);
+      }
+      if (isRefresh) {
+        const added = tpls.length - prevCount;
+        toast.success(
+          added > 0
+            ? `Found ${added} new template${added !== 1 ? "s" : ""} (${tpls.length} total)`
+            : `No new templates — ${tpls.length} available`,
+        );
+      }
+    } catch {
+      if (isRefresh && mountedRef.current) toast.error("Couldn't refresh templates");
+    } finally {
+      if (mountedRef.current) {
         setFetching(false);
-      })
-      .catch(() => setFetching(false));
-  }, [marketplace, isMathis]);
+        setRefreshing(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadTemplates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketplace]);
 
   // One entry per output FILE. Mathis produces one file per department, so all
   // "Baby & Kids > …" leaf paths collapse into a single "Baby & Kids" row here —
@@ -313,7 +341,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         const allMissing = [...new Set([...preExportMissingCategories, ...missingTemplateCategories])];
         if (allMissing.length === 0) return null;
         return (
-          <div className="mb-5 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-700 p-4">
+          <div className="mb-5 rounded-xl bg-amber-50 dark:bg-amber-950/30 p-4">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
               <div className="min-w-0">
@@ -321,9 +349,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                   {allMissing.length} categor{allMissing.length === 1 ? "y" : "ies"} will be excluded — no matching template
                 </p>
                 <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 mb-2">
-                  Upload a dedicated template for each category below, then re-export to include these products.
+                  Upload a dedicated template for each category below, then click Refresh to pick it up here (no page reload needed).
                 </p>
-                <ul className="flex flex-col gap-1">
+                <ul className="flex flex-col gap-1 mb-3">
                   {allMissing.map((cat) => (
                     <li key={cat} className="flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300">
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
@@ -331,6 +359,24 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                     </li>
                   ))}
                 </ul>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="/templates"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-600 text-white text-xs font-medium hover:bg-amber-700 transition"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    Upload template
+                  </a>
+                  <button
+                    onClick={() => loadTemplates(true)}
+                    disabled={refreshing}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 text-xs font-medium hover:bg-amber-200 dark:hover:bg-amber-900/60 transition disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
+                    {refreshing ? "Refreshing…" : "Refresh templates"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -341,30 +387,40 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
         {usesCategoryZip ? (
           <>
-            <div className="rounded-xl border p-4 bg-green-50 border-green-200">
-              <p className="text-2xl font-bold text-green-700">{categories.length}</p>
+            <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categories.length}</p>
               <p className="text-sm text-muted-foreground">Categories → files</p>
             </div>
-            <div className="rounded-xl border p-4">
+            <div className="rounded-xl p-4 bg-muted/50">
               <p className="text-2xl font-bold">{exportableCount}</p>
               <p className="text-sm text-muted-foreground">Products to export</p>
             </div>
-            <div className="rounded-xl border p-4">
-              <p className="text-2xl font-bold">{templates.length}</p>
+            <div className="rounded-xl p-4 bg-muted/50">
+              <div className="flex items-center justify-between">
+                <p className="text-2xl font-bold">{templates.length}</p>
+                <button
+                  onClick={() => loadTemplates(true)}
+                  disabled={refreshing}
+                  title="Refresh templates"
+                  className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-background/60 text-muted-foreground hover:bg-background transition disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
+                </button>
+              </div>
               <p className="text-sm text-muted-foreground">Templates available</p>
             </div>
           </>
         ) : (
           <>
-            <div className="rounded-xl border p-4 bg-green-50 border-green-200">
-              <p className="text-2xl font-bold text-green-700">{products.length}</p>
+            <div className="rounded-xl p-4 bg-green-50 dark:bg-green-950/30">
+              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{products.length}</p>
               <p className="text-sm text-muted-foreground">Products to export</p>
             </div>
-            <div className="rounded-xl border p-4">
+            <div className="rounded-xl p-4 bg-muted/50">
               <p className="text-2xl font-bold">{categories.length}</p>
               <p className="text-sm text-muted-foreground">Categories detected</p>
             </div>
-            <div className="rounded-xl border p-4">
+            <div className="rounded-xl p-4 bg-muted/50">
               <p className="text-2xl font-bold">{templates.length}</p>
               <p className="text-sm text-muted-foreground">Templates available</p>
             </div>
