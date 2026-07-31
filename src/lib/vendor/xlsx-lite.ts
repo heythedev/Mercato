@@ -38,7 +38,7 @@ function attr(tag: string, name: string): string | null {
   return m ? m[1] : null;
 }
 
-const MAX_COLS = 512;
+const MAX_COLS = 1024;
 const SCORE_SCAN_ROWS = 60;
 
 const NAME_POSITIVE = /listing|template|catalog\b|product|items?\b|offers?\b|\bdata\b/i;
@@ -62,7 +62,11 @@ function scoreSheet(name: string, grid: string[][]): number {
     if (grid[i].some((c) => String(c ?? "").trim() !== "")) dataRowsBelow++;
   }
   const nameBonus = NAME_NEGATIVE.test(name) ? -80 : NAME_POSITIVE.test(name) ? 60 : 0;
-  return Math.min(headerCount, 120) + nameBonus - Math.min(dataRowsBelow * 5, 60);
+  // Reward sheets with more data rows — a large row count is a strong signal this
+  // is the product catalog sheet. The old formula PENALISED large row counts which
+  // could cause a small helper sheet to outscore a 10k-product sheet.
+  const rowBonus = dataRowsBelow > 0 ? Math.min(Math.floor(Math.log10(dataRowsBelow) * 15), 45) : 0;
+  return Math.min(headerCount, 120) + nameBonus + rowBonus;
 }
 
 export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<XlsxGrid> {
@@ -96,10 +100,13 @@ export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<Xls
     if (!sheetXml) continue;
     const grid = parseSheetRows(sheetXml, shared, Math.max(maxRows, SCORE_SCAN_ROWS));
     const score = scoreSheet(name, grid);
+    console.log(`[xlsx] Sheet "${name}": ${grid.length} rows, score=${score}`);
     if (!best || score > best.score) best = { name, grid, score };
   }
   if (!best) throw new Error("Workbook has no readable sheets.");
-  return { sheetName: best.name, grid: best.grid.slice(0, maxRows) };
+  const result = best.grid.slice(0, maxRows);
+  console.log(`[xlsx] Selected sheet "${best.name}" (score=${best.score}) with ${result.length} rows`);
+  return { sheetName: best.name, grid: result };
 }
 
 function parseSheetRows(sheetXml: string, shared: string[], maxRows: number): string[][] {

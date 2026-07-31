@@ -15,7 +15,7 @@ export type VendorRow = {
   [key: string]: unknown;
 };
 
-const MAX_FILE_COLS = 64;
+const MAX_FILE_COLS = 256;
 const HEADER_SCAN_ROWS = 25;
 
 const BARCODE_RE = /^\d{8,14}$/;
@@ -293,11 +293,12 @@ function gridToRows(grid: string[][]): VendorRow[] {
     dataRows.push(row);
   }
 
+  console.log(`[parse] Grid: ${grid.length} total rows, header at row ${headerIdx}, data starts at row ${dataStartIdx}, ${dataRows.length} non-blank data rows`);
   if (!dataRows.length) return [];
 
   const cols = detectColumns(headers, dataRows.slice(0, 10));
 
-  return dataRows.map((row) => {
+  const parsed = dataRows.map((row) => {
     const get = (idx: number | null): string => (idx != null ? row[idx] ?? "" : "").trim();
 
     // Build raw vendorData — FIRST-WINS for duplicate column names so individual item dims
@@ -371,6 +372,8 @@ function gridToRows(grid: string[][]): VendorRow[] {
       })(),
     } as VendorRow;
   }).filter((r): r is VendorRow => r !== null && r.name.length > 0);
+  console.log(`[parse] Final: ${parsed.length} valid products (${dataRows.length - parsed.length} filtered out)`);
+  return parsed;
 }
 
 // ── CSV ────────────────────────────────────────────────────────────────────────
