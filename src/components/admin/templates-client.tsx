@@ -18,6 +18,26 @@ type Template = {
 
 const MARKETPLACES = ["amazon_us", "amazon", "walmart", "bestbuy", "temu", "mathis", "sears"];
 
+// Group keys can be a marketplace id or the fallback "other". Domains drive the
+// favicon logos (same source used elsewhere in the app).
+const MARKETPLACE_DOMAIN: Record<string, string> = {
+  amazon_us: "amazon.com", amazon: "amazon.com", bestbuy: "bestbuy.com", walmart: "walmart.com",
+  temu: "temu.com", mathis: "mathishome.com", sears: "sears.com",
+};
+
+function MarketplaceLogo({ marketplace, className }: { marketplace: string; className?: string }) {
+  const domain = MARKETPLACE_DOMAIN[marketplace];
+  if (!domain) return null;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={`https://www.google.com/s2/favicons?domain=${domain}&sz=64`}
+      alt=""
+      className={cn("shrink-0 rounded-sm", className)}
+    />
+  );
+}
+
 type ColumnDef = { key: string; label: string };
 
 function parseColumns(raw: unknown): ColumnDef[] {
@@ -398,10 +418,13 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
               type="button"
               onClick={() => toggleGroup(label)}
               aria-expanded={isGroupOpen}
-              className="flex w-full items-center gap-2 px-4 py-2.5 bg-muted/40 text-left transition-colors hover:bg-muted/60"
+              className="flex w-full items-center gap-2.5 px-4 py-2.5 bg-muted/40 text-left transition-colors hover:bg-muted/60"
             >
+              <MarketplaceLogo marketplace={label} className="w-4 h-4" />
               <span className="text-sm font-semibold capitalize">{label}</span>
-              <span className="text-xs text-muted-foreground ml-1">{items.length}</span>
+              <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-muted px-1.5 text-xs font-medium text-muted-foreground">
+                {items.length}
+              </span>
               <ChevronDown
                 className={cn(
                   "ml-auto w-4 h-4 text-muted-foreground transition-transform duration-200",
