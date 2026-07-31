@@ -180,21 +180,34 @@ export async function generateCategoryZip(
     if (isUncategorized) {
       tpl = fallback;
     } else {
-      // 1) Exact match against category paths embedded in each template file
-      const lowerCat = catLabel.toLowerCase();
+      // 1) Exact match against category paths embedded in each template file.
+      // Normalise " / " → " > " on both sides so Temu's slash-format template
+      // paths match our arrow-format AI category strings.
+      const normSep = (s: string) => s.replace(/ \/ /g, " > ");
+      const lowerCat = normSep(catLabel).toLowerCase();
       const exactMatch = tmplCats.size > 0
         ? templates.find(t => {
             const cats = tmplCats.get(t.id);
             if (!cats) return false;
-            return cats.has(lowerCat) || [...cats].some(c => lowerCat.startsWith(c) || c.startsWith(lowerCat));
+            return [...cats].some(c => {
+              const nc = normSep(c).toLowerCase();
+              return nc === lowerCat || lowerCat.startsWith(nc) || nc.startsWith(lowerCat);
+            });
           })
         : undefined;
 
       if (exactMatch) {
         tpl = exactMatch;
         console.log(`[export] Exact category match: "${tpl.name}" for "${catLabel}"`);
+      } else if (isTemu && tmplCats.size > 0) {
+        // Templates have embedded category paths but none matched this category.
+        // Rather than assigning a wrong template via word-overlap, mark it missing
+        // so the user knows to upload a dedicated template for this category.
+        missingTemplateCategories.push(catLabel);
+        console.log(`[export] No matching template for "${catLabel}" — flagged as missing`);
+        continue;
       } else {
-        // 2) Name/word-overlap
+        // 2) Name/word-overlap (non-Temu, or Temu templates without embedded paths)
         tpl = findBestTemplate(catLabel, templates, fallback);
         // 3) Column overlap — only when no designated catch-all exists
         if (tpl === fallback && templates.length > 1 && !hasCatchAll) {
@@ -253,9 +266,11 @@ export function findBestTemplate<T extends { id: string; name: string; category?
   if (templates.length <= 1) return fallback;
 
   // Fold accents so "Décor" ↔ "Decor", then strip to alphanumerics.
+  // Also normalise " / " → " > " so Temu template names ("Home & Kitchen / Furniture / Chairs")
+  // score against our arrow-format categories ("Furniture > Dining Room > Chairs") correctly.
   const fold = (s: string) =>
     s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-  const norm = (s: string) => fold(s).replace(/[^a-z0-9]+/g, " ").trim();
+  const norm = (s: string) => fold(s.replace(/ \/ /g, " > ")).replace(/[^a-z0-9]+/g, " ").trim();
 
   // Prefer matching on the department (level-1) of a "A > B > C" path.
   const department = category.split(/\s*>\s*/)[0]?.trim() || category;
@@ -379,9 +394,11 @@ async function extractTemuTemplateCategories(fileData: Buffer): Promise<string[]
       let tM: RegExpExecArray | null;
       while ((tM = tRe.exec(siM[1]))) text += tM[1];
       text = text.trim();
-      // Category paths have at least one " > " separator and are not too long
-      if (text.includes(" > ") && text.split(" > ").length >= 2 && text.length < 300) {
-        found.push(text);
+      // Temu template files use " / " as the path separator; normalize to " > " so
+      // matching is consistent regardless of which separator the template uses.
+      const normalised = text.replace(/ \/ /g, " > ");
+      if (normalised.includes(" > ") && normalised.split(" > ").length >= 2 && text.length < 300) {
+        found.push(normalised);
       }
     }
     return [...new Set(found)];
