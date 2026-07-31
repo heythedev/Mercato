@@ -26,6 +26,16 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/** First usable barcode from a Keepa code list, coerced to string (Keepa may
+ *  return numeric EAN/UPC values) and validated as an 8–14 digit code. */
+function firstBarcode(list?: (string | number)[] | null): string | null {
+  for (const c of list ?? []) {
+    const s = String(c).trim();
+    if (/^\d{8,14}$/.test(s)) return s;
+  }
+  return null;
+}
+
 function lastValue(csv?: number[] | null): number | null {
   if (!csv || csv.length < 2) return null;
   const v = csv[csv.length - 1];
@@ -214,6 +224,12 @@ export function normalizeProduct(p: KeepaProduct, domain: number): NormalizedPro
     size: str(p.size),
     model: str(p.model),
     partNumber: str(p.partNumber),
+    // Barcode Keepa carries for the listing (UPC preferred, EAN fallback). Amazon
+    // lists by ASIN, so this is optional catalog metadata that is legitimately
+    // absent for many listings — but when present it lets the verify UPC check
+    // actually confirm the match instead of always falling to "could not verify".
+    // Coerce to string first: Keepa sometimes returns numeric EAN/UPC codes.
+    upc: firstBarcode(p.upcList) ?? firstBarcode(p.eanList),
     packageQuantity: pos(p.packageQuantity) ?? pos(p.numberOfItems),
     offerCount: statOrCsv(p, IDX.COUNT_NEW),
     oosPercent: pickOos(p),

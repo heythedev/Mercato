@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 
 /**
  * Transient project statuses are written at the *start* of a long-running
@@ -18,10 +19,11 @@ import { prisma } from "@/lib/db";
 const STALE_MS = 6 * 60 * 1000;
 
 // transient status → the stable status to recover to (mirrors each route's
-// catch handler: verify → uploaded, categorize → verified, export → categorized).
+// catch handler): verify → uploaded, export → categorized. `categorizing` is
+// handled separately below because its fallback is marketplace-dependent
+// (skip-verify marketplaces roll back to "uploaded", others to "verified").
 const RECOVERY: Record<string, string> = {
   verifying: "uploaded",
-  categorizing: "verified",
   exporting: "categorized",
 };
 
@@ -33,15 +35,34 @@ export async function recoverStaleProjects(
   scope: { userId?: string; id?: string } = {},
 ): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_MS);
+  const skipVerify = [...SKIP_VERIFY_MARKETPLACES];
   try {
-    await Promise.all(
-      Object.entries(RECOVERY).map(([from, to]) =>
+    await Promise.all([
+      // Fixed-fallback transient statuses.
+      ...Object.entries(RECOVERY).map(([from, to]) =>
         prisma.project.updateMany({
           where: { ...scope, status: from, updatedAt: { lt: cutoff } },
           data: { status: to },
         }),
       ),
-    );
+      // Stale categorizing: skip-verify marketplaces have no "verified" state, so
+      // roll them back to "uploaded"; everyone else rolls back to "verified".
+      // marketplace is stored lowercase, matched case-insensitively to be safe.
+      prisma.project.updateMany({
+        where: {
+          ...scope, status: "categorizing", updatedAt: { lt: cutoff },
+          marketplace: { in: skipVerify, mode: "insensitive" },
+        },
+        data: { status: "uploaded" },
+      }),
+      prisma.project.updateMany({
+        where: {
+          ...scope, status: "categorizing", updatedAt: { lt: cutoff },
+          marketplace: { notIn: skipVerify, mode: "insensitive" },
+        },
+        data: { status: "verified" },
+      }),
+    ]);
   } catch (err) {
     // Recovery is best-effort — never let it block the page/route it guards.
     console.error("[recover-stale] failed to reset stale projects:", err);

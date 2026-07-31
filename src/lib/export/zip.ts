@@ -563,6 +563,30 @@ async function fillTemplateXlsx(
   }
   let sheetXml = await tplZip.file(sheetPath)!.async("string");
 
+  // ── Text-formatted styles ──────────────────────────────────────────────────
+  // A cell whose style already carries a Text number format (built-in numFmtId
+  // 49, or a custom "@" format) displays digits literally — no scientific
+  // notation. For those cells a long numeric id can be written as a NUMBER and
+  // still render exactly, which avoids Excel's "number stored as text" green
+  // triangle that a shared-string (t="s") value would trigger. Collect the set
+  // of such style (xf) indices so writeCell can decide per cell.
+  const textFormatStyles = new Set<string>();
+  {
+    const stylesXml = await tplZip.file("xl/styles.xml")?.async("string") ?? "";
+    // Custom numFmts that are text ("@") → collect their ids.
+    const textNumFmtIds = new Set<string>(["49"]); // 49 = built-in Text
+    for (const m of stylesXml.matchAll(/<numFmt\s+numFmtId="(\d+)"\s+formatCode="([^"]*)"/g)) {
+      if (/@/.test(m[2])) textNumFmtIds.add(m[1]);
+    }
+    const cellXfs = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
+    let idx = 0;
+    for (const xf of cellXfs.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)) {
+      const numFmtId = xf[0].match(/\bnumFmtId="(\d+)"/)?.[1];
+      if (numFmtId && textNumFmtIds.has(numFmtId)) textFormatStyles.add(String(idx));
+      idx++;
+    }
+  }
+
   // ── Shared strings ─────────────────────────────────────────────────────────
   // Keep original <si> XML elements verbatim so rich-text formatting (bold,
   // colored text, fonts) in template header cells is fully preserved.
@@ -960,6 +984,7 @@ async function fillTemplateXlsx(
 
   const isTemu = marketplace.toLowerCase() === "temu";
   const isWalmart = marketplace.toLowerCase() === "walmart";
+  const isAmazon = marketplace.toLowerCase() === "amazon" || marketplace.toLowerCase() === "amazon_us";
   // Map a categorized value (a rich "A > B > C" path, or already a flat value)
   // down to one of the 75 categories the Walmart template dropdown accepts.
   // Loaded lazily so non-Walmart exports never touch the taxonomy files.
@@ -980,6 +1005,47 @@ async function fillTemplateXlsx(
     });
   };
 
+  // Amazon's template repeats the same label across sibling columns — five
+  // "Other Image Location" columns, five "Features", etc. They all normalise to
+  // one key, so getProductField can't tell #1 from #5. Pre-compute each repeated
+  // column's ordinal (0-based) among its like-labelled siblings, keyed by letter,
+  // so colVal can pull image #2 into the second "Other Image" column and so on.
+  const amazonSiblingOrdinal = new Map<string, number>();
+  if (isAmazon) {
+    const seen = new Map<string, number>();
+    for (const { letter } of [...colEntries].sort((a, b) => colNum(a.letter) - colNum(b.letter))) {
+      const nk = normalizeKey(colLetterToHeader.get(letter) ?? "");
+      const n = seen.get(nk) ?? 0;
+      amazonSiblingOrdinal.set(letter, n);
+      seen.set(nk, n + 1);
+    }
+  }
+  // Vendor extra-image URLs in order, resolved once per product (memoised by id).
+  const _extraImgCache = new Map<string, string[]>();
+  const extraImages = (p: Product): string[] => {
+    const hit = _extraImgCache.get(p.id);
+    if (hit) return hit;
+    const vd = p.vendorData as Record<string, unknown> | null;
+    const vdNorm = vd ? getVdNorm(vd) : null;
+    const pick = (...aliases: string[]): string => {
+      if (!vdNorm) return "";
+      for (const a of aliases) {
+        const v = vdNorm.get(normalizeKey(a));
+        if (v != null && String(v).trim() !== "") return String(v).trim();
+      }
+      return "";
+    };
+    const urls = [
+      pick("image_url2", "image_url_2", "image2", "other_image_url1", "alternate_image1", "secondary_image"),
+      pick("image_url3", "image_url_3", "image3", "other_image_url2", "alternate_image2"),
+      pick("image_url4", "image_url_4", "image4", "other_image_url3", "alternate_image3"),
+      pick("image_url5", "image_url_5", "image5", "other_image_url4", "alternate_image4"),
+      pick("image_url6", "image_url_6", "image6", "other_image_url5", "alternate_image5"),
+    ];
+    _extraImgCache.set(p.id, urls);
+    return urls;
+  };
+
   // Compute the final value for a column (dropdown-safe)
   const colVal = (p: Product, col: Column, letter: string): string => {
     let raw = String(getProductField(p, col.key) ?? "");
@@ -996,6 +1062,37 @@ async function fillTemplateXlsx(
       // marketplaceCategory (a " > " path) which is wrong here; also covers the case
       // where no category was assigned (raw="") — both should default to "Normal product".
       if ((nk === "producttype" || nk === "goodstype" || nk === "skutype") && (raw.includes(" > ") || !raw.trim())) raw = "Normal product";
+    }
+
+    // Amazon listing-loader field coercions applied before dropdown matching.
+    if (isAmazon) {
+      const nk = normalizeKey(col.key);
+      const headerNk = normalizeKey(colLetterToHeader.get(letter) ?? "");
+      // "Listing Action" (field code ::record_action) accepts "Create or Edit" /
+      // "Delete" — NOT the generic "Add" the coreMap fills for other marketplaces.
+      if (nk === "listingaction" && (raw === "Add" || !raw.trim())) raw = "Create or Edit";
+
+      // "Features" here is supplemental_condition_information.features — a
+      // refurbishment-type dropdown for NON-new items (Green Refurbishment, Parts
+      // Inspected…), NOT product bullet points. The generic coreMap fills it with
+      // the description, which is invalid for a New offer, so blank it.
+      if (headerNk === "features") raw = "";
+
+      // The five "Other Image Location" columns share one label; assign each the
+      // next distinct vendor image by its ordinal among the siblings.
+      if (headerNk === "otherimagelocation") {
+        raw = extraImages(p)[amazonSiblingOrdinal.get(letter) ?? 0] ?? "";
+      }
+
+      // Never emit a lone dimension/weight UNIT when its paired value is blank —
+      // Amazon rejects a unit with no value. Each "* Unit" sits immediately to the
+      // right of its value column, so clear the unit if that neighbour is empty.
+      if (/unit$/.test(headerNk) && raw.trim()) {
+        const target = colNum(letter) - 1;
+        const valueCol = colEntries.find((e) => colNum(e.letter) === target)?.col;
+        const paired = valueCol ? String(getProductField(p, valueCol.key) ?? "").trim() : "";
+        if (!paired) raw = "";
+      }
     }
 
     if (isShippingWeightCol(col, letter)) {
@@ -1106,9 +1203,17 @@ async function fillTemplateXlsx(
       // Column the template styles but we have no data for → keep it empty so
       // the cell (and its fill/border) is preserved.
       if (val === undefined || val === "") return `<c r="${ref}"${sAttr}/>`;
-      // Long numeric identifiers (UPC/GTIN) must stay text or Excel shows 6.36E+11.
+      // Long numeric identifiers (UPC/GTIN) can't be written as a plain number in
+      // a General-formatted cell — Excel renders them as 6.36E+11. So normally they
+      // go out as a shared string. But if the cell's own style is a Text format
+      // (numFmt 49 / "@"), a numeric value already displays literally, and writing
+      // it as a NUMBER avoids the "number stored as text" green triangle that a
+      // shared string triggers. Amazon's template styles its id columns as Text,
+      // so this is the common case for UPC/EAN.
       const isLargeId = /^\d{10,}$/.test(val);
-      const isNum = !isLargeId && !Number.isNaN(Number(val));
+      const styleIdx = sAttr.match(/\bs="(\d+)"/)?.[1];
+      const cellIsTextFormatted = styleIdx != null && textFormatStyles.has(styleIdx);
+      const isNum = !Number.isNaN(Number(val)) && (!isLargeId || cellIsTextFormatted);
       return isNum
         ? `<c r="${ref}"${sAttr}><v>${x(val)}</v></c>`
         : `<c r="${ref}"${sAttr} t="s"><v>${ssIdx(val)}</v></c>`;
@@ -1614,6 +1719,57 @@ function getProductField(p: Product, key: string): unknown {
     sale_price: fromVendor("sale_price", "promo_price") ?? price,
     minimum_seller_allowed_price: fromVendor("min_price", "minimum_price", "map_price") ?? price,
     maximum_seller_allowed_price: fromVendor("max_price", "maximum_price") ?? "",
+
+    // ── Amazon "Tag/Listing" loader (new-version) column labels ───────────────
+    // This template stores its ROW-4 human labels as the template columns (row 4
+    // and the row-5 field codes tie on cell count, and the uploader keeps the
+    // first). Those labels normalise to keys that the generic aliases above don't
+    // cover, so the offer price came out blank. Map the label forms explicitly.
+    // "Your Price USD (…)" → normalises to "yourpriceusd" after the parenthetical
+    // marketplace/audience suffix is stripped by normalizeKey.
+    yourpriceusd: price,
+    // NOTE: the B2B duplicate — "Your Price USD (Amazon Business (B2B), US)" —
+    // is deliberately NOT mapped. Filling it enrolls every product in Amazon
+    // Business B2B pricing, which is a seller decision, not a default; the
+    // original template's sample row leaves it blank too. (Its label also
+    // normalises to "yourpriceusdus" because of nested parentheses, so it would
+    // need a separate key anyway.)
+    // Fulfillment channel / shipping template are account-specific; default to the
+    // merchant-fulfilled values from the template's own sample row.
+    fulfillmentchannelcode: "Fulfillment by Merchant (Default)",
+    shippingtemplate: "Default_Shipping Template",
+
+    // Handling time — vendor lead time if present, else Amazon's own default (blank
+    // = 2 days), so only emit when the vendor actually supplies it.
+    handlingtime: fromVendor("handling_time", "lead_time", "fulfillment_latency", "ship_time") ?? "",
+
+    // Dimension / weight UNITS. Amazon requires a unit whenever the paired value is
+    // present, and a value-without-unit errors — the far more likely failure than a
+    // unit sitting beside a blank value. Default to US customary; colVal clears any
+    // unit whose paired value came out empty so we never emit a lone unit.
+    itemweightunit: fromVendor("weight_unit", "item_weight_unit") ?? "Pounds",
+    itemlengthunit: fromVendor("length_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    itemwidthunit: fromVendor("width_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    itemheightunit: fromVendor("height_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    packagelengthunit: fromVendor("length_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    packagewidthunit: fromVendor("width_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    packageheightunit: fromVendor("height_unit", "dimension_unit", "dim_unit") ?? "Inches",
+    packageweightunit: fromVendor("weight_unit", "package_weight_unit") ?? "Pounds",
+
+    // Package dimensions/weight — fall back to the item's own values so the
+    // shipping block is populated when the vendor only gives item dimensions.
+    itempackagelength: fromVendor("package_length", "shipping_length", "length", "item_length") ?? "",
+    itempackagewidth: fromVendor("package_width", "shipping_width", "width", "item_width") ?? "",
+    itempackageheight: fromVendor("package_height", "shipping_height", "height", "item_height") ?? "",
+
+    // Images — Amazon "…Location" columns take a URL. Main = the product image;
+    // the five "Other Image" columns are disambiguated by column position in
+    // colVal (they all share the label "Other Image Location").
+    mainimagelocation: p.imageUrl || fromVendor("image_url", "main_image", "image", "primary_image") || fromLive("image") || "",
+    otherimagelocation: "", // resolved per-column in colVal from vendor image_url2..6
+
+    // Offer condition note — only meaningful for non-New; left to vendor data.
+    offerconditionnote: fromVendor("condition_note", "condition_comment") ?? "",
 
     // Condition & quantity
     item_condition: "New",

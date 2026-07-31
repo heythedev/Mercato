@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { NewProjectModal } from "@/components/projects/new-project-modal";
 
@@ -686,7 +687,15 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
       {paginated.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {paginated.map((p) => {
-            const status = STATUS_CONFIG[p.status] ?? { label: p.status, color: "bg-muted text-muted-foreground", icon: Clock };
+            // Skip-verify marketplaces (Temu, Best Buy, …) have no Verify step, so
+            // "verified" is never a legitimate state for them — an old failed
+            // categorization could have left it there. Show it as "uploaded"
+            // instead of a misleading green "Verified" badge.
+            const displayStatus =
+              p.status === "verified" && SKIP_VERIFY_MARKETPLACES.has(p.marketplace.toLowerCase())
+                ? "uploaded"
+                : p.status;
+            const status = STATUS_CONFIG[displayStatus] ?? { label: displayStatus, color: "bg-muted text-muted-foreground", icon: Clock };
             const StatusIcon = status.icon;
             const isDeleting = deleting === p.id;
             const isSelected = selected.has(p.id);
@@ -708,24 +717,6 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
                   {isSelected && <Check className="w-2.5 h-2.5" strokeWidth={3} />}
                 </button>
 
-                {/* Hover-reveal delete — top-right corner */}
-                <button
-                  onClick={(e) => handleDelete(e, p.id, p.name)}
-                  disabled={isDeleting}
-                  title="Delete project"
-                  className={cn(
-                    "absolute top-3 right-3 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-150",
-                    "bg-white border border-gray-200 shadow-sm text-gray-500",
-                    "hover:border-red-300 hover:bg-red-50 hover:text-red-600 hover:shadow-none",
-                    "opacity-0 group-hover:opacity-100 disabled:opacity-30"
-                  )}
-                >
-                  {isDeleting
-                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    : <Trash2 className="w-3.5 h-3.5" />
-                  }
-                </button>
-
                 <Link
                   href={`/projects/${p.id}`}
                   className={cn(
@@ -744,10 +735,36 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
                         {MARKETPLACE_LABELS[p.marketplace] ?? p.marketplaceLabel}
                       </p>
                     </div>
-                    <span className={cn("inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full shrink-0 mr-7", status.color)}>
-                      <StatusIcon className={cn("w-3 h-3", ["verifying","categorizing","exporting"].includes(p.status) && "animate-spin")} />
-                      {status.label}
-                    </span>
+                    {/* Chip sits flush right; on card hover the delete button
+                        expands from 0-width, pushing the chip smoothly left. */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={cn("inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full shrink-0", status.color)}>
+                        <StatusIcon className={cn("w-3 h-3", ["verifying","categorizing","exporting"].includes(p.status) && "animate-spin")} />
+                        {status.label}
+                      </span>
+                      <button
+                        onClick={(e) => handleDelete(e, p.id, p.name)}
+                        disabled={isDeleting}
+                        title="Delete project"
+                        aria-label="Delete project"
+                        className={cn(
+                          "shrink-0 flex items-center justify-center overflow-hidden rounded-lg text-gray-500",
+                          "border border-gray-200 bg-white shadow-sm",
+                          "hover:border-red-300 hover:bg-red-50 hover:text-red-600 hover:shadow-none",
+                          "transition-[width,opacity,margin] duration-200 ease-out",
+                          // Collapsed by default; expands on card hover. -ml-2
+                          // cancels the flex gap so there's truly zero footprint
+                          // when hidden.
+                          "w-0 h-7 opacity-0 -ml-2 group-hover:w-7 group-hover:opacity-100 group-hover:ml-0",
+                          "disabled:opacity-30"
+                        )}
+                      >
+                        {isDeleting
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          : <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                        }
+                      </button>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -772,7 +789,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
                   <div className="w-full bg-muted rounded-full h-1">
                     <div
                       className="bg-primary h-1 rounded-full transition-all"
-                      style={{ width: `${PROGRESS[p.status] ?? 0}%` }}
+                      style={{ width: `${PROGRESS[displayStatus] ?? 0}%` }}
                     />
                   </div>
                 </Link>

@@ -12,6 +12,7 @@ import {
   rejectCategorizeJob,
   getCategorizeJob,
 } from "@/lib/categorize/job-store";
+import { preCategorizeStatus } from "@/lib/projects/marketplace-flow";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
@@ -195,7 +196,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Lightweight check — ownership only, no heavy product data loaded yet.
   const projectMeta = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, userId: true },
+    select: { id: true, userId: true, marketplace: true },
   });
   if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -429,7 +430,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
                 : [],
     });
    } catch (err) {
-    await prisma.project.update({ where: { id }, data: { status: "verified" } }).catch(() => {});
+    // Roll back to the step BEFORE Categorize. For skip-verify marketplaces
+    // (Temu, Best Buy, …) that is "uploaded", not "verified" — otherwise a
+    // failed categorization leaves a Temu project wrongly showing "Verified".
+    await prisma.project
+      .update({ where: { id }, data: { status: preCategorizeStatus(projectMeta.marketplace) } })
+      .catch(() => {});
     const msg = err instanceof Error ? err.message : "Categorization failed";
     console.error("[categorize] background job failed:", msg);
     rejectCategorizeJob(jobId, msg);

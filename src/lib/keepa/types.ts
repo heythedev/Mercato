@@ -131,6 +131,8 @@ export interface NormalizedProduct {
   size?: string | null;
   model?: string | null;
   partNumber?: string | null; // manufacturer part number (MPN)
+  upc?: string | null; // barcode Keepa carries (upcList[0] ?? eanList[0]); often absent
+
   packageQuantity?: number | null; // units per package
   offerCount?: number | null; // # of current New offers (availability / qty signal)
 

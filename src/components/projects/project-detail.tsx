@@ -14,6 +14,7 @@ import { ProductsTable } from "./products-table";
 import { VerifyStep } from "./steps/verify-step";
 import { CategorizeStep } from "./steps/categorize-step";
 import { ExportStep } from "./steps/export-step";
+import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 
 type Product = {
   id: string;
@@ -52,8 +53,9 @@ const STEPS = [
 ];
 
 const AMAZON_SKIP_CATEGORIZE = true;
-// These marketplaces have no public API for verification — skip straight to Categorize
-const SKIP_VERIFY = new Set(["temu", "bestbuy", "mathis", "sears", "wayfair"]);
+// These marketplaces have no public API for verification — skip straight to
+// Categorize. Shared with the server so the two never drift.
+const SKIP_VERIFY = SKIP_VERIFY_MARKETPLACES;
 
 
 function stepIndex(status: string) {
