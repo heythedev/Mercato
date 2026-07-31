@@ -219,17 +219,16 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Throughput: batch size × parallelism sets how many products clear per model
-  // round-trip. The old 5×2 meant a 3,000-product Walmart/Mathis run made ~300
-  // serial waves (~25 min) and blew the 300 s request limit. 12×8 processes the
-  // same run in ~30 waves (a few minutes) while keeping each prompt small enough
-  // that the full taxonomy sheet + product context still fits the context window.
-  // Tunable without a redeploy via env for very large sheets.
+  // Parallelism is intentionally LOW for constrained marketplaces (taxonomy prompt + 12 products
+  // per batch → large requests). High concurrency (8+) immediately saturates Anthropic's
+  // per-minute rate limit, causing most batches to get 429 errors that silently produce
+  // "Uncategorized" for every product in the batch. 3 concurrent is safe for all account tiers.
+  // Tunable without a redeploy via env for accounts with higher rate-limit tiers.
   const BATCH = Number(
     process.env.CATEGORIZE_BATCH_SIZE ??
       ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 12 : isConstrained ? 12 : 20),
   );
-  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 8 : 6));
+  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 3 : 5));
 
   const model = availableCategories?.length
     ? (process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-sonnet-5")
@@ -250,10 +249,32 @@ export async function categorizeProducts(
   let failedBatches = 0;
   let systemicError: CategorizationServiceError | null = null;
 
+  // Retry helper for Anthropic 429 rate limit errors. Exponential backoff: 2s, 4s, 8s, 16s.
+  // Without this, any 429 response silently produces "Uncategorized" for the entire batch
+  // because classifySystemicError only handles 401/403/402/404.
+  async function withRateLimitRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        const status = (err as { statusCode?: number; status?: number })?.statusCode
+          ?? (err as { statusCode?: number; status?: number })?.status;
+        if (status === 429 && attempt < maxRetries) {
+          const delay = 2000 * Math.pow(2, attempt);
+          console.warn(`[categorize] 429 rate limited (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error("Max retries exceeded");
+  }
+
   for (let i = 0; i < batches.length; i += PARALLEL) {
     const group = batches.slice(i, i + PARALLEL);
     const settled = await Promise.allSettled(
-      group.map((b) => categorizeBatch(b, marketplace, model, availableCategories))
+      group.map((b) => withRateLimitRetry(() => categorizeBatch(b, marketplace, model, availableCategories)))
     );
     settled.forEach((s, gi) => {
       if (s.status === "rejected") {
@@ -271,6 +292,10 @@ export async function categorizeProducts(
     // Bail out early on a systemic failure — no point calling the API hundreds of
     // more times with a key/quota/model that will reject every one of them.
     if (systemicError) throw systemicError;
+    // Small inter-wave delay for constrained marketplaces to stay within rate limits.
+    if (isConstrained && i + PARALLEL < batches.length) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
     // Report progress after every parallel wave. The job store's updatedAt advances,
     // so the client's stall detector sees a live run instead of one frozen phase string
     // for the whole (multi-minute) categorization of a large project.
