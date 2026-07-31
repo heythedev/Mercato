@@ -821,8 +821,16 @@ async function fillTemplateXlsx(
       attrs.match(/\bsqref="([^"]+)"/i)?.[1] ??
       body.match(/<(?:\w+:)?sqref[^>]*>([\s\S]*?)<\/(?:\w+:)?sqref>/i)?.[1]?.trim();
     if (!sqrefVal) continue;
-    // sqref can be a space-separated list of ranges; extract every unique column letter
-    const letters = [...new Set([...sqrefVal.matchAll(/([A-Z]+)\d*/gi)].map(m => m[1].toUpperCase()))];
+    // sqref is a space-separated list of ranges. Take a column as a target only
+    // when it is the ANCHOR (left) column of some sub-range — never merely the
+    // right edge of a rectangular block. Amazon's template attaches a stray 2-D
+    // range like "B9:C9" to the Listing Action validation, which previously
+    // spread that dropdown onto column C and shadowed C's own (ID-Type) list.
+    // Anchoring to the left column keeps each single-column validation (X#:X#)
+    // authoritative for its own column while ignoring the incidental overlap.
+    const letters = [...new Set(
+      sqrefVal.split(/\s+/).map((tok) => tok.match(/^\$?([A-Z]+)/i)?.[1]?.toUpperCase()).filter(Boolean) as string[],
+    )];
     if (!letters.length) continue;
     // formula1 may be an attribute, a <formula1> element, or an x14 <xm:f> element
     const rawFormula =
@@ -842,7 +850,16 @@ async function fillTemplateXlsx(
       // "Validation_28ae…_product_RUG_SHAPE" → ReferenceData!$R$2:$R$7) rather than a
       // direct range. Resolve the name to its range first; unresolved names yield no
       // options, which would silently turn the column into free text.
-      const ref = definedNames.get(formula.replace(/^=/, "").trim()) ?? formula.replace(/^=/, "");
+      //
+      // Amazon's listing-loader wraps every dropdown in INDIRECT(...) that
+      // concatenates string literals, e.g.
+      //   INDIRECT("PRODUCT"&"country_of_origin1.value")
+      // which Excel evaluates to the defined name PRODUCTcountry_of_origin1.value
+      // → 'Dropdown Lists'!$AK$4:$AK$271. Collapse such a formula to that name so
+      // the defined-name lookup below resolves it (otherwise UPC/Country and every
+      // other Amazon dropdown fails to match and gets blanked by the hard invariant).
+      const bare = evalIndirectConcat(formula.replace(/^=/, "").trim());
+      const ref = definedNames.get(bare) ?? bare;
       opts = await resolveXmlRangeDropdown(tplZip, ref, sheetNameToPath, ssArr);
     }
     if (opts.length) {
@@ -1078,6 +1095,14 @@ async function fillTemplateXlsx(
       // the description, which is invalid for a New offer, so blank it.
       if (headerNk === "features") raw = "";
 
+      // Columns intentionally left blank for the Amazon offer flow (filled by the
+      // seller downstream, or matched by Amazon from the ASIN): gift wrap, main
+      // image, and the external product id + its type. Blank regardless of source.
+      if (headerNk === "isgiftwrapavailable" || headerNk === "mainimagelocation" ||
+          headerNk === "externalproductidtype" || headerNk === "externalproductid") {
+        raw = "";
+      }
+
       // The five "Other Image Location" columns share one label; assign each the
       // next distinct vendor image by its ordinal among the siblings.
       if (headerNk === "otherimagelocation") {
@@ -1115,6 +1140,20 @@ async function fillTemplateXlsx(
     }
 
     const options = dropdowns.get(letter);
+
+    // Amazon numeric offer fields (price, min/max price, quantity, weights,
+    // dimensions) carry a one-option "dropdown" that is really a sentinel action
+    // — e.g. "Delete Offer (Sell on Amazon)" or "Delete Quantity Discounts". The
+    // cell still accepts a typed number, so a numeric value must bypass dropdown
+    // matching; otherwise the hard invariant below would blank every price.
+    if (isAmazon && options && /^-?\d+(\.\d+)?$/.test(raw.trim())) {
+      const headerNk = normalizeKey(colLetterToHeader.get(letter) ?? "");
+      const numericField =
+        /price|quantity|weight|length|width|height|value|threshold|count|cells?|percentage/.test(headerNk) ||
+        options.every((o) => /^delete\b/i.test(o)); // options are only Delete-sentinels
+      if (numericField) return raw.trim();
+    }
+
     if (!options) return raw;
     if (!raw.trim()) return "";
     const candidate = toDropdownRaw(raw);
@@ -2229,6 +2268,21 @@ function pickDropdownValue(raw: string, options: string[]): string | null {
   // No defensible match. Returning the raw value here would write a value that is not
   // in the list, which the marketplace rejects — signal failure so the AI matcher runs.
   return null;
+}
+
+// Collapse an INDIRECT() formula that concatenates string literals into the
+// single string it evaluates to, so it can be looked up as a defined name.
+//   INDIRECT("PRODUCT"&"country_of_origin1.value") → PRODUCTcountry_of_origin1.value
+// Only pure string-literal concatenation is evaluated (Amazon's pattern); any
+// formula containing cell/name references is left untouched for the caller to
+// resolve (or fail) as before. Non-INDIRECT formulas pass straight through.
+function evalIndirectConcat(formula: string): string {
+  const inner = formula.match(/^INDIRECT\s*\(([\s\S]*)\)$/i)?.[1];
+  if (inner == null) return formula;
+  const parts = inner.split("&").map((s) => s.trim());
+  // Every part must be a quoted string literal, else we can't evaluate it safely.
+  if (!parts.every((p) => /^"[^"]*"$/.test(p))) return formula;
+  return parts.map((p) => p.slice(1, -1)).join("");
 }
 
 function normalizeKey(s: string): string {
