@@ -1592,6 +1592,13 @@ function getVdNorm(vd: Record<string, unknown>): Map<string, unknown> {
   return norm;
 }
 
+// The normalized coreMap (200+ derived fields) depends ONLY on the product, but
+// getProductField is called once per template column (80+ for Mathis). Rebuilding the
+// whole coreMap every call is O(columns × coreMapSize) per product and, with a rich
+// vendorData, degrades badly enough to hang a large export. Cache the finished
+// normalized map per product so it's built exactly once.
+const _coreNormCache = new WeakMap<object, Map<string, unknown>>();
+
 function getProductField(p: Product, key: string): unknown {
   const nk = normalizeKey(key);
   // "Length - in" normalises to "lengthin" but coreMap has "length". Pre-compute a
@@ -1607,6 +1614,15 @@ function getProductField(p: Product, key: string): unknown {
 
   // O(1) vendorData lookup using the per-product normalized key map
   const vdNorm: Map<string, unknown> | null = vd ? getVdNorm(vd) : null;
+
+  // Fast path: coreMap already built for this product on a previous column — reuse it
+  // and run only the (cheap) lookups below, skipping the expensive coreMap rebuild.
+  const cachedCore = _coreNormCache.get(p);
+  if (cachedCore) {
+    if (cachedCore.has(nk)) return cachedCore.get(nk);
+    if (bareNk && cachedCore.has(bareNk)) return cachedCore.get(bareNk);
+    return lookupVendorAndLive(nk, bareNk, key, vd, vdNorm, ld);
+  }
 
   const fromVendor = (...aliases: string[]): unknown => {
     if (!vd || !vdNorm) return undefined;
@@ -1891,17 +1907,26 @@ function getProductField(p: Product, key: string): unknown {
     image_url: p.imageUrl || fromLive("image") || "",
     imageurl: p.imageUrl || fromLive("image") || "",
     main_image_url: p.imageUrl || fromLive("image") || "",
-    silo_image: p.imageUrl || fromVendor("silo_image", "image_url", "main_image", "hero_image", "primary_image") || fromLive("image") || "",
-    other_image_url1: fromVendor("image_url2", "other_image_url1", "alternate_image1") ?? "",
-    product_image_2_url: fromVendor("product_image_2_url", "image_url2", "image_url_2", "image2", "alternate_image1", "secondary_image") ?? "",
-    product_image_3_url: fromVendor("product_image_3_url", "image_url3", "image_url_3", "image3", "alternate_image2") ?? "",
-    product_image_4_url: fromVendor("product_image_4_url", "image_url4", "image_url_4", "image4", "alternate_image3") ?? "",
-    product_image_5_url: fromVendor("product_image_5_url", "image_url5", "image_url_5", "image5", "alternate_image4") ?? "",
-    product_image_6_url: fromVendor("product_image_6_url", "image_url6", "image_url_6", "image6", "alternate_image5") ?? "",
-    product_image_7_url: fromVendor("product_image_7_url", "image_url7", "image_url_7", "image7", "alternate_image6") ?? "",
-    product_image_8_url: fromVendor("product_image_8_url", "image_url8", "image_url_8", "image8", "alternate_image7") ?? "",
-    product_image_9_url: fromVendor("product_image_9_url", "image_url9", "image_url_9", "image9", "alternate_image8") ?? "",
-    product_image_10_url: fromVendor("product_image_10_url", "image_url10", "image_url_10", "image10", "alternate_image9") ?? "",
+    // Image 1 / SILO: product's own image, else the first catalog/vendor image column.
+    silo_image: p.imageUrl || fromVendor("silo_image", "silo image", "image_url_1", "image url 1", "image_url", "main_image", "hero_image", "primary_image") || fromLive("image") || "",
+    image_1: p.imageUrl || fromVendor("image_url_1", "image url 1", "silo_image", "image_url") || fromLive("image") || "",
+    image1: p.imageUrl || fromVendor("image_url_1", "image url 1", "silo_image", "image_url") || fromLive("image") || "",
+    // Numbered images: catalog enrichment stores "Image URL N" (→ normalizes to imageurln,
+    // same as "image_url_n" and "imageN"), so all three alias forms are checked.
+    other_image_url1: fromVendor("image_url_2", "image url 2", "image_url2", "other_image_url1", "alternate_image1") ?? "",
+    image_2: fromVendor("image_url_2", "image url 2", "image_url2", "image2", "product_image_2_url") ?? "",
+    image_3: fromVendor("image_url_3", "image url 3", "image_url3", "image3", "product_image_3_url") ?? "",
+    image_4: fromVendor("image_url_4", "image url 4", "image_url4", "image4", "product_image_4_url") ?? "",
+    image_5: fromVendor("image_url_5", "image url 5", "image_url5", "image5", "product_image_5_url") ?? "",
+    product_image_2_url: fromVendor("product_image_2_url", "image_url_2", "image url 2", "image_url2", "image2", "alternate_image1", "secondary_image") ?? "",
+    product_image_3_url: fromVendor("product_image_3_url", "image_url_3", "image url 3", "image_url3", "image3", "alternate_image2") ?? "",
+    product_image_4_url: fromVendor("product_image_4_url", "image_url_4", "image url 4", "image_url4", "image4", "alternate_image3") ?? "",
+    product_image_5_url: fromVendor("product_image_5_url", "image_url_5", "image url 5", "image_url5", "image5", "alternate_image4") ?? "",
+    product_image_6_url: fromVendor("product_image_6_url", "image_url_6", "image url 6", "image_url6", "image6", "alternate_image5") ?? "",
+    product_image_7_url: fromVendor("product_image_7_url", "image_url_7", "image url 7", "image_url7", "image7", "alternate_image6") ?? "",
+    product_image_8_url: fromVendor("product_image_8_url", "image_url_8", "image url 8", "image_url8", "image8", "alternate_image7") ?? "",
+    product_image_9_url: fromVendor("product_image_9_url", "image_url_9", "image url 9", "image_url9", "image9", "alternate_image8") ?? "",
+    product_image_10_url: fromVendor("product_image_10_url", "image_url_10", "image url 10", "image_url10", "image10", "alternate_image9") ?? "",
 
     // Walmart new-listing "Spec Product Type" — assigned from Walmart's PT
     // taxonomy during categorization. Field code on the template is
@@ -2179,16 +2204,74 @@ function getProductField(p: Product, key: string): unknown {
     seller_categories: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
     // "Packing Slip Description" → product name
     packing_slip_description: p.name ?? "",
+
+    // ── Mathis / Mirakl OFFER block (mandatory columns) ─────────────────────
+    // These are the pink required columns in the Mathis template. Their field codes
+    // are generic Mirakl offer keys, so they normalize to these names. Filled with the
+    // seller SKU / IDs / price / a sensible new-in-stock offer so the row imports.
+    offer_sku: skuId,
+    "product-id": p.upc ?? skuId,
+    product_id_value: p.upc ?? skuId,
+    "product-id-type": p.upc ? detectUpcType(String(p.upc)) : "SKU",
+    product_id_type_value: p.upc ? detectUpcType(String(p.upc)) : "SKU",
+    offer_description: descriptionText || p.name || "",
+    "offer-description": descriptionText || p.name || "",
+    offer_internal_description: fromVendor("offer_internal_description", "internal_description", "internal_notes") ?? "",
+    "internal-description": fromVendor("offer_internal_description", "internal_description") ?? "",
+    // Price: vendor price → live price → blank (seller fills). Never a wrong guess.
+    offer_price: p.price ?? fromVendor("price", "retail_price", "map", "msrp", "list_price") ?? "",
+    "offer-price": p.price ?? fromVendor("price", "retail_price", "map", "msrp") ?? "",
+    offer_price_additional_info: fromVendor("offer_price_additional_info", "price_additional_info") ?? "",
+    "price-additional-info": fromVendor("offer_price_additional_info", "price_additional_info") ?? "",
+    offer_quantity: fromVendor("offer_quantity", "quantity", "qty", "stock", "inventory", "available_quantity") ?? "1",
+    minimum_quantity_alert: fromVendor("minimum_quantity_alert", "min_quantity_alert", "min_alert") ?? "",
+    "min-quantity-alert": fromVendor("minimum_quantity_alert", "min_quantity_alert") ?? "",
+    // Offer state: Mirakl condition code — "11" = New (the standard new-condition value).
+    offer_state: fromVendor("offer_state", "condition", "state", "item_condition") ?? "11",
+    logistic_class: fromVendor("logistic_class", "logistic-class", "shipping_class") ?? "",
+    "logistic-class": fromVendor("logistic_class", "shipping_class") ?? "",
+    lead_time_to_ship: fromVendor("lead_time_to_ship", "lead_time", "leadtime", "ship_days", "handling_time") ?? "",
+    update_delete_flag: fromVendor("update_delete", "update-delete", "action") ?? "new",
+
+    // ── Mathis RUG attribute columns ────────────────────────────────────────
+    // Catalog enrichment stored size/color/etc. in vendorData under these labels; the
+    // rest fall back to sensible rug defaults so the mandatory attribute cells aren't
+    // blank (a rug IS rectangular, machine-woven, indoor unless stated otherwise).
+    rug_size: fromVendor("rug_size", "size", "dimensions") ?? "",
+    rug_shape: fromVendor("rug_shape", "shape") ?? "Rectangular",
+    rug_material: fromVendor("rug_material", "material", "fabric", "composition") ?? "",
+    rug_style: fromVendor("rug_style", "style") ?? "",
+    rug_design: fromVendor("rug_design", "design", "pattern") ?? "",
+    rug_type: fromVendor("rug_type", "type") ?? "",
+    rug_origin: fromVendor("rug_origin", "origin", "country_of_origin", "made_in") ?? "",
+    casing_finish_color: fromVendor("finish_color", "casing_finish_color") ?? "",
   };
 
   // Build normalized lookup (coreMap keys use underscores; column labels may not)
   // e.g. "shipping_weight" → "shippingweight" so "ShippingWeight" column finds it.
+  // Cached per product: coreMap is identical for every column of the same product.
   const coreNorm = new Map<string, unknown>();
   for (const [k, v] of Object.entries(coreMap)) coreNorm.set(normalizeKey(k), v);
+  _coreNormCache.set(p, coreNorm);
   if (coreNorm.has(nk)) return coreNorm.get(nk);
   // Unit-suffix fallback: "lengthin" → try "length", "widthcm" → try "width", etc.
   if (bareNk && coreNorm.has(bareNk)) return coreNorm.get(bareNk);
 
+  return lookupVendorAndLive(nk, bareNk, key, vd, vdNorm, ld);
+}
+
+/**
+ * vendorData + liveData fallback lookup, shared by the cached and uncached paths of
+ * getProductField. Runs only when the coreMap didn't already resolve the column.
+ */
+function lookupVendorAndLive(
+  nk: string,
+  bareNk: string | null,
+  key: string,
+  vd: Record<string, unknown> | null,
+  vdNorm: Map<string, unknown> | null,
+  ld: Record<string, unknown> | null,
+): unknown {
   if (vd && vdNorm) {
     // Exact key match
     if (key in vd) { const v = vd[key]; if (v !== "" && v != null) return v; }
