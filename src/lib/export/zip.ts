@@ -1119,7 +1119,8 @@ async function fillTemplateXlsx(
 
   // Remaining pre-formatted rows beyond the product count — clear values but
   // keep row structure and pink cell styles (empty input area stays styled).
-  const maxTplRow = allDataRows.size > 0 ? Math.max(...allDataRows.keys()) : firstDataRowNum;
+  let maxTplRow = firstDataRowNum;
+  for (const rn of allDataRows.keys()) { if (rn > maxTplRow) maxTplRow = rn; }
   for (let rn = firstDataRowNum + products.length; rn <= maxTplRow; rn++) {
     const tplRow = allDataRows.get(rn);
     if (!tplRow) continue;
