@@ -1914,6 +1914,26 @@ function getProductField(p: Product, key: string): unknown {
     offer_attribute_value: fromVendor("offer_attribute_value", "offer_attr_value") ?? "",
     // Generic "Value" column that appears in some Walmart offer sheets
     value: fromVendor("value", "offer_attribute_value", "attribute_value") ?? "",
+
+    // ── Sears-specific column mappings ──────────────────────────────────────
+    // "Item ID" → seller's item SKU
+    item_id: skuId,
+    // "Permanent Product ID" → UPC/barcode
+    permanent_product_id: p.upc ?? fromVendor("upc", "ean", "gtin", "barcode") ?? "",
+    // "Item Class ID" → Sears category numeric ID (from vendor data if present)
+    item_class_id: fromVendor("item_class_id", "class_id", "category_id", "itemclassid") ?? "",
+    // "Item Class Display Path" → AI-assigned category path (the main category output)
+    item_class_display_path: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
+    // "Action Flag" → "A" = Add/Update
+    action_flag: fromVendor("action_flag", "actionflag") ?? "A",
+    // "FBS Item" → Fulfilled By Sears — default N
+    fbs_item: fromVendor("fbs_item", "fbsitem") ?? "N",
+    // "Variation Group ID" → group variants by UPC or SKU
+    variation_group_id: p.upc ?? p.vendorSku ?? anyVendorId ?? "",
+    // "Seller Categories" → AI-assigned category
+    seller_categories: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
+    // "Packing Slip Description" → product name
+    packing_slip_description: p.name ?? "",
   };
 
   // Build normalized lookup (coreMap keys use underscores; column labels may not)
