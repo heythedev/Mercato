@@ -150,15 +150,31 @@ export async function generateCategoryZip(
   // Temu templates ship with a category-scope sheet (and/or sample data) that
   // lists the exact Temu taxonomy paths each template covers. Build a map of
   // templateId → Set<lowerCasedCategoryPath> for use in Pass 2 matching.
+  //
+  // When a template has no embedded category list, the template NAME is used as
+  // a category path (Temu template names ARE paths: "Home & Kitchen / Furniture /
+  // Chairs"). This means auto-assignment works for all templates, not just those
+  // that happen to have an embedded category sheet.
   const isTemu = marketplace.toLowerCase() === "temu";
   const tmplCats = new Map<string, Set<string>>();
+  const normSepGlobal = (s: string) => s.replace(/ \/ /g, " > ");
   if (isTemu) {
     await Promise.all(templates.map(async (t) => {
-      if (!t.fileData) return;
-      const cats = await extractTemuTemplateCategories(t.fileData as Buffer);
+      let cats: string[] = [];
+      if (t.fileData) {
+        cats = await extractTemuTemplateCategories(t.fileData as Buffer);
+      }
       if (cats.length) {
         tmplCats.set(t.id, new Set(cats.map(c => c.toLowerCase())));
-        console.log(`[export] Template "${t.name}" lists ${cats.length} category paths`);
+        console.log(`[export] Template "${t.name}" lists ${cats.length} embedded category paths`);
+      } else {
+        // Derive coverage from template name — Temu template names are category paths
+        // (e.g. "Home & Kitchen / Furniture / Chairs"). Strip trailing numbers/codes.
+        const nameAsPath = normSepGlobal(t.name).replace(/\s*\(\d+\)\s*$/, "").trim();
+        if (nameAsPath.includes(" > ")) {
+          tmplCats.set(t.id, new Set([nameAsPath.toLowerCase()]));
+          console.log(`[export] Template "${t.name}" — derived path from name: "${nameAsPath}"`);
+        }
       }
     }));
   }
@@ -180,34 +196,51 @@ export async function generateCategoryZip(
     if (isUncategorized) {
       tpl = fallback;
     } else {
-      // 1) Exact match against category paths embedded in each template file.
-      // Normalise " / " → " > " on both sides so Temu's slash-format template
-      // paths match our arrow-format AI category strings.
-      const normSep = (s: string) => s.replace(/ \/ /g, " > ");
-      const lowerCat = normSep(catLabel).toLowerCase();
-      const exactMatch = tmplCats.size > 0
-        ? templates.find(t => {
-            const cats = tmplCats.get(t.id);
-            if (!cats) return false;
-            return [...cats].some(c => {
-              const nc = normSep(c).toLowerCase();
-              return nc === lowerCat || lowerCat.startsWith(nc) || nc.startsWith(lowerCat);
-            });
-          })
-        : undefined;
+      // 1) Category-path match against each template's coverage list.
+      //    Coverage comes from embedded category sheets OR (for most templates)
+      //    parsed from the template name itself.
+      //    Matching rules:
+      //      a) Exact: template path == product category
+      //      b) Template is parent: product cat starts with template path + " > "
+      //         ("Kitchen & Dining > Dinnerware" covers "Kitchen & Dining > Dinnerware > Placemats")
+      //      c) Product is parent: template path starts with product cat + " > "
+      //         (product "Kitchen & Dining" matches template "Kitchen & Dining > Dinnerware > Placemats")
+      //    When multiple templates match, prefer the most specific (most path segments).
+      const lowerCat = normSepGlobal(catLabel).toLowerCase();
+      const isSegmentPrefix = (prefix: string, full: string) =>
+        full === prefix || full.startsWith(prefix + " > ");
 
-      if (exactMatch) {
-        tpl = exactMatch;
-        console.log(`[export] Exact category match: "${tpl.name}" for "${catLabel}"`);
+      let bestPathMatch: TemplateRow | undefined;
+      let bestMatchDepth = -1;
+      if (tmplCats.size > 0) {
+        for (const t of templates) {
+          const cats = tmplCats.get(t.id);
+          if (!cats) continue;
+          for (const c of cats) {
+            const nc = normSepGlobal(c).toLowerCase();
+            if (isSegmentPrefix(nc, lowerCat) || isSegmentPrefix(lowerCat, nc)) {
+              const depth = nc.split(" > ").length;
+              if (depth > bestMatchDepth) {
+                bestMatchDepth = depth;
+                bestPathMatch = t;
+              }
+            }
+          }
+        }
+      }
+
+      if (bestPathMatch) {
+        tpl = bestPathMatch;
+        console.log(`[export] Path match (depth=${bestMatchDepth}): "${tpl.name}" for "${catLabel}"`);
       } else if (isTemu && tmplCats.size > 0) {
-        // Templates have embedded category paths but none matched this category.
+        // Templates have coverage paths but none matched this category.
         // Rather than assigning a wrong template via word-overlap, mark it missing
         // so the user knows to upload a dedicated template for this category.
         missingTemplateCategories.push(catLabel);
         console.log(`[export] No matching template for "${catLabel}" — flagged as missing`);
         continue;
       } else {
-        // 2) Name/word-overlap (non-Temu, or Temu templates without embedded paths)
+        // 2) Name/word-overlap (non-Temu, or Temu templates without any path data)
         tpl = findBestTemplate(catLabel, templates, fallback);
         // 3) Column overlap — only when no designated catch-all exists
         if (tpl === fallback && templates.length > 1 && !hasCatchAll) {
