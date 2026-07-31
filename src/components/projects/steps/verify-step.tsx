@@ -432,7 +432,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                           </div>
                           {f.note && (() => {
                             const style = AI_NOTE_STYLE[f.severity];
-                            const noteText = f.note.replace(/^\s*ai visual check:?\s*/i, "");
+                            // AI-generated verdicts are prefixed ("AI visual check:" /
+                            // "AI title check:" / "Needs manual review —"). A note without
+                            // that prefix is a static reviewer hint (e.g. the image check
+                            // was skipped), so label it "Review", not "AI Visual Check".
+                            const isAiNote = /^\s*(ai (visual|title) check|needs manual review)/i.test(f.note);
+                            const noteText = f.note.replace(/^\s*ai (visual|title) check:?\s*/i, "");
                             return (
                               <div className={cn("col-span-3 flex items-start gap-2 rounded-lg px-3 py-2", style.wrap)}>
                                 <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-sm", style.badge)}>
@@ -440,7 +445,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                 </span>
                                 <p className={cn("text-[11px] leading-relaxed", style.text)}>
                                   <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
-                                    AI Visual Check
+                                    {isAiNote ? "AI Visual Check" : "Review"}
                                   </span>
                                   {noteText}
                                 </p>

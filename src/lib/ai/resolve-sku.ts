@@ -1,4 +1,4 @@
-import { resolveSkuFromCatalog, hasCatalogVendor } from "./vendor-catalog";
+import { resolveSkuFromCatalog, hasCatalogVendor, type CatalogEntry } from "./vendor-catalog";
 
 /**
  * Is any usable web-search provider configured?
@@ -22,13 +22,135 @@ export type SkuProductInput = {
   vendorContext?: string | null;
 };
 
+/**
+ * Deterministic product-type hint derived from a vendor SKU's structure, used ONLY as a
+ * last resort when the code could not be resolved to a real title (the SKU is discontinued
+ * or simply absent from the vendor's public catalog).
+ *
+ * This never invents a specific product — it supplies the product FAMILY the SKU prefix
+ * always denotes, so a code the AI would otherwise flag "No match" still lands in the right
+ * broad category. Modway's rug SKUs are always "R-####-…" (verified across the whole
+ * catalog: every R-#### resolved to a Rugs entry), so an unresolved "MODA-R1102A58" is
+ * still, unambiguously, a rug.
+ */
+function skuCategoryHint(sku: string): string | null {
+  const s = sku.toUpperCase();
+  // Modway rugs: MODA-R#### / R-#### (the "R" family is exclusively area rugs)
+  if (/^(?:MODA-?)?R-?\d{3,}/.test(s)) return "rug / area rug";
+  return null;
+}
+
 export type SkuEnrichment = {
   productId: string;
   name: string;
   brand: string | null;
   description: string | null;
   searchContext: string;
+  /**
+   * Catalog attributes to merge into the product's vendorData so the export template can
+   * fill Size / Color / image / weight columns. The vendor sheet was bare SKUs, so these
+   * are the only source for those columns. Keys are human column-ish names (Color, Rug
+   * Size, Image URL 1…) that the export field resolver already understands.
+   */
+  attributes?: Record<string, string>;
 };
+
+/**
+ * Turn a catalog entry into vendorData-style attributes the export template can fill.
+ * The Shopify option names vary (Size/Color/…); each is mapped onto both the generic
+ * name and the marketplace's column labels so the export field resolver matches either.
+ * Keys are the human column labels the Mathis template uses (Rug Size, SILO Image,
+ * Image URL 1…), which normalize-match the template headers.
+ */
+export function catalogEntryToAttributes(entry: CatalogEntry): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const [optName, optVal] of Object.entries(entry.options)) {
+    attributes[optName] = optVal; // e.g. "Size": "8x10", "Color": "Blue and Ivory"
+    const lo = optName.toLowerCase();
+    if (lo === "size") { attributes["Rug Size"] = optVal; }
+    if (lo === "color" || lo === "colour") { attributes["Upholstery Color"] = optVal; }
+  }
+
+  // The catalog's image list spans EVERY variant (all colorways of the product). Prefer
+  // the images whose filename carries this variant's SKU (Modway names files
+  // "R-1129B-810_7_….jpg") so an 8x10 blue rug doesn't get the beige rug's photos.
+  const skuToken = entry.sku.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const variantImages = skuToken
+    ? entry.images.filter((u) => u.replace(/[^a-z0-9]/gi, "").toLowerCase().includes(skuToken))
+    : [];
+  const images = variantImages.length ? variantImages : entry.images;
+
+  images.slice(0, 10).forEach((url, i) => { attributes[`Image URL ${i + 1}`] = url; });
+  const silo = images[0] ?? entry.image;
+  if (silo) attributes["SILO Image"] = silo;
+  if (entry.grams) attributes["Product Weight"] = (entry.grams / 453.592).toFixed(2); // g → lb
+  return attributes;
+}
+
+export type CatalogAttributeFill = {
+  /** Main image for the product row (SILO / Image 1); null when the catalog has none. */
+  imageUrl: string | null;
+  /** vendorData-style attributes (images, size, color, weight) — see catalogEntryToAttributes. */
+  attributes: Record<string, string>;
+};
+
+/**
+ * EXPORT-TIME catalog fill: resolve images + attributes for products that lack them.
+ *
+ * Enrichment during categorization only runs for rows whose name still looks like a raw
+ * SKU code. Once a run has resolved the names, re-categorizing skips those rows — so a
+ * project enriched before attribute support existed permanently missed its images. The
+ * export must not depend on that ordering: this fill runs right before the template is
+ * written and back-fills anything a registered vendor catalog can provide.
+ *
+ * Only products that (a) carry a catalog-vendor SKU and (b) are missing an image are
+ * touched — everything else passes through with zero network cost.
+ */
+export async function fillCatalogAttributes(
+  products: Array<{
+    id: string;
+    vendorSku?: string | null;
+    imageUrl?: string | null;
+    vendorData?: unknown;
+  }>,
+  onProgress?: (done: number, total: number) => void,
+): Promise<Map<string, CatalogAttributeFill>> {
+  const out = new Map<string, CatalogAttributeFill>();
+
+  const needsFill = products.filter((p) => {
+    const sku = p.vendorSku?.trim();
+    if (!sku || !hasCatalogVendor(sku)) return false;
+    if (p.imageUrl && String(p.imageUrl).startsWith("http")) {
+      // Already has a main image — only re-fill if the numbered image columns are absent.
+      const vd = (p.vendorData ?? {}) as Record<string, unknown>;
+      const hasImgCols = Object.entries(vd).some(
+        ([k, v]) => /image/i.test(k) && String(v ?? "").startsWith("http"),
+      );
+      return !hasImgCols;
+    }
+    return true;
+  });
+  if (!needsFill.length) return out;
+
+  const PARALLEL = Number(process.env.SKU_ENRICH_PARALLELISM ?? 10);
+  let done = 0;
+  for (let i = 0; i < needsFill.length; i += PARALLEL) {
+    const slice = needsFill.slice(i, i + PARALLEL);
+    await Promise.all(
+      slice.map(async (p) => {
+        try {
+          const entry = await resolveSkuFromCatalog(p.vendorSku!.trim());
+          if (!entry) return;
+          const attributes = catalogEntryToAttributes(entry);
+          out.set(p.id, { imageUrl: attributes["SILO Image"] ?? entry.image ?? null, attributes });
+        } catch { /* leave this product as-is */ }
+      }),
+    );
+    done += slice.length;
+    onProgress?.(Math.min(done, needsFill.length), needsFill.length);
+  }
+  return out;
+}
 
 /**
  * True when the "name" is really a vendor code (SKU sheet uploads), not a product title.
@@ -313,12 +435,16 @@ export async function enrichSkuOnlyProducts(
           const primaryCategory = catalogEntry.category
             ? [catalogEntry.category, tagHint].filter(Boolean).join(" | ")
             : tagHint;
+
+          const attributes = catalogEntryToAttributes(catalogEntry);
+
           const enrichment: SkuEnrichment = {
             productId: p.id,
             name: catalogEntry.title,
             brand: catalogEntry.brand || p.brand,
             description: catalogEntry.description || p.description,
             searchContext: `catalog: ${catalogEntry.sku} | ${catalogEntry.title}`,
+            attributes: Object.keys(attributes).length ? attributes : undefined,
           };
           enrichments.push(enrichment);
           results[idx] = {
@@ -353,7 +479,13 @@ export async function enrichSkuOnlyProducts(
         // other code has no working provider unless SerpAPI is configured. Pursuing a
         // dead DuckDuckGo here is the ~40s-per-product stall that broke large runs.
         if (!WEB_SEARCH_AVAILABLE || hasCatalogVendor(sku)) {
-          results[idx] = p;
+          // The catalog didn't have this exact SKU (discontinued / unpublished), so we have
+          // no title — but the SKU structure may still tell us the product family. Attach it
+          // as a category hint so the AI categorizes the family instead of flagging "No match".
+          const hint = skuCategoryHint(sku);
+          results[idx] = hint
+            ? { ...p, vendorCategory: p.vendorCategory ?? hint, vendorContext: [p.vendorContext, `sku_type_hint: ${hint}`].filter(Boolean).join("; ") }
+            : p;
           return;
         }
 
@@ -371,7 +503,10 @@ export async function enrichSkuOnlyProducts(
         }
 
         if (!hits.length) {
-          results[idx] = p;
+          const hint = skuCategoryHint(sku);
+          results[idx] = hint
+            ? { ...p, vendorCategory: p.vendorCategory ?? hint, vendorContext: [p.vendorContext, `sku_type_hint: ${hint}`].filter(Boolean).join("; ") }
+            : p;
           return;
         }
 

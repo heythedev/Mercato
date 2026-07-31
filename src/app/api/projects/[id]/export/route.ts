@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
-import { prisma } from "@/lib/db";
+import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate } from "@prisma/client";
 import { generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
 import { createJob, resolveJob, rejectJob, getJob, setJobPhase } from "@/lib/export/job-store";
@@ -142,6 +142,49 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const allTemplates = [...userOwnTemplates, ...nonOverriddenAdmin] as TemplateRow[];
 
       if (!project) throw new Error("Project not found");
+
+      // ── Catalog back-fill: images + attributes ────────────────────────────────
+      // SKU-only vendor sheets carry no images/size/color; those come from the vendor's
+      // own catalog (Modway/TOV). Categorize-time enrichment only runs for rows whose
+      // name is still a raw code, so a project categorized before attribute support was
+      // added would permanently miss its images. Filling here — right before the
+      // template is written — makes the export self-sufficient regardless of when (or
+      // whether) enrichment ran. Only products missing an image are touched; results
+      // are persisted so subsequent exports skip the network entirely.
+      try {
+        const { fillCatalogAttributes } = await import("@/lib/ai/resolve-sku");
+        const fills = await fillCatalogAttributes(
+          project.products,
+          (done, total) => setJobPhase(jobId, `Fetching product images ${done}/${total}…`),
+        );
+        if (fills.size > 0) {
+          project.products = project.products.map((p) => {
+            const f = fills.get(p.id);
+            if (!f) return p;
+            return {
+              ...p,
+              imageUrl: p.imageUrl || f.imageUrl,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              vendorData: { ...((p.vendorData ?? {}) as object), ...f.attributes } as any,
+            };
+          });
+          const originalById = new Map(project.products.map((p) => [p.id, p]));
+          await inChunks([...fills.keys()], (productId) => {
+            const merged = originalById.get(productId);
+            return prisma.product.update({
+              where: { id: productId },
+              data: {
+                ...(merged?.imageUrl ? { imageUrl: merged.imageUrl } : {}),
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                vendorData: (merged?.vendorData ?? undefined) as any,
+              },
+            });
+          });
+          console.log(`[export] catalog back-fill: images/attributes added for ${fills.size} products`);
+        }
+      } catch (err) {
+        console.warn("[export] catalog back-fill failed (continuing without):", err);
+      }
 
       // For Walmart exports: AI-generate optimised titles (meaning + attributes + USPs)
       // instead of copying vendor titles word-for-word. Falls back to vendor name on error.

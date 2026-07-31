@@ -283,16 +283,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         productInputs = productInputs.map((p) => enrichedById.get(p.id) ?? p);
         enrichedCount = enrichments.length;
         if (enrichments.length > 0) {
-          await inChunks(enrichments, (e) =>
-            prisma.product.update({
+          // Merge catalog attributes (Size/Color/images/weight) INTO the existing
+          // vendorData so the export template can fill those columns — the vendor sheet
+          // itself was bare SKUs, so this is the only source for them.
+          const vendorDataById = new Map(
+            project.products.map((p) => [p.id, (p.vendorData ?? {}) as Record<string, unknown>]),
+          );
+          await inChunks(enrichments, (e) => {
+            const mergedVendorData = e.attributes
+              ? { ...(vendorDataById.get(e.productId) ?? {}), ...e.attributes }
+              : undefined;
+            return prisma.product.update({
               where: { id: e.productId },
               data: {
                 name: e.name,
                 brand: e.brand,
                 description: e.description,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                ...(mergedVendorData ? { vendorData: mergedVendorData as any } : {}),
               },
-            }),
-          );
+            });
+          });
         }
       }
 

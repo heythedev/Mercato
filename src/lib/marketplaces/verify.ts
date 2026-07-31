@@ -117,13 +117,14 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
   for (const r of results) {
     const field = r.fields.find((f) => f.field === "images");
     if (!field || !isUrl(field.stored)) continue;
-    // Compare ONLY against the primary marketplace image (images[0]) — the exact
-    // shot the UI shows as the thumbnail (see field.liveImage = liveImages[0]).
-    // Comparing extra angles flagged alternate views (e.g. a back shot) the
-    // reviewer never sees, producing "images differ" on rows that look identical
-    // on screen. The verdict must match what the user is actually looking at.
+    // Compare against the primary shot plus a couple of alternate angles. The
+    // batch comparer answers MATCH if ANY angle shows the catalog product, so a
+    // listing whose hero image is a detail close-up (e.g. a game board rather
+    // than the whole table) still matches on one of its other angles instead of
+    // being falsely flagged. images[0] is now the PRIMARY entity (sorted at
+    // collection time), so the thumbnail the reviewer sees is also the hero shot.
     const liveImages = Array.isArray(r.liveData.images) ? r.liveData.images as string[] : [];
-    const liveImageUrls = liveImages.filter(isUrl).slice(0, 1);
+    const liveImageUrls = liveImages.filter(isUrl).slice(0, 3);
     if (!liveImageUrls.length) continue;
     targets.push({ result: r, field, liveImageUrls });
   }
@@ -923,8 +924,18 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         : "";
 
       // Collect ALL image angles: imageEntities (all secondary/primary shots) + fallback top-level fields.
-      // The AI visual comparison will pick the best-matching angle, improving accuracy.
+      // Walmart does NOT guarantee imageEntities[0] is the hero/primary shot — a
+      // secondary angle (e.g. a close-up detail) can come first. Since the
+      // thumbnail shown in the UI and the image sent to the AI comparison are
+      // both images[0], we must sort the PRIMARY entity to the front so the
+      // representative image is the actual hero shot, not an arbitrary angle.
       const entityImages = (item.imageEntities ?? [])
+        .slice()
+        .sort((a, b) => {
+          const rank = (e: { entityType?: string }) =>
+            (e.entityType ?? "").toUpperCase() === "PRIMARY" ? 0 : 1;
+          return rank(a) - rank(b);
+        })
         .map((e) => e.largeImage ?? e.thumbnailImage)
         .filter((u): u is string => !!u && u.startsWith("http"));
       const allImages = [
@@ -1153,6 +1164,14 @@ function compareToLive(
     live: liveImgOrUrl,
     match: hasVendorImage ? hasLiveImages : true,
     severity: imgSeverity,
+    // Default note for the warning state. The AI visual check (applyImageComparison)
+    // overwrites this with its verdict when it runs; if it's skipped (no API key)
+    // or errors, this stays so the row never shows a note-less warning.
+    note: imgSeverity === "warning"
+      ? (hasVendorImage && !hasLiveImages
+          ? "Catalog has an image but the marketplace listing has none — review manually."
+          : "Compare the catalog and marketplace images to confirm they show the same product.")
+      : undefined,
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });

@@ -30,6 +30,16 @@ export type CatalogEntry = {
    * files the product under — more precise than the multi-room tags. Populated lazily.
    */
   category: string | null;
+  /** All product image URLs (many marketplaces want several image columns filled). */
+  images: string[];
+  /**
+   * Per-variant attributes keyed by the Shopify option name (e.g. { Size: "8x10",
+   * Color: "Moroccan Blue and Ivory" }). Vendor sheets that are bare SKUs carry none of
+   * this, so it's the only source for the template's Size/Color/… attribute columns.
+   */
+  options: Record<string, string>;
+  /** Variant weight in grams, when the catalog provides it (→ Product Weight column). */
+  grams: number | null;
 };
 
 type IndexedEntry = { series: string; normSku: string; entry: CatalogEntry };
@@ -46,7 +56,14 @@ type ShopifyProduct = {
   vendor?: string;
   body_html?: string;
   images?: { src?: string }[];
-  variants?: { sku?: string }[];
+  variants?: {
+    sku?: string;
+    option1?: string | null;
+    option2?: string | null;
+    option3?: string | null;
+    grams?: number | null;
+  }[];
+  options?: { name?: string; position?: number }[];
   tags?: string[] | string;
   /** Shopify's own product classification, e.g. Modway's "\\Living\\Sofas". */
   product_type?: string;
@@ -149,17 +166,32 @@ function buildIndex(products: ShopifyProduct[]): CatalogIndex {
     const brand = (p.vendor ?? "").trim() || null;
     const description = p.body_html ? stripHtml(p.body_html).slice(0, 300) || null : null;
     const image = (p.images ?? []).find((i) => i.src)?.src ?? null;
+    const images = (p.images ?? []).map((i) => i.src).filter((s): s is string => !!s);
     const tags = cleanTags(p.tags);
     const handle = (p.handle ?? "").trim();
     // Prefer Shopify's product_type as the category — it's in products.json already, so
     // no per-product page fetch is needed. "\\Living\\Sofas" → "Living > Sofas".
     const productTypeCategory = (p.product_type ?? "")
       .split(/[\\/]+/).map((s) => s.trim()).filter(Boolean).join(" > ") || null;
+    // Option names (Size, Color, …) map positionally to each variant's option1/2/3.
+    const optionNames = (p.options ?? [])
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+      .map((o) => (o.name ?? "").trim());
 
     for (const v of p.variants ?? []) {
       const sku = (v.sku ?? "").trim();
       if (!sku) continue;
-      const entry: CatalogEntry = { sku, title, brand, description, image, handle, tags, category: productTypeCategory };
+      // Pair each option value with its name: { Size: "8x10", Color: "Blue and Ivory" }.
+      const options: Record<string, string> = {};
+      [v.option1, v.option2, v.option3].forEach((val, i) => {
+        const name = optionNames[i];
+        const value = (val ?? "").trim();
+        if (name && value && value.toLowerCase() !== "default title") options[name] = value;
+      });
+      const entry: CatalogEntry = {
+        sku, title, brand, description, image, handle, tags, category: productTypeCategory,
+        images, options, grams: typeof v.grams === "number" && v.grams > 0 ? v.grams : null,
+      };
       const normSku = normalizeSku(sku);
       if (normSku && !bySku.has(normSku)) bySku.set(normSku, entry);
 
@@ -226,7 +258,22 @@ function matchInIndex(index: CatalogIndex, rawSku: string): CatalogEntry | null 
   if (series) {
     const bySeries = candidates.filter((c) => c.series === series);
     if (bySeries.length === 1) return bySeries[0]!.entry;
+
+    // 2c. Same title across all series matches → it's ONE product sold in several
+    //     color/size variants (Modway rugs: "R-1091A-58", "R-1091D-810" are all the
+    //     "Minu …" rug). The sheet code may name a variant that isn't individually
+    //     listed (a size the catalog doesn't carry), so exact-SKU match fails — but the
+    //     title (all we need for categorization) is unambiguous. Return it.
+    if (bySeries.length > 1) {
+      const titles = new Set(bySeries.map((c) => c.entry.title));
+      if (titles.size === 1) return bySeries[0]!.entry;
+    }
   }
+
+  // Last resort: every candidate for this digit core is the same product regardless of
+  // series letter — still an unambiguous title, so it's safe to categorize from.
+  const allTitles = new Set(candidates.map((c) => c.entry.title));
+  if (allTitles.size === 1) return candidates[0]!.entry;
 
   // Ambiguous — refuse to guess rather than risk a mislabel.
   return null;
