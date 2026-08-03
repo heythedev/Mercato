@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSidebar } from "./sidebar-context";
+import { KeepaBalance } from "./keepa-balance";
 
 type Props = {
   role: string;
@@ -128,6 +129,9 @@ export function Sidebar({ role }: Props) {
             );
           })}
         </nav>
+
+        {/* Keepa token balance — pinned to the card footer */}
+        <KeepaBalance />
       </aside>
     </>
   );
