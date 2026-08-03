@@ -144,8 +144,11 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
       )}
 
       {/* Table */}
-      <div className="rounded-xl border overflow-hidden">
-        <table className="w-full text-sm">
+      {/* overflow-x-auto lets the table scroll on narrow screens instead of
+          being clipped; min-w keeps columns from crushing so content stays
+          readable. */}
+      <div className="rounded-xl border overflow-x-auto">
+        <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="border-b bg-muted/40">
               <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">Name</th>
