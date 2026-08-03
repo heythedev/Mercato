@@ -142,12 +142,39 @@ function detectColumns(headers: string[], sample: string[][]): ColMap {
   // Brand / manufacturer
   const brandCol = claim(findHeader(headers, /\b(brand|manufacturer|maker)\b/i, taken));
 
-  // Product name (title/name/product wins; description only if nothing better)
-  const productCol = claim(findHeaderLoose(
-    headers,
-    /\b(?:product|item|title)\b|\bname\b|\bdescription\b/i,
-    taken,
-  ));
+  // Product name — tiered search so "Product Name"/"Item Title" beats "Product ID Type".
+  // Headers containing id/type/code/number are excluded from every tier because they
+  // carry barcodes or marketplace ID types (UPC, EAN, GTIN, ASIN) not product titles.
+  const ID_SUFFIX_RE = /\b(?:id|identifier|type|code|number|#|no\.?)\b/i;
+  const productCol = (() => {
+    // Tier 1: explicit "X Name" or "X Title" (e.g. "Product Name", "Item Title")
+    for (let i = 0; i < headers.length; i++) {
+      if (taken.has(i)) continue;
+      const h = headers[i].replace(/[_-]/g, " ");
+      if (/\b(?:product|item|listing)\s+(?:name|title)\b/i.test(h) && !ID_SUFFIX_RE.test(h)) {
+        taken.add(i); return i;
+      }
+    }
+    // Tier 2: bare "title" or "name" standalone
+    for (let i = 0; i < headers.length; i++) {
+      if (taken.has(i)) continue;
+      const h = headers[i].replace(/[_-]/g, " ");
+      if (/\btitle\b|\bname\b/i.test(h) && !ID_SUFFIX_RE.test(h)) {
+        taken.add(i); return i;
+      }
+    }
+    // Tier 3: bare "product" or "item" word, still excluding id/type contamination
+    for (let i = 0; i < headers.length; i++) {
+      if (taken.has(i)) continue;
+      const h = headers[i].replace(/[_-]/g, " ");
+      if (/\b(?:product|item)\b/i.test(h) && !ID_SUFFIX_RE.test(h)) {
+        taken.add(i); return i;
+      }
+    }
+    // Tier 4: description as last resort
+    return findHeaderLoose(headers, /\bdescription\b/i, taken);
+  })();
+  claim(productCol);
 
   // Long description — claimed AFTER productCol
   const descriptionCol = claim(findHeaderLoose(
@@ -434,31 +461,50 @@ function parseCsv(buffer: Buffer): VendorRow[] {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-export async function parseVendorFile(buffer: Buffer, filename: string): Promise<VendorRow[]> {
+export type ParseResult = {
+  rows: VendorRow[];
+  /** Human-readable diagnostic summary shown to the user after upload. */
+  parseInfo: string;
+};
+
+export async function parseVendorFile(buffer: Buffer, filename: string): Promise<ParseResult> {
   const ext = filename.split(".").pop()?.toLowerCase();
 
   if (ext === "csv" || ext === "tsv" || ext === "txt") {
-    return parseCsv(buffer);
+    const rows = parseCsv(buffer);
+    return { rows, parseInfo: `${rows.length} products from CSV` };
   }
 
   try {
     const sheets = await readAllProductSheets(buffer);
-    // Parse each sheet independently (each has its own header row) then combine.
-    // Deduplicate by vendorSku so products that appear in multiple sheets aren't doubled.
     const combined: VendorRow[] = [];
     const seenSkus = new Set<string>();
+    let dupSkus = 0;
+
     for (const sheet of sheets) {
       const rows = gridToRows(sheet.grid);
       for (const r of rows) {
         if (r.sku) {
-          if (seenSkus.has(r.sku)) continue;
+          if (seenSkus.has(r.sku)) { dupSkus++; continue; }
           seenSkus.add(r.sku);
         }
         combined.push(r);
       }
     }
+
+    // Build a human-readable summary that will be shown in the upload toast.
+    const sheetDetail = sheets
+      .map(s => `"${s.sheetName}" (${s.dataRowCount} data rows, ${s.headerCount} cols, score ${s.score})`)
+      .join("; ");
+    const parseInfo = [
+      `${combined.length} products`,
+      sheets.length > 1 ? `from ${sheets.length} sheets` : "from 1 sheet",
+      `— ${sheetDetail}`,
+      dupSkus > 0 ? `· ${dupSkus} duplicate SKUs skipped` : "",
+    ].filter(Boolean).join(" ");
+
     console.log(`[parse] Combined ${sheets.length} sheet(s) → ${combined.length} total products`);
-    return combined;
+    return { rows: combined, parseInfo };
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("Couldn't")) throw err;
     throw new Error(

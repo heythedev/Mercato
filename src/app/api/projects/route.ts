@@ -24,8 +24,9 @@ export async function POST(req: NextRequest) {
 
   const bytes = await file.arrayBuffer();
   console.log(`[upload] File: "${file.name}", size=${bytes.byteLength} bytes`);
-  const rows = await parseVendorFile(Buffer.from(bytes), file.name);
+  const { rows, parseInfo } = await parseVendorFile(Buffer.from(bytes), file.name);
   console.log(`[upload] parseVendorFile → ${rows.length} products for marketplace=${marketplace}`);
+  console.log(`[upload] parseInfo: ${parseInfo}`);
 
   if (!rows.length) {
     return NextResponse.json({ error: "No rows found in the file" }, { status: 400 });
@@ -66,7 +67,7 @@ export async function POST(req: NextRequest) {
   }
   console.log(`[upload] Done: ${inserted}/${rows.length} products inserted for project ${project.id}`);
 
-  return NextResponse.json({ id: project.id, count: inserted });
+  return NextResponse.json({ id: project.id, count: inserted, parseInfo });
 }
 
 export async function DELETE(req: NextRequest) {

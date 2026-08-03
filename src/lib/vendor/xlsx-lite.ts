@@ -7,7 +7,7 @@ import JSZip from "jszip";
  */
 
 export type XlsxGrid = { sheetName: string; grid: string[][] };
-export type XlsxSheetGrid = { sheetName: string; grid: string[][]; score: number };
+export type XlsxSheetGrid = { sheetName: string; grid: string[][]; score: number; headerCount: number; dataRowCount: number };
 
 function decodeXml(s: string): string {
   return s
@@ -46,7 +46,7 @@ const NAME_POSITIVE = /listing|template|catalog\b|product|items?\b|offers?\b|\bd
 const NAME_NEGATIVE =
   /instruction|definition|help|glossary|example|dropdown|valid|values|attribute|meta\b|reference|browse|lookup|notes|read.?me|conditions/i;
 
-function scoreSheet(name: string, grid: string[][]): number {
+function scoreSheet(name: string, grid: string[][]): { score: number; headerCount: number; dataRows: number } {
   let headerIdx = 0;
   let headerCount = 0;
   const scan = Math.min(grid.length, 25);
@@ -57,17 +57,15 @@ function scoreSheet(name: string, grid: string[][]): number {
       headerIdx = i;
     }
   }
-  if (headerCount < 2) return -1000;
+  if (headerCount < 2) return { score: -1000, headerCount: 0, dataRows: 0 };
   let dataRowsBelow = 0;
   for (let i = headerIdx + 1; i < grid.length; i++) {
     if (grid[i].some((c) => String(c ?? "").trim() !== "")) dataRowsBelow++;
   }
   const nameBonus = NAME_NEGATIVE.test(name) ? -80 : NAME_POSITIVE.test(name) ? 60 : 0;
-  // Reward sheets with more data rows — a large row count is a strong signal this
-  // is the product catalog sheet. The old formula PENALISED large row counts which
-  // could cause a small helper sheet to outscore a 10k-product sheet.
   const rowBonus = dataRowsBelow > 0 ? Math.min(Math.floor(Math.log10(dataRowsBelow) * 15), 45) : 0;
-  return Math.min(headerCount, 120) + nameBonus + rowBonus;
+  const score = Math.min(headerCount, 120) + nameBonus + rowBonus;
+  return { score, headerCount, dataRows: dataRowsBelow };
 }
 
 async function loadSheets(buffer: Buffer, maxRows: number): Promise<XlsxSheetGrid[]> {
@@ -100,9 +98,9 @@ async function loadSheets(buffer: Buffer, maxRows: number): Promise<XlsxSheetGri
     const sheetXml = await zip.file(`xl/${target}`)?.async("string");
     if (!sheetXml) continue;
     const grid = parseSheetRows(sheetXml, shared, maxRows);
-    const score = scoreSheet(name, grid);
-    console.log(`[xlsx] Sheet "${name}": ${grid.length} rows, score=${score}`);
-    sheets.push({ sheetName: name, grid, score });
+    const { score, headerCount, dataRows: dataRowCount } = scoreSheet(name, grid);
+    console.log(`[xlsx] Sheet "${name}": ${grid.length} rows, score=${score}, headers=${headerCount}, dataRows=${dataRowCount}`);
+    sheets.push({ sheetName: name, grid, score, headerCount, dataRowCount });
   }
   return sheets;
 }
@@ -113,17 +111,15 @@ export async function readAllProductSheets(buffer: Buffer): Promise<XlsxSheetGri
   if (!sheets.length) throw new Error("Workbook has no readable sheets.");
 
   const good = sheets.filter(s => {
-    if (s.score > 0) return true;    // clearly a product sheet
+    if (s.score > 0) return true;     // clearly a product sheet
     if (s.score <= -1000) return false; // rejected: fewer than 2 header columns
 
     // A negatively-named sheet ("Reference", "Values", "Attribute", "Notes",
-    // "Conditions", etc.) still contains product data if it has substantial rows.
-    // Genuine lookup/dropdown/instruction tables are always small (< 100 rows);
-    // product sheets are large. Count non-blank rows to decide.
-    const nonBlankRows = s.grid.reduce(
-      (n, r) => n + (r.some(c => String(c ?? "").trim() !== "") ? 1 : 0), 0,
-    );
-    return nonBlankRows > 100;
+    // "Conditions", etc.) still contains product data if it has:
+    //   - many data rows (> 100) — dropdown/lookup tables are always small
+    //   - many header columns (>= 8) — product catalogs always have many columns;
+    //     a 2-3 column "Valid Values" sheet with 1 000 rows stays excluded.
+    return s.dataRowCount > 100 && s.headerCount >= 8;
   }).sort((a, b) => b.score - a.score);
 
   // Fallback: if nothing passed, take whichever sheet scored highest

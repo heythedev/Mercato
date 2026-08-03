@@ -82,7 +82,10 @@ export function NewProjectForm() {
     if (!res.ok) {
       toast.error(data.error ?? "Failed to create project");
     } else {
-      toast.success(`Project created — ${data.count} products imported`);
+      toast.success(
+        `Project created — ${data.count} products imported` +
+        (data.parseInfo ? `\n${data.parseInfo}` : ""),
+      );
       router.push(`/projects/${data.id}`);
     }
   }
