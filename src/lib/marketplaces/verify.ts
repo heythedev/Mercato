@@ -89,14 +89,30 @@ export async function verifyProducts(
  * Run the AI post-passes (image comparison + semantic title check) on an
  * already-fetched result set. Exported so the route can call this ONCE on all
  * batch results instead of once per batch — dramatically cuts time-per-batch.
+ *
+ * These passes cost one model call per product, which dominates the run at
+ * catalog scale (~10k products), so they are opt-in rather than automatic. The
+ * `onlyFlagged` option narrows them further to the results a reviewer would
+ * actually look at — a confirmed barcode match with a clean title gains nothing
+ * from a vision check, while a warning/mismatch is exactly where AI adjudication
+ * changes the verdict.
  */
 export async function applyAiVerificationPasses(
   results: VerifyResult[],
   products: Product[],
   marketplace: string,
+  options?: { onlyFlagged?: boolean },
 ): Promise<void> {
-  await applyImageComparison(results, products);
-  if (marketplace === "walmart") await applySemanticTitleCheck(results, products);
+  let targets = results;
+  if (options?.onlyFlagged) {
+    targets = results.filter((r) => r.status === "warning" || r.status === "mismatch");
+    if (!targets.length) return;
+    // Narrow the product list to match, so the passes don't scan the full set.
+    const ids = new Set(targets.map((r) => r.productId));
+    products = products.filter((p) => ids.has(p.id));
+  }
+  await applyImageComparison(targets, products);
+  if (marketplace === "walmart") await applySemanticTitleCheck(targets, products);
 }
 
 // ── AI image comparison post-pass ─────────────────────────────────────────────
@@ -828,19 +844,94 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
 
 // ── Walmart (Marketplace API) ─────────────────────────────────────────────────
 
+/**
+ * Shared limiter for a whole verify run. Created once per process so the
+ * discovered concurrency ceiling carries across batches instead of every batch
+ * re-probing it from `start` and paying the same warm-up.
+ */
+let walmartLimiter: InstanceType<typeof import("@/lib/walmart/throttle").AdaptiveLimiter> | null = null;
+
+async function getWalmartLimiter() {
+  if (!walmartLimiter) {
+    const { AdaptiveLimiter } = await import("@/lib/walmart/throttle");
+    // Ceiling measured against the live Affiliate API: throughput rises to
+    // ~57 calls/s at concurrency 128 with flat p95 latency and zero failures,
+    // so the previous max of 64 was our own bottleneck rather than Walmart's.
+    // Starting high (rather than ramping from 16) matters because a 10k run is
+    // many short batches — a slow ramp would spend most of the run warming up.
+    walmartLimiter = new AdaptiveLimiter({ start: 96, min: 8, max: 160 });
+  }
+  return walmartLimiter;
+}
+
+// ── Seller-API circuit breaker ────────────────────────────────────────────────
+// The Seller API searches OUR OWN Walmart catalog, so it only ever hits for
+// products we already list. A vendor file of prospective products misses 100%
+// of the time — measured at 3563/3563 on a real 4k run — yet still costs one
+// call per product, ~40% of that run's total API traffic.
+//
+// So: probe a sample, and if none are in our catalog, stop asking and let the
+// Affiliate lookup handle the rest. A project that genuinely contains our own
+// listings hits within the probe window and never trips.
+//
+// State lives at module scope so the decision carries across batches; a
+// per-batch breaker would re-probe every BATCH_SIZE products and never save the
+// bulk of the calls. `resetSellerBreaker()` clears it between runs.
+
+/** Lookups to sample before concluding the seller catalog holds none of these products. */
+const SELLER_PROBE_SIZE = 150;
+
+type SellerBreaker = { probe: number; hits: number; tripped: boolean; record(hit: boolean): void };
+let sellerBreakerState: SellerBreaker | null = null;
+
+function getSellerBreaker(): SellerBreaker {
+  if (!sellerBreakerState) {
+    sellerBreakerState = {
+      probe: 0,
+      hits: 0,
+      tripped: false,
+      record(hit: boolean) {
+        if (this.tripped) return;
+        this.probe++;
+        if (hit) this.hits++;
+        // Decide once, after a sample large enough that even a low hit rate
+        // would almost certainly have shown up.
+        if (this.probe >= SELLER_PROBE_SIZE && this.hits === 0) {
+          this.tripped = true;
+          console.log(
+            `[walmart-seller] no catalog hits in ${this.probe} lookups — skipping the ` +
+              `Seller API for the rest of this run (these products are not in your ` +
+              `Walmart catalog). Saves ~1 API call per remaining product.`,
+          );
+        }
+      },
+    };
+  }
+  return sellerBreakerState;
+}
+
+/** Clear the breaker so a new run re-probes. Called when a fresh verify starts. */
+export function resetWalmartRunState(): void {
+  sellerBreakerState = null;
+}
+
 async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
   const { searchWalmartByUpc, searchWalmartByName } = await import("@/lib/walmart/client");
   const { getSellerItemByGtin, sellerApiConfigured } = await import("@/lib/walmart/seller-client");
+  const { runPool } = await import("@/lib/walmart/throttle");
+  const {
+    getCachedItems, cacheItems, codeKey, queryKey,
+    newWalmartCacheStats, logWalmartCacheStats,
+  } = await import("@/lib/walmart/cache");
+
   // The Affiliate API only reliably indexes Walmart's first-party retail
   // catalog, so our own freshly-published seller listings often come back empty
   // there even while live on walmart.com. The Seller API reads OUR catalog
   // directly, so a GTIN hit here authoritatively confirms our listing — this is
   // the primary lookup, with the Affiliate search kept as a fallback.
   const useSellerApi = sellerApiConfigured();
-  // The affiliate API parallelises near-linearly: measured 1 call ≈ 24 concurrent
-  // calls ≈ 1.4s, with no throttling. 12 keeps a wide safety margin under that
-  // ceiling while cutting the lookup phase ~4x versus the previous value of 3.
-  const CONCURRENCY = 12;
+  const limiter = await getWalmartLimiter();
+  const stats = newWalmartCacheStats();
 
   // Mark discontinued products immediately
   const discontinuedResults: VerifyResult[] = products
@@ -848,16 +939,93 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
     .map((p) => ({ productId: p.id, status: "discontinued" as const, fields: [], liveData: {} }));
   const activeProducts = products.filter((p) => !isDiscontinuedInVendorData(p.vendorData));
 
-  const results: VerifyResult[] = [];
+  // ── Cache preload ───────────────────────────────────────────────────────────
+  // One bulk read for the whole batch. Every key that resolves here — including
+  // remembered absences — skips its entire API cascade below.
+  const keysFor = (p: Product): { seller: string | null; upc: string | null } => {
+    const g = codeKey(p.upc);
+    return { seller: g ? `s:${g}` : null, upc: g };
+  };
+  const preloadStart = Date.now();
+  const preloadKeys: string[] = [];
+  for (const p of activeProducts) {
+    const k = keysFor(p);
+    if (k.seller) preloadKeys.push(k.seller);
+    if (k.upc) preloadKeys.push(k.upc);
+    // Name-search fallbacks must be preloaded too, otherwise their cache is
+    // written every run but never read — the fallback path is the expensive one,
+    // so missing these would forfeit most of the re-run savings.
+    const brandName = [p.brand, p.name].filter(Boolean).join(" ").trim();
+    if (brandName) preloadKeys.push(queryKey(brandName));
+    if (p.name) preloadKeys.push(queryKey(p.name));
+  }
+  const cached = await getCachedItems<Record<string, unknown>>(preloadKeys);
+  const preloadMs = Date.now() - preloadStart;
 
-  for (let i = 0; i < activeProducts.length; i += CONCURRENCY) {
-    const batch = activeProducts.slice(i, i + CONCURRENCY);
-    const settled = await Promise.allSettled(batch.map(async (p) => {
+  // Counts every outbound Walmart request this batch makes. The ratio of calls
+  // to products is the single most diagnostic number when a run is slow: ~1.0
+  // means the cascade is short-circuiting early, ~3+ means most products are
+  // falling through to the name-search fallbacks.
+  const apiCalls = { count: 0 };
+
+  const sellerBreaker = getSellerBreaker();
+
+  // Writes are collected and flushed once at the end rather than per-product.
+  const pendingCacheWrites: Array<{
+    key: string;
+    item: unknown | null;
+    source: "seller" | "upc" | "name";
+  }> = [];
+
+  // Deduplicate in-flight name searches: a batch often contains many products
+  // sharing a brand+name query, and without this each one pays for its own call.
+  const nameSearchInFlight = new Map<string, Promise<unknown>>();
+  const searchByNameCached = async (query: string) => {
+    if (!query) return null;
+    const key = queryKey(query);
+    const hit = cached.get(key);
+    if (hit !== undefined) {
+      stats.hits++;
+      if (hit === null) stats.negativeHits++;
+      return hit;
+    }
+    let inflight = nameSearchInFlight.get(key);
+    if (!inflight) {
+      inflight = (async () => {
+        stats.misses++;
+        apiCalls.count++;
+        const item = await limiter
+          .run(() => searchWalmartByName(query))
+          .catch(() => null);
+        pendingCacheWrites.push({ key, item: item ?? null, source: "name" });
+        return item;
+      })();
+      nameSearchInFlight.set(key, inflight);
+    }
+    return inflight as Promise<Awaited<ReturnType<typeof searchWalmartByName>>>;
+  };
+
+  const lookupStart = Date.now();
+  const settled = await runPool(activeProducts, limiter, async (p) => {
       let item = null;
+      const k = keysFor(p);
 
       // Primary: confirm our OWN published listing via the Seller API by GTIN.
-      if (useSellerApi && p.upc) {
-        const seller = await getSellerItemByGtin(p.upc).catch(() => null);
+      // Skipped entirely once the circuit breaker trips — see `sellerBreaker`.
+      if (useSellerApi && p.upc && k.seller && !sellerBreaker.tripped) {
+        let seller: Awaited<ReturnType<typeof getSellerItemByGtin>> = null;
+        const cachedSeller = cached.get(k.seller);
+        if (cachedSeller !== undefined) {
+          stats.hits++;
+          if (cachedSeller === null) stats.negativeHits++;
+          seller = cachedSeller as Awaited<ReturnType<typeof getSellerItemByGtin>>;
+        } else {
+          stats.misses++;
+          apiCalls.count++;
+          seller = await getSellerItemByGtin(p.upc).catch(() => null);
+          pendingCacheWrites.push({ key: k.seller, item: seller, source: "seller" });
+          sellerBreaker.record(!!seller);
+        }
         if (seller) {
           const priceInCents = seller.price != null ? Math.round(seller.price * 100) : null;
           const images = (seller.images ?? []).filter((u) => u.startsWith("http"));
@@ -898,19 +1066,29 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
       if (p.upc) {
         // Try UPC-based lookup first; fall back to name search if Walmart doesn't index by UPC.
         // Some legitimate products (especially newer listings) aren't indexed by UPC yet.
-        item = await searchWalmartByUpc(p.upc).catch(() => null);
+        const cachedUpc = k.upc ? cached.get(k.upc) : undefined;
+        if (cachedUpc !== undefined) {
+          stats.hits++;
+          if (cachedUpc === null) stats.negativeHits++;
+          item = cachedUpc as typeof item;
+        } else {
+          stats.misses++;
+          apiCalls.count++;
+          item = await limiter.run(() => searchWalmartByUpc(p.upc!)).catch(() => null);
+          if (k.upc) pendingCacheWrites.push({ key: k.upc, item, source: "upc" });
+        }
         if (!item) {
           // UPC lookup returned nothing — try name-based search so we don't miss the product.
           // A title similarity check in compareToLive will surface any mismatch.
           const query = [p.brand, p.name].filter(Boolean).join(" ").trim();
-          item = await searchWalmartByName(query).catch(() => null);
-          if (!item && p.name) item = await searchWalmartByName(p.name).catch(() => null);
+          item = await searchByNameCached(query) as typeof item;
+          if (!item && p.name) item = await searchByNameCached(p.name) as typeof item;
         }
       } else {
         // No UPC — try brand + name, then name alone
         const query = [p.brand, p.name].filter(Boolean).join(" ").trim();
-        item = await searchWalmartByName(query).catch(() => null);
-        if (!item && p.name) item = await searchWalmartByName(p.name).catch(() => null);
+        item = await searchByNameCached(query) as typeof item;
+        if (!item && p.name) item = await searchByNameCached(p.name) as typeof item;
       }
 
       if (!item) return notFound(p.id);
@@ -959,13 +1137,35 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         liveDataForCompare as unknown as Record<string, unknown>,
         "Walmart",
       );
-    }));
+  });
 
-    for (let j = 0; j < settled.length; j++) {
-      const s = settled[j];
-      results.push(s.status === "fulfilled" ? s.value : notFound(batch[j].id));
-    }
-  }
+  const results: VerifyResult[] = settled.map((s, j) =>
+    s.status === "fulfilled" ? s.value : notFound(activeProducts[j].id),
+  );
+
+  const lookupMs = Date.now() - lookupStart;
+
+  // Flush everything this batch learned in a couple of writes rather than one
+  // per product, then report what the cache saved.
+  const cacheWriteStart = Date.now();
+  await cacheItems(pendingCacheWrites);
+  const cacheWriteMs = Date.now() - cacheWriteStart;
+
+  logWalmartCacheStats(stats);
+  // Per-batch timing breakdown. Without this a slow run is just "slow" — this
+  // says whether the cost is API latency, rate-limit backoff, or DB writes.
+  const perProduct = activeProducts.length ? lookupMs / activeProducts.length : 0;
+  console.log(
+    `[walmart-timing] ${activeProducts.length} products in ${(lookupMs / 1000).toFixed(1)}s ` +
+      `(${perProduct.toFixed(0)}ms/product) | preload ${preloadMs}ms | ` +
+      `cache-write ${cacheWriteMs}ms | api-calls ${apiCalls.count}`,
+  );
+  console.log(
+    `[walmart-throttle] concurrency settled at ${limiter.width} ` +
+      `(peak ${limiter.stats.peakLimit}), ${limiter.stats.rateLimited} rate-limited, ` +
+      `${limiter.stats.errors} errors | mean call ${limiter.meanLatencyMs.toFixed(0)}ms, ` +
+      `slowest ${limiter.stats.maxLatencyMs}ms`,
+  );
 
   return [...discontinuedResults, ...results];
 }

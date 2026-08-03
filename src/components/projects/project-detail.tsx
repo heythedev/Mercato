@@ -130,7 +130,12 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   // (500+) always come back partial. Rather than making the user click Verify
   // four or five times, we drive the resume loop here: keep POSTing while the
   // server reports work remaining, reporting cumulative progress as we go.
-  async function runVerify(force = false) {
+  /**
+   * `ai` enables the AI image/title adjudication pass. It costs a model call per
+   * flagged product, so it is off for a normal run and offered as an explicit
+   * "Deep check" action instead.
+   */
+  async function runVerify(force = false, ai = false) {
     setLoading(true);
     setLoadingStep(1);
     // Move to the Verify step up front so its loader shows there — not the
@@ -148,8 +153,11 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       // forever. Each pass covers up to `maxDuration` of work, so this is far
       // more headroom than any real catalog needs.
       for (let pass = 0; pass < 25; pass++) {
+        const qs = new URLSearchParams();
+        if (useForce) qs.set("force", "1");
+        if (ai) qs.set("ai", "1");
         const res = await fetch(
-          `/api/projects/${project.id}/verify${useForce ? "?force=1" : ""}`,
+          `/api/projects/${project.id}/verify${qs.size ? `?${qs}` : ""}`,
           { method: "POST" },
         );
         const data = await res.json();
