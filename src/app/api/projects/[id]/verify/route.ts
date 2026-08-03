@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const maxDuration = 900;
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
+import { Prisma } from "@prisma/client";
 import {
   verifyProducts,
   applyAiVerificationPasses,
@@ -279,6 +280,21 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // examines flagged (warning/mismatch) results — a clean barcode-confirmed
   // match gains nothing from a vision check.
   const useAi = _req.nextUrl.searchParams.get("ai") === "1";
+
+  // A forced re-verify starts this run's progress from ZERO: clear the previous
+  // run's verdicts server-side (the client already clears them visually). Without
+  // this, old `verifiedAt` timestamps make the live progress feed report the run
+  // as ~100% checked the moment it starts, and — worse — the follow-up resume
+  // passes (which select `verifyStatus == null`) would skip every product still
+  // carrying a stale status from the prior run. Discontinued flags are kept:
+  // they can originate from the vendor sheet, not verification, and would not be
+  // re-derived by this run.
+  if (force && project.products.length > 0) {
+    await prisma.product.updateMany({
+      where: { projectId: id, NOT: { verifyStatus: "discontinued" } },
+      data: { verifiedAt: null, verifyStatus: null, verifyFields: Prisma.DbNull },
+    });
+  }
   const allProducts = force
     ? project.products
     : project.products.filter((p) => p.verifyStatus == null);

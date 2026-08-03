@@ -142,6 +142,15 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     // button spinner on whichever step the run was triggered from.
     setActiveStep(1);
     setVerifyProgress(null);
+
+    // Results stream in while the run is still going: verification commits each
+    // batch to the database, so we poll for finished products and render them
+    // immediately rather than making the user stare at a spinner until the last
+    // batch lands. A re-verify clears the previous results first, otherwise the
+    // stale list would sit there looking like fresh progress.
+    if (force) setProducts((prev) => prev.map((p) => ({ ...p, verifyStatus: null, verifyFields: null })));
+    const stopPolling = startVerifyFeed(force);
+
     try {
       let totalVerified = 0;
       let totalSkipped = 0;
@@ -203,10 +212,75 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       console.error("Verify error:", e);
       toast.error("Verification failed — check the server console for details.");
     } finally {
+      // Stop the feed before the final refresh so a late poll can't overwrite
+      // the authoritative full payload with a partial page.
+      stopPolling();
       setLoading(false);
       setLoadingStep(null);
       setVerifyProgress(null);
     }
+  }
+
+  /**
+   * Poll the incremental verification feed and merge finished products into
+   * state as they land.
+   *
+   * Returns a stop function. The feed walks a cursor so each product is fetched
+   * exactly once; it never re-reads the whole catalog, which is what makes this
+   * affordable to poll on a 10k project.
+   */
+  function startVerifyFeed(fromScratch: boolean): () => void {
+    let cancelled = false;
+    let cursor: string | null = null;
+    // A re-verify rewrites every row's verifiedAt, so the cursor must start
+    // empty; a resume continues past whatever is already on screen.
+    if (!fromScratch) cursor = null;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        // Drain everything currently available before sleeping, so a fast run
+        // isn't rate-limited by the poll interval.
+        for (;;) {
+          if (cancelled) return;
+          const qs = new URLSearchParams({ limit: "200" });
+          if (cursor) qs.set("cursor", cursor);
+          const res = await fetch(`/api/projects/${project.id}/verify/progress?${qs}`);
+          if (!res.ok) break;
+          const data = await res.json();
+          if (cancelled) return;
+
+          if (data.products?.length) {
+            cursor = data.nextCursor ?? cursor;
+            setProducts((prev) => {
+              const byId = new Map(prev.map((p: Product) => [p.id, p]));
+              for (const incoming of data.products as Product[]) {
+                const existing = byId.get(incoming.id);
+                // Merge rather than replace: the feed carries a subset of
+                // columns, and clobbering would drop categorization fields.
+                byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
+              }
+              // Preserve the original catalog order.
+              return prev.map((p: Product) => byId.get(p.id) ?? p);
+            });
+          }
+
+          if (data.verifiedTotal != null && data.total != null && data.verifiedTotal < data.total) {
+            setVerifyProgress({ done: data.verifiedTotal, total: data.total });
+          }
+
+          // Caught up with what's committed so far — wait for more.
+          if (data.exhausted) break;
+        }
+      } catch {
+        // A failed poll is not fatal: the run continues server-side and the
+        // next tick picks up whatever landed meanwhile.
+      }
+    };
+
+    void poll();
+    const iv = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(iv); };
   }
 
   async function runCategorize(force = false) {
@@ -533,6 +607,8 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             marketplace={project.marketplace}
             elapsedMs={project.verifyMs ?? null}
             completedAt={project.verifyCompletedAt ?? null}
+            verifyTotal={verifyProgress?.total ?? null}
+            verifyDone={verifyProgress?.done ?? null}
             onNext={() => setActiveStep(project.marketplace === "amazon_us" ? 3 : 2)}
           />
         )}

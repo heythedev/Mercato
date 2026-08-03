@@ -75,15 +75,22 @@ export function NewProjectForm() {
     // Only sent (and only honoured server-side) for Walmart.
     if (marketplace === "walmart" && isNewListing) form.append("isNewListing", "true");
 
-    const res = await fetch("/api/projects", { method: "POST", body: form });
-    const data = await res.json();
-    setLoading(false);
+    try {
+      const res = await fetch("/api/projects", { method: "POST", body: form });
+      // A dropped server connection mid-upload returns an empty/invalid body — parse
+      // defensively so the form reports the failure instead of crashing on res.json().
+      const data = await res.json().catch(() => ({} as { error?: string; count?: number; id?: string }));
 
-    if (!res.ok) {
-      toast.error(data.error ?? "Failed to create project");
-    } else {
-      toast.success(`Project created — ${data.count} products imported`);
-      router.push(`/projects/${data.id}`);
+      if (!res.ok) {
+        toast.error(data.error ?? "Upload failed — the server did not return a valid response. Please try again.");
+      } else {
+        toast.success(`Project created — ${data.count} products imported`);
+        router.push(`/projects/${data.id}`);
+      }
+    } catch {
+      toast.error("Upload failed — could not reach the server. Please try again.");
+    } finally {
+      setLoading(false);
     }
   }
 
