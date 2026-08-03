@@ -254,7 +254,9 @@ function toNumber(v: string): number | undefined {
   return isNaN(n) ? undefined : n;
 }
 
-function gridToRows(grid: string[][]): VendorRow[] {
+export interface GridDiag { filteredNoName: number; filteredFieldCode: number; filteredPolicy: number; width: number; maxDataWidth: number; dataRows: number; headerIdx: number; }
+
+function gridToRows(grid: string[][], diag?: GridDiag): VendorRow[] {
   const headerIdx = pickHeaderRow(grid);
   const rawHeaders = (grid[headerIdx] ?? []).slice(0, MAX_FILE_COLS);
   let width = rawHeaders.length;
@@ -435,6 +437,15 @@ function gridToRows(grid: string[][]): VendorRow[] {
   }).filter((r): r is VendorRow => r !== null && r.name.length > 0);
   console.log(`[parse] Filtered: no-name=${filteredNoName}, field-code=${filteredFieldCode}, policy=${filteredPolicy}`);
   console.log(`[parse] Final: ${parsed.length} valid products (${dataRows.length - parsed.length} filtered out)`);
+  if (diag) {
+    diag.filteredNoName = filteredNoName;
+    diag.filteredFieldCode = filteredFieldCode;
+    diag.filteredPolicy = filteredPolicy;
+    diag.width = width;
+    diag.maxDataWidth = maxDataWidth;
+    diag.dataRows = dataRows.length;
+    diag.headerIdx = headerIdx;
+  }
   return parsed;
 }
 
@@ -496,8 +507,11 @@ export async function parseVendorFile(buffer: Buffer, filename: string): Promise
     const seenSkus = new Set<string>();
     let dupSkus = 0;
 
+    const diagList: GridDiag[] = [];
     for (const sheet of sheets) {
-      const rows = gridToRows(sheet.grid);
+      const diag: GridDiag = { filteredNoName: 0, filteredFieldCode: 0, filteredPolicy: 0, width: 0, maxDataWidth: 0, dataRows: 0, headerIdx: 0 };
+      const rows = gridToRows(sheet.grid, diag);
+      diagList.push(diag);
       for (const r of rows) {
         if (r.sku) {
           if (seenSkus.has(r.sku)) { dupSkus++; continue; }
@@ -511,10 +525,18 @@ export async function parseVendorFile(buffer: Buffer, filename: string): Promise
     const sheetDetail = sheets
       .map(s => `"${s.sheetName}" (${s.dataRowCount} data rows, ${s.headerCount} cols, score ${s.score})`)
       .join("; ");
+    const totalDiag = diagList.reduce((acc, d) => ({
+      filteredNoName: acc.filteredNoName + d.filteredNoName,
+      filteredFieldCode: acc.filteredFieldCode + d.filteredFieldCode,
+      filteredPolicy: acc.filteredPolicy + d.filteredPolicy,
+      width: d.width, maxDataWidth: d.maxDataWidth, dataRows: acc.dataRows + d.dataRows, headerIdx: d.headerIdx,
+    }), { filteredNoName: 0, filteredFieldCode: 0, filteredPolicy: 0, width: 0, maxDataWidth: 0, dataRows: 0, headerIdx: 0 });
     const parseInfo = [
       `${combined.length} products`,
       sheets.length > 1 ? `from ${sheets.length} sheets` : "from 1 sheet",
       `— ${sheetDetail}`,
+      `· filtered: no-name=${totalDiag.filteredNoName} field-code=${totalDiag.filteredFieldCode} policy=${totalDiag.filteredPolicy}`,
+      `· width=${totalDiag.width} maxW=${totalDiag.maxDataWidth} dataRows=${totalDiag.dataRows} headerAt=${totalDiag.headerIdx}`,
       dupSkus > 0 ? `· ${dupSkus} duplicate SKUs skipped` : "",
     ].filter(Boolean).join(" ");
 
