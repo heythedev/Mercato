@@ -111,13 +111,21 @@ async function loadSheets(buffer: Buffer, maxRows: number): Promise<XlsxSheetGri
 export async function readAllProductSheets(buffer: Buffer): Promise<XlsxSheetGrid[]> {
   const sheets = await loadSheets(buffer, Number.MAX_SAFE_INTEGER);
   if (!sheets.length) throw new Error("Workbook has no readable sheets.");
-  // Include every sheet with a positive score — don't filter by distance from best,
-  // because a secondary product sheet may score much lower simply due to having fewer
-  // header columns, not because it's a helper/instruction sheet (those are caught by
-  // the NAME_NEGATIVE penalty which subtracts 80 from the score).
-  const good = sheets
-    .filter(s => s.score > 0)
-    .sort((a, b) => b.score - a.score);
+
+  const good = sheets.filter(s => {
+    if (s.score > 0) return true;    // clearly a product sheet
+    if (s.score <= -1000) return false; // rejected: fewer than 2 header columns
+
+    // A negatively-named sheet ("Reference", "Values", "Attribute", "Notes",
+    // "Conditions", etc.) still contains product data if it has substantial rows.
+    // Genuine lookup/dropdown/instruction tables are always small (< 100 rows);
+    // product sheets are large. Count non-blank rows to decide.
+    const nonBlankRows = s.grid.reduce(
+      (n, r) => n + (r.some(c => String(c ?? "").trim() !== "") ? 1 : 0), 0,
+    );
+    return nonBlankRows > 100;
+  }).sort((a, b) => b.score - a.score);
+
   // Fallback: if nothing passed, take whichever sheet scored highest
   const result = good.length ? good : [sheets.reduce((a, b) => b.score > a.score ? b : a)];
   console.log(`[xlsx] Using ${result.length} sheet(s): ${result.map(s => `"${s.sheetName}"(${s.score})`).join(", ")}`);

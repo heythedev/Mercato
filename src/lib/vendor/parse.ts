@@ -284,6 +284,21 @@ function gridToRows(grid: string[][]): VendorRow[] {
   // Data rows start after header (and sub-header / field-code row if one was consumed)
   const dataStartIdx = (hasSubHeader || isFieldCodeRow) ? headerIdx + 2 : headerIdx + 1;
 
+  // Extend width if data rows contain values beyond the last non-blank header column.
+  // This handles files where some product columns sit under blank header cells.
+  const widthCheckEnd = Math.min(grid.length, dataStartIdx + 51);
+  for (let i = dataStartIdx; i < widthCheckEnd; i++) {
+    const r = grid[i] ?? [];
+    const rLen = Math.min(r.length, MAX_FILE_COLS);
+    for (let j = rLen - 1; j >= width; j--) {
+      if (String(r[j] ?? "").trim() !== "") {
+        while (headers.length < j + 1) headers.push("");
+        width = j + 1;
+        break;
+      }
+    }
+  }
+
   // Build data rows (rows below header, non-blank)
   const dataRows: string[][] = [];
   for (let i = dataStartIdx; i < grid.length; i++) {

@@ -39,7 +39,9 @@ export async function POST(req: NextRequest) {
     data: { userId: user!.id, name, marketplace, status: "uploaded", isNewListing },
   });
 
-  const CHUNK = 500;
+  // 11 columns × 2 000 rows = 22 000 params — well under PostgreSQL's 65 535 limit.
+  // Fewer round trips means faster completion and lower timeout risk on large files.
+  const CHUNK = 2000;
   let inserted = 0;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK);
