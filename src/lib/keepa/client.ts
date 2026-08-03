@@ -22,10 +22,10 @@ export async function refreshKeepaTokens(): Promise<KeepaTokenInfo | null> {
 
 /** Typical Keepa cost for ASIN/UPC product lookups (base + rating). */
 export const KEEPA_TOKENS_PER_PRODUCT = 2;
-/** Extra tokens that must remain available before a verify run may start. */
-export const KEEPA_VERIFY_TOKEN_BUFFER = 100;
+/** No extra start buffer — require only the tokens the estimate actually needs. */
+export const KEEPA_VERIFY_TOKEN_BUFFER = 0;
 
-/** Estimate Keepa tokens for an Amazon verify, plus the +100 start buffer. */
+/** Estimate Keepa tokens for an Amazon verify. */
 export function estimateAmazonVerifyTokens(productCount: number): {
   estimated: number;
   required: number;
