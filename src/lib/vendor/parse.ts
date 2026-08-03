@@ -293,10 +293,14 @@ function gridToRows(grid: string[][]): VendorRow[] {
     dataRows.push(row);
   }
 
-  console.log(`[parse] Grid: ${grid.length} total rows, header at row ${headerIdx}, data starts at row ${dataStartIdx}, ${dataRows.length} non-blank data rows`);
+  console.log(`[parse] Grid: ${grid.length} total rows, header at row ${headerIdx}, width=${width}, data starts at row ${dataStartIdx}, ${dataRows.length} non-blank data rows`);
   if (!dataRows.length) return [];
 
-  const cols = detectColumns(headers, dataRows.slice(0, 10));
+  const cols = detectColumns(headers, dataRows.slice(0, 50));
+
+  let filteredNoName = 0;
+  let filteredFieldCode = 0;
+  let filteredPolicy = 0;
 
   const parsed = dataRows.map((row) => {
     const get = (idx: number | null): string => (idx != null ? row[idx] ?? "" : "").trim();
@@ -322,11 +326,11 @@ function gridToRows(grid: string[][]): VendorRow[] {
       || rawProductVal
       || "";
 
-    if (!name) return null;
+    if (!name) { filteredNoName++; return null; }
 
     // Safety net for repeated/echoed header rows anywhere in the sheet: a product
     // whose name is a bare field code ("name", "title", "sku") is a header, not a product.
-    if (FIELD_CODE_RE.test(name.trim())) return null;
+    if (FIELD_CODE_RE.test(name.trim())) { filteredFieldCode++; return null; }
 
     // Filter out footer/legal text rows (T&C lines, policy disclaimers, etc.)
     const nonBlankCells = row.filter(c => c && c.trim()).length;
@@ -336,7 +340,7 @@ function gridToRows(grid: string[][]): VendorRow[] {
       wordCount > 7;
     // Keywords that appear in policy/terms text but never in product names
     const hasPolicyWords = /\b(must\s+be|require[sd]?\s+(auth|writ)|claims?\s+for\s+(defective|missing)|shipment\s+fee|drop\s+ship|\bfob\b|subject\s+to\s+change|without\s+notice|\d+\s+days?\s+of\s+(receipt|delivery)|minimum\s+(initial\s+)?order|net\s+(price|fob)|accessories\s+excluded|dealer\s+to\s+qual)\b/i.test(name);
-    if (hasPolicyWords || (looksLikeSentence && (nonBlankCells <= 2 || wordCount > 12))) return null;
+    if (hasPolicyWords || (looksLikeSentence && (nonBlankCells <= 2 || wordCount > 12))) { filteredPolicy++; return null; }
 
     return {
       ...raw,
@@ -372,6 +376,7 @@ function gridToRows(grid: string[][]): VendorRow[] {
       })(),
     } as VendorRow;
   }).filter((r): r is VendorRow => r !== null && r.name.length > 0);
+  console.log(`[parse] Filtered: no-name=${filteredNoName}, field-code=${filteredFieldCode}, policy=${filteredPolicy}`);
   console.log(`[parse] Final: ${parsed.length} valid products (${dataRows.length - parsed.length} filtered out)`);
   return parsed;
 }
