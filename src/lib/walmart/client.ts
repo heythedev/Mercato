@@ -1,4 +1,5 @@
 import { createSign } from "crypto";
+import { fetchWithRetry, RateLimitError } from "./throttle";
 
 const BASE = "https://developer.api.walmart.com/api-proxy/service/affil/product/v2";
 
@@ -64,7 +65,7 @@ export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | nul
   const normalized = normalizeUpc(upc);
   try {
     const headers = generateAuthHeaders();
-    const res = await fetch(`${BASE}/items?upc=${encodeURIComponent(normalized)}`, { headers });
+    const res = await fetchWithRetry(`${BASE}/items?upc=${encodeURIComponent(normalized)}`, { headers });
     if (!res.ok) {
       console.error(`[walmart] UPC search ${res.status}:`, await res.text().catch(() => ""));
       return null;
@@ -73,15 +74,32 @@ export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | nul
     const items = (data.items as WalmartItem[] | undefined) ?? [];
     return items.find((i) => normalizeUpc(i.upc ?? "") === normalized) ?? items[0] ?? null;
   } catch (e) {
+    if (e instanceof RateLimitError) throw e; // let the limiter see the pushback
     console.error("[walmart] UPC search error:", e);
     return null;
   }
 }
 
-export async function searchWalmartByName(query: string): Promise<WalmartItem | null> {
+/**
+ * Keyword search. By default this costs ONE request and returns the search hit
+ * as-is.
+ *
+ * `withDetails` adds a second request to pull the full item record, whose only
+ * meaningful addition is `imageEntities` (the alternate camera angles). That
+ * doubles the cost of every name search, so it is opt-in: callers that will
+ * actually consume the extra angles — i.e. the AI image-comparison pass — ask
+ * for it, and a plain field-comparison run does not.
+ */
+export async function searchWalmartByName(
+  query: string,
+  opts?: { withDetails?: boolean },
+): Promise<WalmartItem | null> {
   try {
     const headers = generateAuthHeaders();
-    const res = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}&numItems=5`, { headers });
+    const res = await fetchWithRetry(
+      `${BASE}/search?query=${encodeURIComponent(query)}&numItems=5`,
+      { headers },
+    );
     if (!res.ok) {
       console.error(`[walmart] Name search ${res.status}:`, await res.text().catch(() => ""));
       return null;
@@ -93,13 +111,13 @@ export async function searchWalmartByName(query: string): Promise<WalmartItem | 
       (data.items as WalmartItem[] | undefined) ??
       [];
     const first = items[0] ?? null;
-    // Fetch full item details (including imageEntities) when we have an itemId
-    if (first?.itemId) {
+    if (opts?.withDetails && first?.itemId) {
       const full = await fetchWalmartItemById(first.itemId).catch(() => null);
       if (full) return full;
     }
     return first;
   } catch (e) {
+    if (e instanceof RateLimitError) throw e; // let the limiter see the pushback
     console.error("[walmart] Name search error:", e);
     return null;
   }
@@ -108,7 +126,7 @@ export async function searchWalmartByName(query: string): Promise<WalmartItem | 
 export async function fetchWalmartItemById(itemId: string): Promise<WalmartItem | null> {
   try {
     const headers = generateAuthHeaders();
-    const res = await fetch(`${BASE}/items?ids=${encodeURIComponent(itemId)}`, { headers });
+    const res = await fetchWithRetry(`${BASE}/items?ids=${encodeURIComponent(itemId)}`, { headers });
     if (!res.ok) return null;
     const data = await res.json() as Record<string, unknown>;
     const items = (data.items as WalmartItem[] | undefined) ?? [];

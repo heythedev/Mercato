@@ -68,7 +68,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   projectStatus: string;
   elapsedMs?: number | null;
   completedAt?: string | null;
-  onRunVerify: (force?: boolean) => void;
+  onRunVerify: (force?: boolean, ai?: boolean) => void;
   onApproveProduct: (productId: string) => Promise<void>;
   onMarkDiscontinued: (productId: string) => Promise<void>;
   onReverifyProduct: (productId: string) => Promise<void>;
@@ -175,6 +175,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             >
               {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
               Download Report
+            </button>
+          )}
+          {hasResults && (warningCount > 0 || mismatchCount > 0) && (
+            <button
+              onClick={() => onRunVerify(true, true)}
+              disabled={loading}
+              title="Re-check flagged products with AI image and title comparison. Slower, and only examines warnings and mismatches."
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
+            >
+              <Sparkles className="w-4 h-4" />
+              AI deep check
             </button>
           )}
           {hasResults && (

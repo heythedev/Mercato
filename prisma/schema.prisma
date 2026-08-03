@@ -168,6 +168,29 @@ model KeepaProductCache {
   @@index([fetchedAt])
 }
 
+// ── Walmart lookup cache ──────────────────────────────────────────────────────
+
+/// Barcode → resolved Walmart item payload.
+///
+/// Walmart verification costs up to 5 sequential API calls per unresolved
+/// product, so a remembered answer — including a remembered absence — is the
+/// difference between a 10k run taking minutes and taking an hour. Keyed by
+/// GTIN-14 like the Keepa cache so both normalize the same way.
+///
+/// `item` is null for a confirmed "Walmart has nothing for this code" (negative
+/// cache). `source` records which API answered, because the seller catalog is
+/// authoritative about our own listings while an affiliate name-search hit is a
+/// fuzzy guess that should expire sooner.
+model WalmartItemCache {
+  code      String // canonical GTIN-14, or "q:<hash>" for name-search queries
+  item      Json? // normalized item payload; null = confirmed absent
+  source    String // seller | upc | name
+  fetchedAt DateTime @default(now())
+
+  @@id([code])
+  @@index([fetchedAt])
+}
+
 // ── Templates ─────────────────────────────────────────────────────────────────
 
 model ExportTemplate {

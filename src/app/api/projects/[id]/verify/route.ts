@@ -1,28 +1,237 @@
 import { NextRequest, NextResponse } from "next/server";
 
-export const maxDuration = 300;
+// The app is self-hosted (`next start`), so this is our own ceiling rather than
+// a platform limit. A 10k-product Walmart run is the sizing target; 15 minutes
+// leaves headroom above the ~10 minute expected duration without letting a
+// genuinely stuck run hold a connection indefinitely.
+export const maxDuration = 900;
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
-import { verifyProducts, applyAiVerificationPasses } from "@/lib/marketplaces/verify";
+import {
+  verifyProducts,
+  applyAiVerificationPasses,
+  resetWalmartRunState,
+} from "@/lib/marketplaces/verify";
 import {
   estimateAmazonVerifyTokens,
   refreshKeepaTokens,
 } from "@/lib/keepa/client";
 
-const BATCH_SIZE = 50;
+// Products per lookup batch. The limiter — not this number — governs API
+// concurrency, but each batch is a barrier: the next one cannot start until the
+// slowest product in this one finishes. With concurrency ~96 a small batch
+// drains almost as fast as it fills, so the run spends a large fraction of its
+// time in barrier stalls. 1000 keeps the pool saturated between barriers while
+// still committing progress often enough to survive the time ceiling.
+const BATCH_SIZE = 1000;
 
 // Stop starting new batches once we're this close to the `maxDuration` ceiling.
 // A run that is cut off mid-batch loses that batch's work and strands the
 // project; stopping cleanly lets the caller resume from where we left off.
 const TIME_BUDGET_MS = (maxDuration - 45) * 1000;
 
-// Reserve the last 90 seconds for the combined AI post-pass that runs ONCE
-// after all marketplace-API batches complete (instead of once per batch).
-// This lets Walmart process ~800+ products per run instead of ~100.
-const LOOKUP_BUDGET_MS = TIME_BUDGET_MS - 90_000;
+// Reserve time for the AI post-pass, but only when it is actually going to run.
+// With AI off (the default) the entire budget goes to lookups.
+const AI_RESERVE_MS = 120_000;
 
 function isAmazonMarketplace(marketplace: string): boolean {
   return marketplace === "amazon" || marketplace === "amazon_us";
+}
+
+/**
+ * Product updates in flight at any one time.
+ *
+ * These are deliberately NOT wrapped in a transaction. Each row is independent,
+ * so all-or-nothing semantics would mean one bad row discarding hundreds of
+ * successfully verified products — which the resume pass would then have to
+ * re-fetch from Walmart. Batching them into a single `$transaction` also blew
+ * past Prisma's 5s interactive-transaction timeout at this volume.
+ *
+ * Capped at 8 to stay under the node-postgres pool (10 connections by default).
+ * Exceeding the pool doesn't just queue — it fails with "timeout exceeded when
+ * trying to connect" once the wait passes `connectionTimeoutMillis`, which is
+ * the same failure `inChunks` in src/lib/db.ts was introduced to prevent.
+ */
+const WRITE_CONCURRENCY = 8;
+
+type PersistableResult = {
+  productId: string;
+  status: string;
+  fields: unknown;
+  liveData?: unknown;
+  resolvedUpc?: string;
+};
+
+/** Rows per bulk statement. Keeps the parameter count well under Postgres' 65535 cap. */
+const BULK_CHUNK = 500;
+
+/**
+ * Update many products in a single statement using UPDATE ... FROM (VALUES ...).
+ *
+ * Prisma has no bulk-update-with-distinct-values primitive: `updateMany` applies
+ * one identical payload to every matched row, which is not what verification
+ * needs. Issuing N individual updates instead costs N network round-trips —
+ * ~7 minutes for 10k rows against a remote database.
+ *
+ * Values are passed as query parameters (never interpolated), and COALESCE
+ * preserves the existing column when a row has no new value, matching the
+ * conditional-spread semantics of the per-row path.
+ */
+async function bulkUpdateProducts(
+  results: PersistableResult[],
+  opts: { statusAndFieldsOnly?: boolean; verifiedAt: Date },
+): Promise<void> {
+  for (let i = 0; i < results.length; i += BULK_CHUNK) {
+    const chunk = results.slice(i, i + BULK_CHUNK);
+    const params: unknown[] = [];
+    const tuples: string[] = [];
+
+    for (const r of chunk) {
+      const ld = r.liveData as Record<string, unknown> | null;
+      const asin = typeof ld?.asin === "string" ? ld.asin : null;
+      // Keepa prices are in cents (e.g. 1999 = $19.99)
+      const price = typeof ld?.price === "number" && ld.price > 0 ? ld.price / 100 : null;
+
+      const n = params.length;
+      if (opts.statusAndFieldsOnly) {
+        params.push(r.productId, r.status, JSON.stringify(r.fields ?? []));
+        tuples.push(`($${n + 1}::text, $${n + 2}::text, $${n + 3}::jsonb)`);
+      } else {
+        params.push(
+          r.productId,
+          r.status,
+          JSON.stringify(r.fields ?? []),
+          JSON.stringify(r.liveData ?? {}),
+          asin,
+          price,
+          r.resolvedUpc ?? null,
+        );
+        tuples.push(
+          `($${n + 1}::text, $${n + 2}::text, $${n + 3}::jsonb, $${n + 4}::jsonb, ` +
+            `$${n + 5}::text, $${n + 6}::double precision, $${n + 7}::text)`,
+        );
+      }
+    }
+
+    const sql = opts.statusAndFieldsOnly
+      ? `UPDATE "Product" AS p
+         SET "verifyStatus" = v.status,
+             "verifyFields" = v.fields
+         FROM (VALUES ${tuples.join(",")}) AS v(id, status, fields)
+         WHERE p.id = v.id`
+      : `UPDATE "Product" AS p
+         SET "verifyStatus" = v.status,
+             "verifyFields" = v.fields,
+             "liveData"     = v.livedata,
+             "verifiedAt"   = $${params.length + 1}::timestamp,
+             "asin"         = COALESCE(v.asin, p."asin"),
+             "price"        = COALESCE(v.price, p."price"),
+             "upc"          = COALESCE(v.upc, p."upc")
+         FROM (VALUES ${tuples.join(",")}) AS v(id, status, fields, livedata, asin, price, upc)
+         WHERE p.id = v.id`;
+
+    if (!opts.statusAndFieldsOnly) params.push(opts.verifiedAt);
+    await prisma.$executeRawUnsafe(sql, ...params);
+  }
+}
+
+/**
+ * Write verification results back to the products table.
+ *
+ * Each row gets distinct values, so this is inherently N updates. They are
+ * issued with bounded concurrency rather than one-at-a-time: at 10k products the
+ * original shape (chunks of 10, awaited serially) spent minutes purely on
+ * round-trip latency.
+ *
+ * A failed row is logged and skipped rather than aborting the run — it simply
+ * stays unverified, and the resume pass picks it up.
+ *
+ * `statusAndFieldsOnly` is for the AI re-persist, where liveData/asin/price/upc
+ * were already committed by the lookup pass and must not be rewritten.
+ */
+async function persistResults(
+  results: PersistableResult[],
+  opts?: { statusAndFieldsOnly?: boolean },
+): Promise<void> {
+  if (!results.length) return;
+  const verifiedAt = new Date();
+  let failed = 0;
+
+  const writeOne = (r: PersistableResult) => {
+    if (opts?.statusAndFieldsOnly) {
+      return prisma.product.update({
+        where: { id: r.productId },
+        data: {
+          verifyStatus: r.status,
+          verifyFields: r.fields as object[],
+        },
+      });
+    }
+    const ld = r.liveData as Record<string, unknown> | null;
+    const verifiedAsin = typeof ld?.asin === "string" ? ld.asin : null;
+    // Keepa prices are in cents (e.g. 1999 = $19.99)
+    const verifiedPrice =
+      typeof ld?.price === "number" && ld.price > 0 ? ld.price / 100 : null;
+    // Save UPC resolved from vendorData scan when p.upc was missing
+    const resolvedUpc = r.resolvedUpc ?? null;
+    return prisma.product.update({
+      where: { id: r.productId },
+      data: {
+        verifyStatus: r.status,
+        verifyFields: r.fields as object[],
+        liveData: r.liveData as object,
+        verifiedAt,
+        ...(verifiedAsin ? { asin: verifiedAsin } : {}),
+        ...(verifiedPrice ? { price: verifiedPrice } : {}),
+        ...(resolvedUpc ? { upc: resolvedUpc } : {}),
+      },
+    });
+  };
+
+  // Fast path: one bulk UPDATE ... FROM (VALUES ...) per chunk instead of one
+  // round-trip per row. Against a remote database (~40ms RTT) per-row updates
+  // cost ~7 minutes for 10k products — more than the entire lookup phase — so
+  // this is what keeps a full catalog run inside its time budget.
+  try {
+    await bulkUpdateProducts(results, { statusAndFieldsOnly: opts?.statusAndFieldsOnly, verifiedAt });
+    return;
+  } catch (e) {
+    console.error(
+      "[verify-persist] bulk update failed, falling back to per-row writes:",
+      e instanceof Error ? e.message : e,
+    );
+  }
+
+  // Fallback: per-row writes with bounded concurrency. Slower, but keeps a run
+  // working if the bulk statement ever hits something it can't express.
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= results.length) return;
+      try {
+        await writeOne(results[i]);
+      } catch (e) {
+        failed++;
+        if (failed <= 3) {
+          console.error(
+            `[verify-persist] product ${results[i].productId} failed to save:`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(WRITE_CONCURRENCY, results.length) }, worker),
+  );
+
+  if (failed) {
+    console.error(
+      `[verify-persist] ${failed}/${results.length} product writes failed — ` +
+        `those products stay unverified and will be retried on resume`,
+    );
+  }
 }
 
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -65,6 +274,11 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // a run cut short by the duration ceiling can be continued by calling again.
   // `?force=1` re-checks everything (the explicit "Re-verify" action).
   const force = _req.nextUrl.searchParams.get("force") === "1";
+  // AI image/title adjudication costs a model call per product and dominates the
+  // run at catalog scale, so it is opt-in via `?ai=1`. When enabled it only
+  // examines flagged (warning/mismatch) results — a clean barcode-confirmed
+  // match gains nothing from a vision check.
+  const useAi = _req.nextUrl.searchParams.get("ai") === "1";
   const allProducts = force
     ? project.products
     : project.products.filter((p) => p.verifyStatus == null);
@@ -144,12 +358,17 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // so this removes most of the repeated image-fetch I/O.
   const { withImageCache } = await import("@/lib/ai/compare-images");
 
+  // When the AI pass is off, lookups get the whole budget.
+  const lookupBudgetMs = useAi ? TIME_BUDGET_MS - AI_RESERVE_MS : TIME_BUDGET_MS;
+
+  // A fresh run re-probes the seller catalog; a resume keeps the decision the
+  // earlier pass already paid to make.
+  if (isFreshStart) resetWalmartRunState();
+
   try {
     await withImageCache(async () => {
       for (let i = 0; i < allProducts.length; i += BATCH_SIZE) {
-        // Reserve time for the combined AI post-pass by cutting off new batches
-        // at LOOKUP_BUDGET_MS instead of the full TIME_BUDGET_MS.
-        if (Date.now() - startedAt > LOOKUP_BUDGET_MS) {
+        if (Date.now() - startedAt > lookupBudgetMs) {
           ranOutOfTime = true;
           break;
         }
@@ -166,34 +385,9 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         const processed = results.filter((r) => r.status !== "skipped");
         totalSkipped += results.length - processed.length;
 
-        // Save base results immediately so progress is preserved even if the
-        // AI pass below runs out of time.
-        for (let j = 0; j < processed.length; j += 10) {
-          const sub = processed.slice(j, j + 10);
-          await Promise.all(
-            sub.map((r) => {
-              const ld = r.liveData as Record<string, unknown> | null;
-              const verifiedAsin = typeof ld?.asin === "string" ? ld.asin : null;
-              // Keepa prices are in cents (e.g. 1999 = $19.99)
-              const verifiedPrice = typeof ld?.price === "number" && ld.price > 0
-                ? ld.price / 100 : null;
-              // Save UPC resolved from vendorData scan when p.upc was missing
-              const resolvedUpc = r.resolvedUpc ?? null;
-              return prisma.product.update({
-                where: { id: r.productId },
-                data: {
-                  verifyStatus: r.status,
-                  verifyFields: r.fields as object[],
-                  liveData: r.liveData as object,
-                  verifiedAt: new Date(),
-                  ...(verifiedAsin ? { asin: verifiedAsin } : {}),
-                  ...(verifiedPrice ? { price: verifiedPrice } : {}),
-                  ...(resolvedUpc ? { upc: resolvedUpc } : {}),
-                },
-              });
-            })
-          );
-        }
+        // Persist the batch. Progress is committed per batch so a run cut short
+        // by the time ceiling keeps everything it already resolved.
+        await persistResults(processed);
 
         totalProcessed += processed.length;
         allRawResults.push(...results);
@@ -201,33 +395,25 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       }
     });
 
-    // Single combined AI post-pass on all gathered results.
-    // Previously this ran inside each batch (~60-90s/batch × 22 batches for 1100
-    // products = budget exhausted after 2 batches). Now it runs once here.
-    if (allRawResults.length > 0) {
+    // Optional AI post-pass, once over all gathered results (never per batch).
+    // Restricted to flagged results, so its cost scales with the number of
+    // problems found rather than with catalog size.
+    if (useAi && allRawResults.length > 0) {
+      const flagged = allRawResults.filter(
+        (r) => r.status === "warning" || r.status === "mismatch",
+      );
       await applyAiVerificationPasses(
         allRawResults,
         allAttemptedProducts as Parameters<typeof applyAiVerificationPasses>[1],
         project.marketplace,
+        { onlyFlagged: true },
       );
-
-      // Persist the AI-updated status and field annotations.
-      // liveData / asin / price / upc were already saved in the batch loop above.
-      const aiProcessed = allRawResults.filter((r) => r.status !== "skipped");
-      for (let j = 0; j < aiProcessed.length; j += 10) {
-        const sub = aiProcessed.slice(j, j + 10);
-        await Promise.all(
-          sub.map((r) =>
-            prisma.product.update({
-              where: { id: r.productId },
-              data: {
-                verifyStatus: r.status,
-                verifyFields: r.fields as object[],
-              },
-            })
-          )
-        );
-      }
+      // Re-persist only the rows the AI pass could have changed. liveData / asin
+      // / price / upc were already written in the batch loop and don't change.
+      await persistResults(
+        flagged.filter((r) => r.status !== "skipped"),
+        { statusAndFieldsOnly: true },
+      );
     }
 
     const remaining = allProducts.length - attempted;

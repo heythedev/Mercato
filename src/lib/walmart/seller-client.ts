@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { toGtin14 } from "@/lib/barcode";
+import { fetchWithRetry, RateLimitError } from "./throttle";
 
 // Walmart Marketplace (Seller) API. Unlike the Affiliate API in ./client.ts —
 // which searches Walmart's first-party retail catalog — this reads the SELLER's
@@ -125,7 +126,7 @@ function normalizeItem(raw: Record<string, unknown>): SellerItem {
 
 async function sellerFetch(path: string): Promise<Record<string, unknown> | null> {
   const token = await getToken();
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithRetry(`${BASE}${path}`, {
     headers: {
       "WM_SEC.ACCESS_TOKEN": token,
       "WM_QOS.CORRELATION_ID": randomUUID(),
@@ -172,6 +173,9 @@ export async function getSellerItemByGtin(rawCode: string): Promise<SellerItem |
     // Auth errors propagate; everything else (network, parse) degrades to null
     // so the caller can fall back to the Affiliate lookup.
     if (e instanceof Error && /auth failed/.test(e.message)) throw e;
+    // Rate limiting must also propagate — swallowing it would hide the pushback
+    // from the adaptive limiter, which would keep widening into a wall of 429s.
+    if (e instanceof RateLimitError) throw e;
     console.error("[walmart-seller] GTIN lookup error:", e);
     return null;
   }
