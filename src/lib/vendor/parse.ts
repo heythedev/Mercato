@@ -311,28 +311,31 @@ function gridToRows(grid: string[][]): VendorRow[] {
   // Data rows start after header (and sub-header / field-code row if one was consumed)
   const dataStartIdx = (hasSubHeader || isFieldCodeRow) ? headerIdx + 2 : headerIdx + 1;
 
-  // Extend width if data rows contain values beyond the last non-blank header column.
-  // This handles files where some product columns sit under blank header cells.
-  const widthCheckEnd = Math.min(grid.length, dataStartIdx + 51);
-  for (let i = dataStartIdx; i < widthCheckEnd; i++) {
-    const r = grid[i] ?? [];
-    const rLen = Math.min(r.length, MAX_FILE_COLS);
-    for (let j = rLen - 1; j >= width; j--) {
-      if (String(r[j] ?? "").trim() !== "") {
-        while (headers.length < j + 1) headers.push("");
-        width = j + 1;
-        break;
+  // Build data rows — use each row's ACTUAL column extent rather than capping at the
+  // header-derived `width`. Vendor files often concatenate multiple catalog formats in
+  // one sheet: the first N rows use columns 1-30, the next M rows use columns 20-45.
+  // Capping at the header width would make the second group appear blank (all short
+  // "0" values in the early columns) and filter them as no-name rows.
+  const dataRows: string[][] = [];
+  let maxDataWidth = width; // tracks the rightmost column that has real data anywhere
+  for (let i = dataStartIdx; i < grid.length; i++) {
+    const rawRow = grid[i] ?? [];
+    const rLen = Math.min(rawRow.length, MAX_FILE_COLS);
+    // Extend maxDataWidth to this row's rightmost non-blank cell
+    if (rLen > maxDataWidth) {
+      for (let j = rLen - 1; j >= maxDataWidth; j--) {
+        if (String(rawRow[j] ?? "").trim() !== "") { maxDataWidth = j + 1; break; }
       }
     }
-  }
-
-  // Build data rows (rows below header, non-blank)
-  const dataRows: string[][] = [];
-  for (let i = dataStartIdx; i < grid.length; i++) {
-    const row = (grid[i] ?? []).slice(0, width).map((c) => String(c ?? "").trim());
+    const row = rawRow.slice(0, rLen).map((c) => String(c ?? "").trim());
     if (row.every((c) => c === "")) continue;
-    while (row.length < width) row.push("");
     dataRows.push(row);
+  }
+  // Extend headers with blank entries so the fallback name scan covers all columns
+  if (maxDataWidth > width) {
+    console.log(`[parse] Width extended from ${width} to ${maxDataWidth} (file has multiple column layouts)`);
+    while (headers.length < maxDataWidth) headers.push("");
+    width = maxDataWidth;
   }
 
   console.log(`[parse] Grid: ${grid.length} total rows, header at row ${headerIdx}, width=${width}, data starts at row ${dataStartIdx}, ${dataRows.length} non-blank data rows`);
@@ -364,7 +367,19 @@ function gridToRows(grid: string[][]): VendorRow[] {
     const isPureShortNumber = /^\d{1,2}$/.test(rawProductVal);
     const name = (!isPureShortNumber ? rawProductVal : null)
       || get(cols.descriptionCol)
-      || headers.map((_, i) => row[i]).find((v) => v && v.trim().length > 2)
+      || (() => {
+        // Pick the longest non-numeric string in the row. Files with multiple
+        // product formats in one sheet often have the real name in a column far
+        // beyond the header-derived productCol. "First value > 2 chars" would
+        // pick a price like "231" before "Magnolia Upholstered Bed" — this
+        // approach picks the most descriptive string regardless of column order.
+        let best = "";
+        for (const v of row) {
+          const t = (v ?? "").trim();
+          if (t.length > 2 && !/^\d+(\.\d+)?$/.test(t) && t.length > best.length) best = t;
+        }
+        return best;
+      })()
       || rawProductVal
       || "";
 
