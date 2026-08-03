@@ -6,6 +6,7 @@ import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/
 import { formatBestBuyTaxonomyForPrompt, loadBestBuyCategoryPaths } from "@/lib/ai/bestbuy-taxonomy";
 import { formatSearsTaxonomyForPrompt, loadSearsCategoryPaths } from "@/lib/ai/sears-taxonomy";
 import { formatWayfairTaxonomyForPrompt, loadWayfairCategoryPaths, hasWayfairTaxonomy } from "@/lib/ai/wayfair-taxonomy";
+import { looksLikeSkuName } from "@/lib/ai/resolve-sku";
 
 const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -371,6 +372,35 @@ export async function categorizeProducts(
         onProgress?.(Math.min(i + batch.length, enriched.length), enriched.length, "web-search rescue");
       }
     }
+
+    // ── Forced-choice pass: refused products that have REAL names ──────────────
+    // The model sometimes returns "Uncategorized" for a product whose name plainly
+    // identifies it ("Convene 5 Piece Outdoor Sectional Set") because no leaf names the
+    // exact product type — while categorizing identical items on the same run. Those
+    // refusals are over-strictness, not genuine mismatches. Re-ask ONCE with
+    // "Uncategorized is not acceptable — pick the closest path". Only products with a
+    // resolved human-readable name qualify: raw SKU codes stay Uncategorized, because
+    // forcing a choice on a bare code would just be a guess.
+    const stillRefused = allResults.filter((r) => r.category === "Uncategorized");
+    if (stillRefused.length > 0) {
+      const inputById = new Map(products.map((p) => [p.id, p]));
+      const retryable = stillRefused
+        .map((r) => inputById.get(r.productId))
+        .filter((p): p is ProductInput => !!p && !looksLikeSkuName(p.name, p.sku));
+      for (let i = 0; i < retryable.length; i += BATCH) {
+        const batch = retryable.slice(i, i + BATCH);
+        try {
+          const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true);
+          for (const r of forced) {
+            // Accept only a verbatim on-list path; anything else stays Uncategorized.
+            if (r.category === "Uncategorized" || !allowed.has(r.category)) continue;
+            const idx = allResults.findIndex((a) => a.productId === r.productId);
+            if (idx !== -1) allResults[idx] = { ...r, confidence: Math.min(r.confidence, 0.5) };
+          }
+        } catch { /* keep Uncategorized */ }
+        onProgress?.(Math.min(i + batch.length, retryable.length), retryable.length, "resolving refused products");
+      }
+    }
   }
 
   return allResults;
@@ -386,6 +416,7 @@ async function categorizeBatch(
   model: string,
   availableCategories?: string[],
   strictMode = false,
+  forceNearest = false,
 ): Promise<CategorizeResult[]> {
   return categorizeBatchWithContext(
     products.map((p) => ({ ...p, searchContext: undefined })),
@@ -393,6 +424,7 @@ async function categorizeBatch(
     model,
     availableCategories,
     strictMode,
+    forceNearest,
   );
 }
 
@@ -402,6 +434,7 @@ async function categorizeBatchWithContext(
   model: string,
   availableCategories?: string[],
   strictMode = false,
+  forceNearest = false,
 ): Promise<CategorizeResult[]> {
   const mpLower = marketplace.toLowerCase();
   const isMathis = mpLower === "mathis";
@@ -565,7 +598,8 @@ MATHIS RULES (mandatory — taxonomy over assumptions):
 3. Never invent a path. Never pick a nearby category that is a different product type.
 4. Prefer the deepest leaf that literally matches the product type.
 5. Use "Uncategorized" only if no listed path's product type matches at all.
-6. Lighting → "Decor > Lighting …". Window treatments → "Decor > Window Treatments …". Holiday decor → "Seasonal > …".` : "";
+6. Lighting → "Decor > Lighting …". Window treatments → "Decor > Window Treatments …". Holiday decor → "Seasonal > …".
+7. OUTDOOR EXCEPTION to rule 1: a product explicitly for outdoor/patio use ("Outdoor", "Patio", "Garden" in the name) MUST stay in the "Outdoor > …" department. If no Outdoor leaf names its exact type, use the closest Outdoor path (outdoor patio daybed → "Outdoor > Outdoor Seating > Outdoor Sectionals" or the nearest Outdoor Seating leaf — NEVER "Baby & Kids > Kids Furniture > Daybeds").` : "";
 
   // Temu's taxonomy has several branches that cover overlapping objects, which is
   // where the model most often picks a near-miss leaf. These tie-breakers encode
@@ -588,13 +622,20 @@ TEMU DISAMBIGUATION (apply when more than one section could fit — resolve by P
   const noInventRule = isWalmart
     ? `2. Never invent category names — output ONLY values that appear verbatim in the list above (some ARE single words like "Furniture" or "Other"; those are valid when listed)`
     : `2. Never invent category names. Never output "General", "Other", "Furniture", "Unknown", etc.`;
+  // Forced-choice pass: these products were already refused once, but each has a real,
+  // identifiable product name that plainly belongs in this store — the refusal was
+  // over-strictness (e.g. no literal "Outdoor Daybed" leaf), not a genuine mismatch.
+  // Demand the nearest path instead of allowing a second refusal.
+  const forceNearestRule = forceNearest ? `
+6. "Uncategorized" is NOT an acceptable answer for any product in this batch. Every one of these is a real product this retailer sells. When no leaf names the exact product type, choose the closest broader path (e.g. an outdoor patio daybed → the nearest Outdoor Seating path; a sectional set → Outdoor Sets / Outdoor Sectionals). You MUST output a path from the list for every product.` : "";
+
   const rules = availableCategories?.length ? `
 RULES:
 1. Output EXACTLY one category name from the list above (copy it character-for-character) OR "Uncategorized" if truly no fit exists
 ${noInventRule}
 3. "Uncategorized" is only for products that genuinely don't belong in ANY listed category
 4. Use product name, brand, description, vendor category as signals to identify WHAT the product is — then map that to the taxonomy leaf
-5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}${temuDisambiguationRule}` : "";
+5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}${temuDisambiguationRule}${forceNearestRule}` : "";
 
   const usesTaxonomySheet = isTemu || isMathis || isBestBuy || isWalmart || isSears;
   // The fuzzy-match floor: rich multi-word paths need a higher bar than the flat
