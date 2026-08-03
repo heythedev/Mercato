@@ -220,24 +220,22 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Batch size: 20 products per call for constrained marketplaces. Larger batches
-  // reduce round-trips significantly (7000 products = 350 batches vs 586 at batch=12).
-  // The taxonomy prompt is large but Sonnet 5's context window handles 20 products
-  // comfortably. Tunable via CATEGORIZE_BATCH_SIZE env var without a redeploy.
-  //
-  // Parallelism: 6 concurrent waves for constrained marketplaces. The exponential
-  // backoff retry (2s→4s→8s→16s) handles any 429 rate-limit errors gracefully, so
-  // we can run higher concurrency safely — stalls self-correct rather than silently
-  // producing Uncategorized. Tunable via CATEGORIZE_PARALLELISM env var.
+  // Model: Haiku for all marketplaces. For constrained taxonomies (Temu, BestBuy,
+  // Walmart, Mathis, Sears) the AI just needs to match a product to one path from
+  // a fixed CSV list — Haiku is equally accurate at this and ~10x faster than Sonnet.
+  // The validation+retry pass already rejects any invalid picks and re-asks with a
+  // stricter prompt. Sonnet took 30+ minutes for 7k products; Haiku takes ~2 minutes.
+  // Override with CATEGORIZE_ANTHROPIC_MODEL env var if a specific run needs Sonnet.
+  const model = process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+
+  // Larger batches for Haiku — it responds in ~1-2s vs 10-15s for Sonnet, so we can
+  // send more products per call without blocking the wave for long.
+  // Tunable via CATEGORIZE_BATCH_SIZE / CATEGORIZE_PARALLELISM env vars.
   const BATCH = Number(
     process.env.CATEGORIZE_BATCH_SIZE ??
-      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 20 : isConstrained ? 20 : 25),
+      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 40 : isConstrained ? 40 : 30),
   );
-  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 6 : 8));
-
-  const model = availableCategories?.length
-    ? (process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-sonnet-5")
-    : (process.env.DEFAULT_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001");
+  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 10 : 12));
 
   const batches: ProductInput[][] = [];
   for (let i = 0; i < products.length; i += BATCH) batches.push(products.slice(i, i + BATCH));
@@ -297,11 +295,10 @@ export async function categorizeProducts(
     // Bail out early on a systemic failure — no point calling the API hundreds of
     // more times with a key/quota/model that will reject every one of them.
     if (systemicError) throw systemicError;
-    // Brief inter-wave pause — lets the API breathe between waves. 200ms is enough
-    // to avoid burst saturation; actual rate-limit backpressure is handled by the
-    // withRateLimitRetry exponential backoff (2s→4s→8s→16s) above.
+    // Minimal inter-wave pause — Haiku handles high concurrency well.
+    // Actual rate-limit backpressure is handled by withRateLimitRetry (2s→4s→8s→16s).
     if (isConstrained && i + PARALLEL < batches.length) {
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 100));
     }
     // Report progress after every parallel wave. The job store's updatedAt advances,
     // so the client's stall detector sees a live run instead of one frozen phase string
