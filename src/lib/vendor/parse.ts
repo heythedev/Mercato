@@ -392,14 +392,19 @@ function gridToRows(grid: string[][], diag?: GridDiag): VendorRow[] {
     if (FIELD_CODE_RE.test(name.trim())) { filteredFieldCode++; return null; }
 
     // Filter out footer/legal text rows (T&C lines, policy disclaimers, etc.)
+    // Use explicit keyword matching as the primary signal — product names can be
+    // long sentences (e.g. Modway furniture: "Magnolia Mid-Century Modern Tufted
+    // Upholstered Velvet Platform Bed Frame", 9 words, only name+UPC filled).
+    // The old heuristic (looksLikeSentence && nonBlankCells <= 2) caught those
+    // valid rows because long furniture names have wordCount > 7 and Modway rows
+    // only have 2 non-blank cells within the scanned range.
     const nonBlankCells = row.filter(c => c && c.trim()).length;
-    const wordCount = name.split(/\s+/).filter(w => w.length > 2).length;
-    const looksLikeSentence =
-      (name.trimEnd().endsWith(".") && name.split(/\s+/).length > 5) ||
-      wordCount > 7;
-    // Keywords that appear in policy/terms text but never in product names
     const hasPolicyWords = /\b(must\s+be|require[sd]?\s+(auth|writ)|claims?\s+for\s+(defective|missing)|shipment\s+fee|drop\s+ship|\bfob\b|subject\s+to\s+change|without\s+notice|\d+\s+days?\s+of\s+(receipt|delivery)|minimum\s+(initial\s+)?order|net\s+(price|fob)|accessories\s+excluded|dealer\s+to\s+qual)\b/i.test(name);
-    if (hasPolicyWords || (looksLikeSentence && (nonBlankCells <= 2 || wordCount > 12))) { filteredPolicy++; return null; }
+    // Only fall back to the lone-cell heuristic for rows that are a single cell
+    // with a sentence-like value — a real product always has at least a name + one
+    // other field (SKU, UPC, brand, price…).
+    const looksLikePolicyRow = name.trimEnd().endsWith(".") && name.split(/\s+/).length > 8 && nonBlankCells <= 1;
+    if (hasPolicyWords || looksLikePolicyRow) { filteredPolicy++; return null; }
 
     return {
       ...raw,
