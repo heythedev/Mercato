@@ -93,7 +93,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     });
   }
 
-  // Preflight: Amazon verify needs Keepa tokens (estimate + 100 buffer) before starting.
+  // Preflight: Amazon verify needs enough Keepa tokens for the estimate before starting.
   if (isAmazonMarketplace(project.marketplace) && allProducts.length > 0) {
     const { estimated, required } = estimateAmazonVerifyTokens(allProducts.length);
     const tokenInfo = await refreshKeepaTokens();
@@ -109,7 +109,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
 
       return NextResponse.json(
         {
-          error: `Not enough Keepa tokens available to verify. Need ${required.toLocaleString()} tokens (${estimated.toLocaleString()} estimated + 100 buffer), but only ${tokensLeft.toLocaleString()} available.${waitHint}`,
+          error: `Not enough Keepa tokens available to verify. Need ${required.toLocaleString()} tokens, but only ${tokensLeft.toLocaleString()} available.${waitHint}`,
           code: "INSUFFICIENT_KEEPA_TOKENS",
           tokensLeft,
           estimated,
