@@ -1,4 +1,4 @@
-import { readXlsxGrid } from "./xlsx-lite";
+import { readAllProductSheets } from "./xlsx-lite";
 import { ASIN_RE, toDisplayBarcode } from "@/lib/barcode";
 
 export type VendorRow = {
@@ -422,9 +422,25 @@ export async function parseVendorFile(buffer: Buffer, filename: string): Promise
   }
 
   try {
-    const { grid } = await readXlsxGrid(buffer, Number.MAX_SAFE_INTEGER);
-    return gridToRows(grid);
-  } catch {
+    const sheets = await readAllProductSheets(buffer);
+    // Parse each sheet independently (each has its own header row) then combine.
+    // Deduplicate by vendorSku so products that appear in multiple sheets aren't doubled.
+    const combined: VendorRow[] = [];
+    const seenSkus = new Set<string>();
+    for (const sheet of sheets) {
+      const rows = gridToRows(sheet.grid);
+      for (const r of rows) {
+        if (r.sku) {
+          if (seenSkus.has(r.sku)) continue;
+          seenSkus.add(r.sku);
+        }
+        combined.push(r);
+      }
+    }
+    console.log(`[parse] Combined ${sheets.length} sheet(s) → ${combined.length} total products`);
+    return combined;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Couldn't")) throw err;
     throw new Error(
       `Couldn't read "${filename}" — please save it as .xlsx or .csv and upload again.`,
     );

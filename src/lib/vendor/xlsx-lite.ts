@@ -7,6 +7,7 @@ import JSZip from "jszip";
  */
 
 export type XlsxGrid = { sheetName: string; grid: string[][] };
+export type XlsxSheetGrid = { sheetName: string; grid: string[][]; score: number };
 
 function decodeXml(s: string): string {
   return s
@@ -69,7 +70,7 @@ function scoreSheet(name: string, grid: string[][]): number {
   return Math.min(headerCount, 120) + nameBonus + rowBonus;
 }
 
-export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<XlsxGrid> {
+async function loadSheets(buffer: Buffer, maxRows: number): Promise<XlsxSheetGrid[]> {
   const zip = await JSZip.loadAsync(buffer);
 
   const wbXml = await zip.file("xl/workbook.xml")?.async("string");
@@ -89,7 +90,7 @@ export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<Xls
     while ((m = re.exec(ssXml))) shared.push(textRuns(m[1]));
   }
 
-  let best: { name: string; grid: string[][]; score: number } | null = null;
+  const sheets: XlsxSheetGrid[] = [];
   let sheetIdx = 0;
   for (const m of wbXml.matchAll(/<sheet\s[^>]*>/g)) {
     const name = decodeXml(attr(m[0], "name") ?? `Sheet${sheetIdx + 1}`);
@@ -98,15 +99,34 @@ export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<Xls
     sheetIdx++;
     const sheetXml = await zip.file(`xl/${target}`)?.async("string");
     if (!sheetXml) continue;
-    const grid = parseSheetRows(sheetXml, shared, Math.max(maxRows, SCORE_SCAN_ROWS));
+    const grid = parseSheetRows(sheetXml, shared, maxRows);
     const score = scoreSheet(name, grid);
     console.log(`[xlsx] Sheet "${name}": ${grid.length} rows, score=${score}`);
-    if (!best || score > best.score) best = { name, grid, score };
+    sheets.push({ sheetName: name, grid, score });
   }
-  if (!best) throw new Error("Workbook has no readable sheets.");
-  const result = best.grid.slice(0, maxRows);
-  console.log(`[xlsx] Selected sheet "${best.name}" (score=${best.score}) with ${result.length} rows`);
-  return { sheetName: best.name, grid: result };
+  return sheets;
+}
+
+/** Returns all sheets that look like product data (score above threshold), sorted best-first. */
+export async function readAllProductSheets(buffer: Buffer): Promise<XlsxSheetGrid[]> {
+  const sheets = await loadSheets(buffer, Number.MAX_SAFE_INTEGER);
+  if (!sheets.length) throw new Error("Workbook has no readable sheets.");
+  const best = Math.max(...sheets.map(s => s.score));
+  // Include any sheet within 40 points of the best that isn't clearly a helper sheet
+  const good = sheets
+    .filter(s => s.score >= best - 40 && s.score > -100)
+    .sort((a, b) => b.score - a.score);
+  console.log(`[xlsx] Using ${good.length} sheet(s): ${good.map(s => `"${s.sheetName}"(${s.score})`).join(", ")}`);
+  return good;
+}
+
+/** Legacy single-sheet reader — kept for template parsing where we want exactly one sheet. */
+export async function readXlsxGrid(buffer: Buffer, maxRows: number): Promise<XlsxGrid> {
+  const sheets = await loadSheets(buffer, maxRows);
+  if (!sheets.length) throw new Error("Workbook has no readable sheets.");
+  const best = sheets.reduce((a, b) => b.score > a.score ? b : a);
+  console.log(`[xlsx] Selected sheet "${best.sheetName}" (score=${best.score}) with ${best.grid.length} rows`);
+  return { sheetName: best.sheetName, grid: best.grid.slice(0, maxRows) };
 }
 
 function parseSheetRows(sheetXml: string, shared: string[], maxRows: number): string[][] {
