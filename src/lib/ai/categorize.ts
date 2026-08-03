@@ -220,16 +220,20 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Parallelism is intentionally LOW for constrained marketplaces (taxonomy prompt + 12 products
-  // per batch → large requests). High concurrency (8+) immediately saturates Anthropic's
-  // per-minute rate limit, causing most batches to get 429 errors that silently produce
-  // "Uncategorized" for every product in the batch. 3 concurrent is safe for all account tiers.
-  // Tunable without a redeploy via env for accounts with higher rate-limit tiers.
+  // Batch size: 20 products per call for constrained marketplaces. Larger batches
+  // reduce round-trips significantly (7000 products = 350 batches vs 586 at batch=12).
+  // The taxonomy prompt is large but Sonnet 5's context window handles 20 products
+  // comfortably. Tunable via CATEGORIZE_BATCH_SIZE env var without a redeploy.
+  //
+  // Parallelism: 6 concurrent waves for constrained marketplaces. The exponential
+  // backoff retry (2s→4s→8s→16s) handles any 429 rate-limit errors gracefully, so
+  // we can run higher concurrency safely — stalls self-correct rather than silently
+  // producing Uncategorized. Tunable via CATEGORIZE_PARALLELISM env var.
   const BATCH = Number(
     process.env.CATEGORIZE_BATCH_SIZE ??
-      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 12 : isConstrained ? 12 : 20),
+      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 20 : isConstrained ? 20 : 25),
   );
-  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 3 : 5));
+  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 6 : 8));
 
   const model = availableCategories?.length
     ? (process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-sonnet-5")
@@ -293,9 +297,11 @@ export async function categorizeProducts(
     // Bail out early on a systemic failure — no point calling the API hundreds of
     // more times with a key/quota/model that will reject every one of them.
     if (systemicError) throw systemicError;
-    // Small inter-wave delay for constrained marketplaces to stay within rate limits.
+    // Brief inter-wave pause — lets the API breathe between waves. 200ms is enough
+    // to avoid burst saturation; actual rate-limit backpressure is handled by the
+    // withRateLimitRetry exponential backoff (2s→4s→8s→16s) above.
     if (isConstrained && i + PARALLEL < batches.length) {
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 200));
     }
     // Report progress after every parallel wave. The job store's updatedAt advances,
     // so the client's stall detector sees a live run instead of one frozen phase string
