@@ -450,16 +450,19 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
                   )}
                 >
                   <div className={cn(
-                    "w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors",
+                    "relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors",
                     isSkipped ? "bg-muted text-muted-foreground" :
                     done ? "bg-primary text-primary-foreground" :
                     active ? "bg-primary text-primary-foreground" :
                     "bg-muted text-muted-foreground"
                   )}>
-                    {done ? (
-                      <CheckCircle2 className="w-4 h-4" />
-                    ) : (
-                      <Icon className="w-4 h-4" />
+                    {/* Always show the step's own icon so each step stays
+                        distinct; a small green check badge marks completion. */}
+                    <Icon className="w-4 h-4" />
+                    {done && (
+                      <span className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                      </span>
                     )}
                   </div>
                   <div className="text-left hidden lg:block">
