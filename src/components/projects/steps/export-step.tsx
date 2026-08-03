@@ -395,7 +395,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         {usesCategoryZip ? (
           <>
             <div className="rounded-2xl p-4 bg-green-50/70 dark:bg-green-950/20">
-              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categories.length}</p>
+              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categories.length - preExportMissingCategories.length}</p>
               <p className="text-sm text-muted-foreground">Categories → files</p>
             </div>
             <div className="rounded-2xl p-4 bg-muted/30">
@@ -500,27 +500,29 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             <div>
               <h3 className="text-sm font-medium mb-2">Files that will be created</h3>
               <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
-                {categories.map(([category, count]) => {
-                  const matched = hasTemplates ? matchTemplate(category, templates) : null;
-                  return (
-                    <div key={category} className="flex items-center gap-3 px-4 py-2.5">
-                      <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
-                      <span className="text-sm flex-1 truncate">{category}</span>
-                      {matched && (
-                        <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
-                          <Shuffle className="w-3 h-3" />
-                          {matched.name}
-                          {matched.userId === null && (
-                            <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
-                          )}
+                {categories
+                  .filter(([category]) => !preExportMissingCategories.includes(category))
+                  .map(([category, count]) => {
+                    const matched = hasTemplates ? matchTemplate(category, templates) : null;
+                    return (
+                      <div key={category} className="flex items-center gap-3 px-4 py-2.5">
+                        <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="text-sm flex-1 truncate">{category}</span>
+                        {matched && (
+                          <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
+                            <Shuffle className="w-3 h-3" />
+                            {matched.name}
+                            {matched.userId === null && (
+                              <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
+                            )}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {count} product{count !== 1 ? "s" : ""}
                         </span>
-                      )}
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        {count} product{count !== 1 ? "s" : ""}
-                      </span>
-                    </div>
-                  );
-                })}
+                      </div>
+                    );
+                  })}
               </div>
             </div>
           )}
