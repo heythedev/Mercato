@@ -40,9 +40,11 @@ export async function POST(req: NextRequest) {
   });
 
   const CHUNK = 500;
+  let inserted = 0;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await prisma.product.createMany({
-      data: rows.slice(i, i + CHUNK).map((r) => ({
+    const chunk = rows.slice(i, i + CHUNK);
+    const result = await prisma.product.createMany({
+      data: chunk.map((r) => ({
         projectId: project.id,
         name: r.name ?? "Unknown",
         vendorSku: r.sku ?? null,
@@ -57,9 +59,12 @@ export async function POST(req: NextRequest) {
         vendorData: r as any,
       })),
     });
+    inserted += result.count;
+    console.log(`[upload] Chunk ${Math.floor(i / CHUNK) + 1}/${Math.ceil(rows.length / CHUNK)}: inserted ${result.count}/${chunk.length} (total so far: ${inserted})`);
   }
+  console.log(`[upload] Done: ${inserted}/${rows.length} products inserted for project ${project.id}`);
 
-  return NextResponse.json({ id: project.id, count: rows.length });
+  return NextResponse.json({ id: project.id, count: inserted });
 }
 
 export async function DELETE(req: NextRequest) {
