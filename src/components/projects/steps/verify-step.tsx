@@ -54,7 +54,7 @@ const FIELD_SEVERITY = {
   mismatch: "text-red-600",
 };
 
-export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onNext }: {
+export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, verifyTotal, verifyDone, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onNext }: {
   projectId: string;
   projectName: string;
   marketplace: string;
@@ -68,6 +68,10 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   projectStatus: string;
   elapsedMs?: number | null;
   completedAt?: string | null;
+  /** Total products in the run, for the "verified N of M" streaming footer. */
+  verifyTotal?: number | null;
+  /** Products checked so far in the current run — drives the live text progress. */
+  verifyDone?: number | null;
   onRunVerify: (force?: boolean, ai?: boolean) => void;
   onApproveProduct: (productId: string) => Promise<void>;
   onMarkDiscontinued: (productId: string) => Promise<void>;
@@ -120,9 +124,21 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     setLiveElapsedMs(null);
   }, [loading, elapsedMs, completedAt]);
 
+  // Products carrying a verification verdict right now. During a run this grows
+  // as batches land, which is what lets the list render mid-run instead of
+  // waiting for the whole catalog.
+  const verifiedProducts = products.filter(
+    (p) => p.verifyStatus && p.verifyStatus !== "discontinued",
+  );
+  const hasStreamedResults = verifiedProducts.length > 0;
+
+  // While verifying, show only products that actually have a result — the
+  // unverified remainder would otherwise render as a wall of placeholder rows.
+  // Once the run finishes, show everything so discontinued items stay visible.
+  const resultPool = loading ? verifiedProducts : products;
   const visibleProducts = activeFilter
-    ? products.filter((p) => (p.verifyStatus ?? "not_found") === activeFilter)
-    : products;
+    ? resultPool.filter((p) => (p.verifyStatus ?? "not_found") === activeFilter)
+    : resultPool;
 
   async function downloadReport() {
     setDownloading(true);
@@ -157,7 +173,9 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
           </p>
           {loading && formatDuration(liveElapsedMs) && (
             <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
-              Verifying… {formatDuration(liveElapsedMs)} elapsed
+              {verifyDone != null && verifyTotal != null && verifyTotal > 0
+                ? <>Verifying {verifyDone.toLocaleString()} / {verifyTotal.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>
+                : <>Verifying… {formatDuration(liveElapsedMs)} elapsed</>}
             </p>
           )}
           {!loading && completedAt && formatDuration(elapsedMs) && (
@@ -170,8 +188,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
           {hasResults && (
             <button
               onClick={downloadReport}
-              disabled={downloading}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
+              // Disabled while a run is in progress: a mid-run report would be a
+              // partial snapshot that changes seconds later. Enabled only once the
+              // full verification has finished.
+              disabled={downloading || loading}
+              title={loading ? "Available when verification completes" : undefined}
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
               Download Report
@@ -209,8 +231,9 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         </div>
       </div>
 
-      {/* Summary cards */}
-      {hasResults && (
+      {/* Summary cards — shown as soon as any result exists, so the tallies
+          climb while the run is still going. */}
+      {(hasResults || hasStreamedResults) && (
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3">
             {[
@@ -238,7 +261,11 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             })}
           </div>
           <p className="text-xs text-muted-foreground mb-6">
-            {marketplace === "amazon_us" ? (
+            {loading ? (
+              // Mid-run the tallies are still climbing, so an export-count
+              // sentence here would state a number that is about to change.
+              <>Counts update as products finish verifying.</>
+            ) : marketplace === "amazon_us" ? (
               <><span className="font-medium text-green-700">{verifiedCount} SKU{verifiedCount !== 1 ? "s" : ""}</span> will be included in the {marketplaceLabel} export file (Matched only). Warnings, mismatches and discontinued items are excluded.</>
             ) : (
               <><span className="font-medium text-green-700">{verifiedCount + warningCount + notFoundCount} SKU{(verifiedCount + warningCount + notFoundCount) !== 1 ? "s" : ""}</span> will be included in the export file (Match + Warning + Not Found). Mismatches and discontinued items are excluded.</>
@@ -262,19 +289,35 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         </div>
       )}
 
-      {loading && (
+      {/* Full-page loader only until the first results arrive. Once products
+          start streaming in, they replace it and the run reports progress at the
+          bottom of the list instead — the user can start reviewing immediately
+          rather than waiting for the final batch. */}
+      {loading && !hasStreamedResults && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <LottieLoader size={96} className="mb-2" />
           <p className="text-sm font-medium">Verifying products against {marketplaceLabel}…</p>
-          <p className="text-xs text-muted-foreground mt-1">This may take a few minutes</p>
+          {/* Real progress as changing TEXT (deliberately no progress bar): the count
+              comes from the same poll that drives the step-header tally, so it ticks
+              up as batches land server-side. Until the first count arrives, fall back
+              to the generic hint. */}
+          {verifyDone != null && verifyTotal != null && verifyTotal > 0 ? (
+            <p className="text-sm font-medium mt-1 tabular-nums">
+              Checked {verifyDone.toLocaleString()} of {verifyTotal.toLocaleString()} products
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground mt-1">
+              First results appear within a few seconds
+            </p>
+          )}
           {formatDuration(liveElapsedMs) && (
-            <p className="text-sm font-medium mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
+            <p className="text-sm text-muted-foreground mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
           )}
         </div>
       )}
 
       {/* Product results */}
-      {hasResults && !loading && (
+      {(hasResults || hasStreamedResults) && (
         <div className="space-y-2">
           {visibleProducts.map((p) => {
             const cfg = STATUS_CONFIG[p.verifyStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
@@ -474,6 +517,26 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               </div>
             );
           })}
+
+          {/* Streaming footer: sits below the last verified row so the list
+              reads as "more on the way" rather than "this is everything". */}
+          {loading && hasStreamedResults && (
+            <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+              <LottieLoader size={40} />
+              <p className="text-sm font-medium">
+                Verified {verifiedProducts.length.toLocaleString()}
+                {verifyTotal ? ` of ${verifyTotal.toLocaleString()}` : ""} — still checking…
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Results appear here as they finish. You can review the ones above now.
+              </p>
+              {formatDuration(liveElapsedMs) && (
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  {formatDuration(liveElapsedMs)} elapsed
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

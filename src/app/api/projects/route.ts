@@ -40,30 +40,68 @@ export async function POST(req: NextRequest) {
     data: { userId: user!.id, name, marketplace, status: "uploaded", isNewListing },
   });
 
-  // 11 columns × 2 000 rows = 22 000 params — well under PostgreSQL's 65 535 limit.
-  // Fewer round trips means faster completion and lower timeout risk on large files.
-  const CHUNK = 2000;
+  // Insert sizing, learned the hard way against Render Postgres:
+  //  - Rows carry the FULL vendor sheet as vendorData JSON (a 73-column file ≈ 4.5 KB/row),
+  //    so a 2 000-row chunk is a ~9 MB statement.
+  //  - Sequential 9 MB statements are proven safe; FOUR of them concurrently killed the
+  //    server connection outright ("Client ... is not queryable") and lost the upload.
+  //  - So: halve the chunk (≈4.5 MB) and allow only 2 in flight — the same ~9 MB peak
+  //    the database has already demonstrated it can handle, at ~2× sequential speed.
+  //  - Every chunk retries on transient/connection errors before the upload is failed.
+  const CHUNK = 1000;
+  const INSERT_CONCURRENCY = 2;
+  const MAX_ATTEMPTS = 3;
+  const chunks: (typeof rows)[] = [];
+  for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK));
+
   let inserted = 0;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
-    const result = await prisma.product.createMany({
-      data: chunk.map((r) => ({
-        projectId: project.id,
-        name: r.name ?? "Unknown",
-        vendorSku: r.sku ?? null,
-        upc: r.upc ?? null,
-        asin: r.asin ?? null,
-        brand: r.brand ?? null,
-        description: r.description ?? null,
-        price: r.price ?? null,
-        imageUrl: r.imageUrl ?? null,
-        verifyStatus: r.discontinued === true ? "discontinued" : null,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        vendorData: r as any,
-      })),
-    });
-    inserted += result.count;
-    console.log(`[upload] Chunk ${Math.floor(i / CHUNK) + 1}/${Math.ceil(rows.length / CHUNK)}: inserted ${result.count}/${chunk.length} (total so far: ${inserted})`);
+  let nextChunk = 0;
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(INSERT_CONCURRENCY, chunks.length) }, async () => {
+        while (nextChunk < chunks.length) {
+          const idx = nextChunk++;
+          const chunk = chunks[idx];
+          for (let attempt = 1; ; attempt++) {
+            try {
+              const result = await prisma.product.createMany({
+                data: chunk.map((r) => ({
+                  projectId: project.id,
+                  name: r.name ?? "Unknown",
+                  vendorSku: r.sku ?? null,
+                  upc: r.upc ?? null,
+                  asin: r.asin ?? null,
+                  brand: r.brand ?? null,
+                  description: r.description ?? null,
+                  price: r.price ?? null,
+                  imageUrl: r.imageUrl ?? null,
+                  verifyStatus: r.discontinued === true ? "discontinued" : null,
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  vendorData: r as any,
+                })),
+              });
+              inserted += result.count;
+              console.log(`[upload] Chunk ${idx + 1}/${chunks.length}: inserted ${result.count}/${chunk.length} (total so far: ${inserted})`);
+              break;
+            } catch (err) {
+              if (attempt >= MAX_ATTEMPTS) throw err;
+              console.warn(`[upload] Chunk ${idx + 1} attempt ${attempt} failed, retrying:`, err instanceof Error ? err.message : err);
+              await new Promise((r) => setTimeout(r, 1500 * attempt));
+            }
+          }
+        }
+      }),
+    );
+  } catch (err) {
+    // A chunk failed permanently — remove the partial project so the user doesn't end
+    // up with a ghost "0 products" (or half-imported) project, and answer with real
+    // JSON instead of a dead connection.
+    console.error("[upload] Insert failed permanently, rolling back project:", err);
+    await prisma.project.delete({ where: { id: project.id } }).catch(() => {});
+    return NextResponse.json(
+      { error: "Upload failed while saving products (database connection dropped). Nothing was imported — please try again." },
+      { status: 500 },
+    );
   }
   console.log(`[upload] Done: ${inserted}/${rows.length} products inserted for project ${project.id}`);
 

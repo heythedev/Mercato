@@ -124,6 +124,13 @@ model Product {
 
   @@index([upc])
   @@index([asin])
+  /// Every per-project query filters on this; without it even loading a project
+  /// scans the whole products table.
+  @@index([projectId])
+  /// Backs the incremental verification feed, which pages through verified rows
+  /// ordered by (verifiedAt, id). Polling that ordering without an index means a
+  /// full scan on every poll of a large project.
+  @@index([projectId, verifiedAt, id])
 }
 
 // ── Keepa cache (Amazon only) ─────────────────────────────────────────────────
