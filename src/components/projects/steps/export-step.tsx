@@ -166,15 +166,11 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
   const hasTemplates = templates.length > 0;
 
-  // For Temu: compute which category groups have no specific matching template
-  // (would fall back to the catch-all OTHER template) so we can warn the user
-  // before they export rather than after.
-  const isGenericTemplate = (t: Template) => /\bother(s)?\b|\bgeneral\b|\bdefault\b/i.test(t.name);
-  const preExportMissingCategories: string[] = isTemu && templates.length > 1 && templates.some(isGenericTemplate)
-    ? categories
-        .map(([cat]) => cat)
-        .filter(cat => isGenericTemplate(matchTemplate(cat, templates)))
-    : [];
+  // Catch-all "OTHER" templates are now treated as valid fallbacks (server no longer
+  // excludes categories that only match the catch-all). Pre-export warnings are
+  // skipped; any true missing-template exclusions surface post-export via
+  // missingTemplateCategories returned by the server.
+  const preExportMissingCategories: string[] = [];
 
   // Category-split (Mathis/Temu/BestBuy): needs categorized products; Mathis also requires templates
   // Other: needs at least 1 product; if templates exist, one must be selected

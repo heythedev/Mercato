@@ -248,13 +248,10 @@ export async function generateCategoryZip(
         }
       }
 
-      // For Temu: if the best we found is the generic catch-all, exclude this
-      // category and tell the user they need a dedicated template for it.
-      if (isTemu && hasCatchAll && tpl === fallback) {
-        missingTemplateCategories.push(catLabel);
-        console.log(`[export] No specific template for "${catLabel}" — excluded, needs a dedicated template`);
-        continue;
-      }
+      // Note: when templates have no embedded path data (tmplCats.size === 0),
+      // the catch-all "OTHER" template is a valid fallback — use it rather than
+      // excluding the category. Exclusion only happens above (line ~239) when
+      // templates *do* declare explicit coverage paths but none matched.
     }
     console.log(`[export] Group "${catLabel || "(uncategorized)"}" → template "${tpl.name}"`);
     byCategory.set(catKey, { template: tpl, catLabel: isUncategorized ? "" : catLabel, products: catProducts });
