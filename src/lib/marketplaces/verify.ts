@@ -32,6 +32,22 @@ function isDiscontinuedInVendorData(vendorData: unknown): boolean {
   return false;
 }
 
+/**
+ * Identity-critical fields. A *warning* on one of these escalates the whole
+ * product to "warning"; a warning on a soft field (images, description,
+ * dimensions) is reported for review but does not change the product's status.
+ *
+ * A `mismatch` on ANY field — hard or soft — escalates regardless, so this set
+ * only governs the warning tier.
+ *
+ * Single source of truth: this rollup is applied in three places (initial
+ * comparison plus the two AI post-passes), and they must agree.
+ */
+const HARD_FIELDS = new Set(["title", "brand", "model", "upc"]);
+
+/** A Walmart search hit, as returned by the Affiliate API before selection. */
+type WalmartCandidate = import("@/lib/walmart/client").WalmartItem;
+
 type FieldResult = {
   field: string;
   label: string;
@@ -156,11 +172,10 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
     })),
   );
 
-  // Hard fields: only title / brand / model mismatches escalate overall status to "mismatch".
-  // Images are a soft field — an AI color-variant difference (e.g. stainless vs black)
-  // shows as "mismatch" on the images row for manual review, but the overall product
-  // status only rises to "warning" so genuine matching products aren't falsely flagged.
-  const HARD_FIELDS = new Set(["title", "brand", "model"]);
+  // Images are a soft field — an AI color-variant difference (e.g. stainless vs
+  // black) shows as "mismatch" on the images row for manual review, but the
+  // overall product status only rises to "warning" so genuine matching products
+  // aren't falsely flagged. Hard fields come from the shared HARD_FIELDS above.
   targets.forEach((t, i) => {
     const v = verdicts[i];
     if (v.verdict === "match") {
@@ -246,8 +261,7 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
           t.field.match = false;
           t.field.note = `AI title check: different product — ${reason}`;
         }
-        // Recompute overall status
-        const HARD_FIELDS = new Set(["title", "brand", "model"]);
+        // Recompute overall status (HARD_FIELDS is the shared set above)
         const hasHardMismatch = t.result.fields.some(f => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
         const hasSoftMismatch = t.result.fields.some(f => f.severity === "mismatch" && !HARD_FIELDS.has(f.field));
         const hasHardWarning = t.result.fields.some(f => f.severity === "warning" && HARD_FIELDS.has(f.field));
@@ -916,7 +930,7 @@ export function resetWalmartRunState(): void {
 }
 
 async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
-  const { searchWalmartByUpc, searchWalmartByName } = await import("@/lib/walmart/client");
+  const { searchWalmartByUpc, searchWalmartCandidates } = await import("@/lib/walmart/client");
   const { getSellerItemByGtin, sellerApiConfigured } = await import("@/lib/walmart/seller-client");
   const { runPool } = await import("@/lib/walmart/throttle");
   const {
@@ -979,30 +993,54 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
 
   // Deduplicate in-flight name searches: a batch often contains many products
   // sharing a brand+name query, and without this each one pays for its own call.
-  const nameSearchInFlight = new Map<string, Promise<unknown>>();
-  const searchByNameCached = async (query: string) => {
-    if (!query) return null;
+  //
+  // The cache stores the full CANDIDATE LIST rather than a single chosen item,
+  // because selection depends on the product being looked up (its barcode and
+  // model code) while the search result depends only on the query. Caching the
+  // pre-selection list keeps one query's results reusable across products.
+  const nameSearchInFlight = new Map<string, Promise<WalmartCandidate[]>>();
+  const searchCandidates = async (query: string): Promise<WalmartCandidate[]> => {
+    if (!query) return [];
     const key = queryKey(query);
     const hit = cached.get(key);
     if (hit !== undefined) {
       stats.hits++;
       if (hit === null) stats.negativeHits++;
-      return hit;
+      return (hit as WalmartCandidate[] | null) ?? [];
     }
     let inflight = nameSearchInFlight.get(key);
     if (!inflight) {
       inflight = (async () => {
         stats.misses++;
         apiCalls.count++;
-        const item = await limiter
-          .run(() => searchWalmartByName(query))
-          .catch(() => null);
-        pendingCacheWrites.push({ key, item: item ?? null, source: "name" });
-        return item;
+        const items = await limiter
+          .run(() => searchWalmartCandidates(query))
+          .catch(() => [] as WalmartCandidate[]);
+        pendingCacheWrites.push({ key, item: items.length ? items : null, source: "name" });
+        return items;
       })();
       nameSearchInFlight.set(key, inflight);
     }
-    return inflight as Promise<Awaited<ReturnType<typeof searchWalmartByName>>>;
+    return inflight;
+  };
+
+  /**
+   * Name-search fallback: fetch candidates, then accept one only if the evidence
+   * supports it. Previously this took Walmart's first hit on faith, which is how
+   * sibling SKUs (adjacent model numbers, different sizes) became "matches".
+   */
+  const findByName = async (p: Product): Promise<WalmartCandidate | null> => {
+    const queries = [
+      [p.brand, p.name].filter(Boolean).join(" ").trim(),
+      p.name ?? "",
+    ].filter((q, i, a) => q && a.indexOf(q) === i);
+
+    for (const q of queries) {
+      const candidates = await searchCandidates(q);
+      const picked = pickWalmartCandidate(p.name ?? "", p.upc, candidates);
+      if (picked) return picked;
+    }
+    return null;
   };
 
   const lookupStart = Date.now();
@@ -1082,18 +1120,12 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
           if (k.upc) pendingCacheWrites.push({ key: k.upc, item, source: "upc" });
         }
         if (!item) {
-          upcLookupFailed = true;
-          // UPC lookup returned nothing — try name-based search so we don't miss the product.
-          // A title similarity check in compareToLive will surface any mismatch.
-          const query = [p.brand, p.name].filter(Boolean).join(" ").trim();
-          item = await searchByNameCached(query) as typeof item;
-          if (!item && p.name) item = await searchByNameCached(p.name) as typeof item;
+          // UPC lookup found nothing — fall back to name search, but only accept
+          // a candidate the evidence actually supports (see pickWalmartCandidate).
+          item = await findByName(p) as typeof item;
         }
       } else {
-        // No UPC — try brand + name, then name alone
-        const query = [p.brand, p.name].filter(Boolean).join(" ").trim();
-        item = await searchByNameCached(query) as typeof item;
-        if (!item && p.name) item = await searchByNameCached(p.name) as typeof item;
+        item = await findByName(p) as typeof item;
       }
 
       if (!item) return notFound(p.id);
@@ -1305,6 +1337,18 @@ function compareToLive(
       ? `Catalog is a single unit, but ${marketplace} title is a multipack (qty ${liveQty})`
       : `Pack quantity mismatch: catalog qty ${vendorQty} vs ${marketplace} qty ${liveQty}`;
   }
+
+  // Model-code check: when BOTH titles carry a product code from the same
+  // family and the codes differ, that is definitive — regardless of word
+  // similarity. Word-overlap scoring is blind here: "Bon 11-482 Flat Slicker"
+  // vs "Bon 11-385 English Plugging Chisel" shares only "bon" and "inch",
+  // which is still enough to clear the warning threshold and avoid a mismatch,
+  // even though the codes say plainly they are different products.
+  const codeConflict = titleCodeConflict(p.name, liveTitle);
+  if (codeConflict) {
+    titleSeverity = "mismatch";
+    titleNote = `Model codes differ: catalog ${codeConflict.vendor} vs ${marketplace} ${codeConflict.live}`;
+  }
   fields.push({
     field: "title", label: "Title",
     stored: p.name, live: liveTitle,
@@ -1316,20 +1360,53 @@ function compareToLive(
   // UPC field — surface in the verification report so users can see whether UPC was matched
   const vendorUpc = p.upc ?? String((p.vendorData as Record<string,unknown> | null)?.upc ?? "");
   const liveUpc = String(liveData.upc ?? liveData.itemUpc ?? "");
+  // Hoisted: an exact barcode match is normally definitive product identity,
+  // which other field comparisons below (images, brand) use to avoid demanding
+  // manual review for a product whose identity is already proven.
+  //
+  // IMPORTANT: it is only treated as proof when nothing else contradicts it.
+  // Marketplace listings sometimes carry the WRONG barcode — a real case in this
+  // catalog has Walmart showing UPC 743153114827 (a Flat Slicker, model 11-482)
+  // on a listing for an English Plugging Chisel, model 11-385. Trusting the UPC
+  // unconditionally there would suppress the image and brand review on a product
+  // that is plainly not the same item, and report it as a clean Match.
+  //
+  // So a title mismatch vetoes the carve-out: when the barcode says "same" and
+  // the title says "different", the disagreement itself is the signal, and the
+  // product must stay flagged for a human rather than being quietly passed.
+  let upcConfirmed = false;
   if (vendorUpc) {
     const upcMatch = liveUpc ? vendorUpc.replace(/\D/g, "").endsWith(liveUpc.replace(/\D/g, "")) ||
       liveUpc.replace(/\D/g, "").endsWith(vendorUpc.replace(/\D/g, "")) : false;
-    // An absent live UPC is "could not verify", NOT a pass — previously this was
-    // reported as ok/match, so unverified products looked identical to confirmed
-    // matches in the report. Surface it as a warning with an explicit note.
+    upcConfirmed = upcMatch && titleSeverity !== "mismatch";
+    // Three distinct outcomes, which must NOT collapse into one severity:
+    //
+    //  • match            → ok. Definitive identity.
+    //  • no live UPC      → warning. "Could not verify" — absence of evidence.
+    //  • conflicting UPCs → mismatch. Evidence of absence: two different
+    //    barcodes are two different products. Previously this was only a
+    //    warning, and since `upc` is not a HARD field it never escalated the
+    //    product — leaving 619 products in one real run marked "Match" while
+    //    carrying a barcode that disagreed with the listing (e.g. catalog
+    //    11-303 / 8.4 cu ft matched to Walmart 11-304 / 4.5 cu ft).
+    const upcConflict = !!liveUpc && !upcMatch;
+    // A barcode that matches while the title describes a different product means
+    // one of the two sources is wrong — almost always the marketplace listing.
+    // Reporting that as a plain "ok" hides the contradiction, so flag it.
+    const upcContradicted = upcMatch && titleSeverity === "mismatch";
     fields.push({
       field: "upc", label: "UPC",
       stored: vendorUpc, live: liveUpc || "N/A",
       match: upcMatch,
-      severity: upcMatch ? "ok" : "warning",
-      ...(liveUpc
-        ? (upcMatch ? {} : { note: "Vendor UPC does not match the marketplace UPC" })
-        : { note: "Marketplace listing has no UPC — could not verify" }),
+      severity: upcMatch ? (upcContradicted ? "warning" : "ok")
+        : upcConflict ? "mismatch" : "warning",
+      ...(upcContradicted
+        ? { note: "UPC matches, but the titles describe different products — the marketplace listing may have the wrong barcode. Verify manually." }
+        : liveUpc
+          ? (upcMatch ? {} : {
+              note: "Vendor UPC does not match the marketplace UPC — this is a different product",
+            })
+          : { note: "Marketplace listing has no UPC — could not verify" }),
     });
   }
 
@@ -1340,11 +1417,30 @@ function compareToLive(
   // we know it's the same product family.
   const liveBrandInVendorTitle = !!(liveBrand && p.name.toLowerCase().includes(liveBrand.toLowerCase()));
   const vendorBrandInLiveTitle = !!(p.brand && liveTitle.toLowerCase().includes(p.brand.toLowerCase()));
+  // A confirmed barcode match settles the question: the same GTIN is the same
+  // physical product, so differing brand strings are a naming difference
+  // (sub-brand, product line, parent company) rather than a wrong listing.
+  // "Bon Pro Plus" vs "Bon Tool" is the canonical case — brandsMatch() misses it
+  // because its shared-keyword rule only considers words longer than 3 chars,
+  // which discards the very token they share ("Bon").
   const brandMatch = !p.brand || !liveBrand
+    || upcConfirmed
     || brandsMatch(p.brand, liveBrand)
     || liveBrandInVendorTitle
     || vendorBrandInLiveTitle;
-  fields.push({ field: "brand", label: "Brand", stored: p.brand ?? "N/A", live: liveBrand ?? "N/A", match: brandMatch, severity: brandMatch ? "ok" : "warning" });
+  fields.push({
+    field: "brand", label: "Brand",
+    stored: p.brand ?? "N/A", live: liveBrand ?? "N/A",
+    match: brandMatch,
+    severity: brandMatch ? "ok" : "warning",
+    // Only annotate the non-obvious pass: brands that read as different but are
+    // reconciled by the barcode. A plain string match needs no explanation.
+    ...(brandMatch && upcConfirmed && p.brand && liveBrand
+      && !brandsMatch(p.brand, liveBrand)
+      && !liveBrandInVendorTitle && !vendorBrandInLiveTitle
+      ? { note: "Brand differs, but the exact UPC match confirms it is the same product." }
+      : {}),
+  });
 
   // Model number — compare vendor's model/part number against live listing's model/MPN
   const vdRaw = (p.vendorData as Record<string, unknown> | null) ?? {};
@@ -1374,9 +1470,25 @@ function compareToLive(
     return null;
   })();
   const hasVendorImage = !!vendorImgUrl;
-  // "ok" only when no vendor image (nothing to compare); "warning" when both exist (needs visual review);
-  // "warning" when vendor has image but live has none.
-  const imgSeverity: "ok" | "warning" = !hasVendorImage ? "ok" : "warning";
+  // Images are a soft, advisory field — a difference here never proves the
+  // listing is wrong (angles, packaging shots and lifestyle photos all differ
+  // legitimately). So only ask for manual review when the images are actually
+  // the best evidence available:
+  //
+  //  • nothing to compare (no vendor image)            → ok
+  //  • identity already proven by an exact UPC match   → ok
+  //  • catalog has an image, marketplace has none      → warning (worth seeing)
+  //  • otherwise                                        → warning (review)
+  //
+  // The UPC carve-out is the important one. Previously ANY product with a
+  // catalog image was flagged, so a barcode-confirmed product with visibly
+  // identical images still surfaced as a Warning — and since the AI visual check
+  // is opt-in, nothing ever cleared it. That made Warning the default state for
+  // correctly-matched products rather than a signal worth acting on.
+  const imgSeverity: "ok" | "warning" =
+    !hasVendorImage ? "ok"
+    : upcConfirmed && hasLiveImages ? "ok"
+    : "warning";
   // For the report `live` value: prefer a product page URL over raw image URL —
   // more useful in the exported report. The UI uses the dedicated liveImage /
   // liveUrl fields below to render a thumbnail plus a "View Product" link.
@@ -1394,14 +1506,18 @@ function compareToLive(
     live: liveImgOrUrl,
     match: hasVendorImage ? hasLiveImages : true,
     severity: imgSeverity,
-    // Default note for the warning state. The AI visual check (applyImageComparison)
-    // overwrites this with its verdict when it runs; if it's skipped (no API key)
-    // or errors, this stays so the row never shows a note-less warning.
+    // Default note. The AI visual check (applyImageComparison) overwrites this
+    // with its verdict when it runs; if it's skipped (opt-in / no API key) or
+    // errors, this stays so the row never shows a bare, unexplained state.
     note: imgSeverity === "warning"
       ? (hasVendorImage && !hasLiveImages
           ? "Catalog has an image but the marketplace listing has none — review manually."
           : "Compare the catalog and marketplace images to confirm they show the same product.")
-      : undefined,
+      : hasVendorImage && upcConfirmed && hasLiveImages
+        // Say why this passed without a visual comparison — otherwise a silent
+        // "ok" looks like the images were checked when they were not.
+        ? "Product identity confirmed by exact UPC match — images not compared."
+        : undefined,
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });
@@ -1494,13 +1610,13 @@ function compareToLive(
   // Status rollup — distinguish hard fields (identity-critical) from soft fields
   // (informational). A warning on a soft field alone is surfaced in the report
   // for manual review but does NOT change the overall status to "warning".
-  // Hard: title, brand, model  →  any warning/mismatch here = escalates status
-  // Soft: images, description, dimensions  →  shown in report; image *mismatch*
-  //       (from AI) still escalates via hasMismatch below.
+  // Soft: images, description, dimensions  →  shown in report; a *mismatch* on
+  //       any field (including soft ones, e.g. the AI image verdict) still
+  //       escalates via hasMismatch below.
   // Pack-qty title mismatches are always hard (never soft-downgraded).
-  const HARD_FIELDS = new Set(["title", "brand", "model"]);
   const hasMismatch = fields.some((f) => f.severity === "mismatch");
   const hasHardWarning = fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
+
 
   return {
     productId: p.id,
@@ -1534,6 +1650,130 @@ function brandsMatch(a: string, b: string): boolean {
     return initials === s;
   };
   return acronymOf(al, bl) || acronymOf(bl, al);
+}
+
+/**
+ * Choose the Walmart search result that is actually the product we asked for,
+ * or none at all.
+ *
+ * Walmart ranks by relevance, not identity: searching "Bon 11-482 Flat Slicker"
+ * readily returns "Bon 11-385 English Plugging Chisel" first, because they share
+ * a brand and a product family. Accepting `items[0]` is what produced ~1700
+ * wrong matches in a real 7k run.
+ *
+ * Evidence is ranked strongest-first:
+ *   1. Barcode equality — definitive. Take it immediately.
+ *   2. Model code in the title — a differing same-family code is disqualifying
+ *      (that is exactly the sibling-SKU failure), an equal one is strong proof.
+ *   3. Title similarity — only as a tiebreak, and only above a floor.
+ *
+ * Returning null is a legitimate and important outcome: "Walmart has this
+ * product under a different barcode" and "Walmart does not carry it" are both
+ * better answers than a confidently wrong sibling.
+ */
+export function pickWalmartCandidate<T extends { name?: string; upc?: string }>(
+  vendorName: string,
+  vendorUpc: string | null,
+  candidates: T[],
+): T | null {
+  if (!candidates.length) return null;
+  const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "");
+  const vUpc = digits(vendorUpc);
+
+  // 1. Exact barcode match — nothing outranks this.
+  if (vUpc) {
+    for (const c of candidates) {
+      const cUpc = digits(c.upc);
+      if (cUpc && (cUpc.endsWith(vUpc) || vUpc.endsWith(cUpc))) return c;
+    }
+  }
+
+  let best: T | null = null;
+  let bestScore = 0;
+
+  for (const c of candidates) {
+    const title = c.name ?? "";
+    if (!title) continue;
+
+    // 2. Contradicting barcode. We know our product's UPC; if this candidate
+    // publishes a different one, it is a different product — no amount of title
+    // similarity redeems that. This catches same-family items with no model code
+    // in the title, where word overlap alone cannot tell siblings apart.
+    const cUpc = digits(c.upc);
+    if (vUpc && cUpc && !cUpc.endsWith(vUpc) && !vUpc.endsWith(cUpc)) continue;
+
+    // 3. Model code. A same-family code that DIFFERS means this is a sibling
+    // product, not ours — reject outright regardless of how similar the words
+    // are, since sibling titles are nearly identical by construction.
+    const conflict = titleCodeConflict(vendorName, title);
+    if (conflict) continue;
+
+    const sim = titleSim(vendorName, title);
+    // An exact same-family code match is strong evidence; weight it above any
+    // similarity score so it wins the selection.
+    const codeMatch = titleCodesAgree(vendorName, title);
+    const score = codeMatch ? 1 + sim : sim;
+
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+
+  // Floor: without a barcode or model-code confirmation, require meaningful word
+  // overlap. Below this the "match" is a guess, and a wrong match is worse than
+  // an honest not-found — it ships a bad listing.
+  if (best && bestScore < 0.3) return null;
+  return best;
+}
+
+/** True when both titles carry the same same-family product code (e.g. both 11-174). */
+function titleCodesAgree(a: string, b: string): boolean {
+  const CODE_RE = /\b(\d{2,4})-(\d{2,4})\b/g;
+  const codes = (s: string) => [...s.matchAll(CODE_RE)].map((m) => `${m[1]}-${m[2]}`);
+  const ca = codes(a);
+  if (!ca.length) return false;
+  const cb = new Set(codes(b));
+  return ca.some((c) => cb.has(c));
+}
+
+/**
+ * Detect two DIFFERENT product codes of the same family across a pair of titles.
+ *
+ * Word-overlap similarity cannot see this: two titles from one manufacturer
+ * share the brand and unit words ("bon", "inch") and therefore score as merely
+ * borderline, even when their model codes make them plainly different products.
+ *
+ * Deliberately conservative — it only reports a conflict when:
+ *   • both titles contain a hyphenated code like `11-482` (the shape that
+ *     denotes a model, as opposed to a bare size or year), and
+ *   • the codes share a leading segment (same family, e.g. `11-*`), and
+ *   • the trailing segments differ.
+ *
+ * Requiring a shared family prefix is what keeps this from firing on
+ * dimensions ("1-1/4" vs "3-8") or unrelated numbers: those rarely share a
+ * prefix with a real model code, and when nothing matches we return null and
+ * leave the verdict to the normal similarity scoring.
+ */
+export function titleCodeConflict(
+  vendorTitle: string,
+  liveTitle: string,
+): { vendor: string; live: string } | null {
+  // Codes like 11-482, 21-304, 6200-0056. Require 2+ digits either side so
+  // fractions ("1-4", "3-8") and small ranges are not treated as model codes.
+  const CODE_RE = /\b(\d{2,4})-(\d{2,4})\b/g;
+  const codes = (s: string): [string, string][] =>
+    [...s.matchAll(CODE_RE)].map((m) => [m[1], m[2]] as [string, string]);
+
+  const vc = codes(vendorTitle);
+  const lc = codes(liveTitle);
+  if (!vc.length || !lc.length) return null;
+
+  for (const [vFam, vNum] of vc) {
+    for (const [lFam, lNum] of lc) {
+      if (vFam !== lFam) continue;      // different families — not comparable
+      if (vNum === lNum) return null;    // an exact code match anywhere wins
+      return { vendor: `${vFam}-${vNum}`, live: `${lFam}-${lNum}` };
+    }
+  }
+  return null;
 }
 
 /** Word overlap fraction for description comparison (uses the smaller set as denominator). */

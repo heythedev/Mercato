@@ -47,12 +47,17 @@ function isFresh(at: Date, ttlMs: number): boolean {
 
 /**
  * Cache key for a name-search query. Queries are free-text and can be long, so
- * they're hashed rather than stored raw; the `q:` prefix keeps them from
- * colliding with the GTIN keyspace.
+ * they're hashed rather than stored raw; the prefix keeps them from colliding
+ * with the GTIN keyspace.
+ *
+ * The prefix is versioned: `q2:` entries store the full candidate ARRAY, while
+ * legacy `q:` entries stored a single pre-selected item. Bumping the namespace
+ * retires the old shape instead of letting it deserialize into the wrong type —
+ * stale rows simply miss and are refetched, then expire on their own TTL.
  */
 export function queryKey(query: string): string {
   const norm = query.toLowerCase().replace(/\s+/g, " ").trim();
-  return "q:" + createHash("sha1").update(norm).digest("hex").slice(0, 24);
+  return "q2:" + createHash("sha1").update(norm).digest("hex").slice(0, 24);
 }
 
 /** Cache key for a barcode, or null when it doesn't normalize to a GTIN. */

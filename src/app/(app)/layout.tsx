@@ -11,10 +11,23 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   // Keepa is Amazon-specific — only surface the balance widget to admins or
   // users granted the Amazon marketplace.
-  const account = isAdmin
-    ? null
-    : await prisma.user.findUnique({ where: { id: user.id }, select: { allowedMarketplaces: true } });
-  const showKeepa = isAdmin || (account?.allowedMarketplaces.includes("amazon") ?? false);
+  //
+  // This is the only DB call in the layout that wraps the whole authenticated
+  // app, so a DB outage here would 500 every page. Degrade instead: if the
+  // lookup fails, just don't show the widget — the rest of the UI still renders.
+  let showKeepa = isAdmin;
+  if (!isAdmin) {
+    try {
+      const account = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { allowedMarketplaces: true },
+      });
+      showKeepa = account?.allowedMarketplaces.includes("amazon") ?? false;
+    } catch (err) {
+      console.error("[app-layout] Keepa gate lookup failed; hiding widget", err);
+      showKeepa = false;
+    }
+  }
 
   return (
     <SidebarProvider>

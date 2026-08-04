@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && prisma migrate deploy && next build",
-    "start": "next start -p 3020",
+    "build": "prisma generate && next build",
+    "start": "node --max-old-space-size=460 node_modules/.bin/next start -p 3020",
+    "prestart": "prisma migrate deploy || echo \"⚠️  prisma migrate deploy failed (DB unreachable?) — starting anyway\"",
     "lint": "eslint",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "prisma db seed",

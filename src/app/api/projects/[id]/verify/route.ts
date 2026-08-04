@@ -365,9 +365,12 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   let attempted = 0;
   let ranOutOfTime = false;
 
-  // Accumulate results from all batches so the AI post-pass runs once at the end.
-  const allRawResults: Awaited<ReturnType<typeof verifyProducts>> = [];
-  const allAttemptedProducts: typeof allProducts = [];
+  // Accumulate only the flagged results (and their matching products) so the AI
+  // post-pass can run once at the end. Holding every result — each carries a full
+  // raw `liveData` blob — for a 10k-product run exhausts the heap (OOM crash), and
+  // the AI pass is `onlyFlagged` anyway, so non-flagged rows are never needed here.
+  const flaggedResults: Awaited<ReturnType<typeof verifyProducts>> = [];
+  const flaggedProducts: typeof allProducts = [];
 
   // One download cache for the whole run: vendor images are compared against
   // several marketplace angles, and marketplace CDN URLs recur across products,
@@ -406,28 +409,37 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         await persistResults(processed);
 
         totalProcessed += processed.length;
-        allRawResults.push(...results);
-        allAttemptedProducts.push(...batch);
+
+        // Retain only what the end-of-run AI pass will actually look at. This
+        // keeps peak memory bounded by the number of problems found rather than
+        // by catalog size, so a large run no longer OOMs.
+        if (useAi) {
+          const flaggedInBatch = results.filter(
+            (r) => r.status === "warning" || r.status === "mismatch",
+          );
+          if (flaggedInBatch.length) {
+            const ids = new Set(flaggedInBatch.map((r) => r.productId));
+            flaggedResults.push(...flaggedInBatch);
+            flaggedProducts.push(...batch.filter((p) => ids.has(p.id)));
+          }
+        }
       }
     });
 
     // Optional AI post-pass, once over all gathered results (never per batch).
     // Restricted to flagged results, so its cost scales with the number of
     // problems found rather than with catalog size.
-    if (useAi && allRawResults.length > 0) {
-      const flagged = allRawResults.filter(
-        (r) => r.status === "warning" || r.status === "mismatch",
-      );
+    if (useAi && flaggedResults.length > 0) {
       await applyAiVerificationPasses(
-        allRawResults,
-        allAttemptedProducts as Parameters<typeof applyAiVerificationPasses>[1],
+        flaggedResults,
+        flaggedProducts as Parameters<typeof applyAiVerificationPasses>[1],
         project.marketplace,
         { onlyFlagged: true },
       );
       // Re-persist only the rows the AI pass could have changed. liveData / asin
       // / price / upc were already written in the batch loop and don't change.
       await persistResults(
-        flagged.filter((r) => r.status !== "skipped"),
+        flaggedResults.filter((r) => r.status !== "skipped"),
         { statusAndFieldsOnly: true },
       );
     }
