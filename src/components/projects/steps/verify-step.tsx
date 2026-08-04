@@ -97,6 +97,11 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     !preVerify ||
     products.some((p) => p.verifyStatus && p.verifyStatus !== "discontinued");
 
+  // Products with no verifyStatus yet (null) — these were not reached before the
+  // server time limit was hit. When > 0, we show a "Resume" button so the user
+  // can continue without wiping the results that were already saved.
+  const unverifiedCount = products.filter((p) => p.verifyStatus === null).length;
+
   const marketplaceLabel =
     marketplace === "walmart" ? "Walmart" :
     marketplace === "amazon_us" ? "Amazon US" :
@@ -232,6 +237,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               Re-verify
             </button>
           )}
+          {hasResults && unverifiedCount > 0 && (
+            <button
+              onClick={() => onRunVerify()}
+              disabled={loading}
+              title={`Resume checking the ${unverifiedCount.toLocaleString()} products that were not reached yet`}
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border border-blue-400 text-blue-600 dark:text-blue-400 text-sm font-medium hover:bg-blue-50 dark:hover:bg-blue-950/30 transition disabled:opacity-50"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Resume ({unverifiedCount.toLocaleString()} left)
+            </button>
+          )}
           <button
             onClick={hasResults ? onNext : () => onRunVerify()}
             disabled={loading}
@@ -277,6 +293,8 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               // Mid-run the tallies are still climbing, so an export-count
               // sentence here would state a number that is about to change.
               <>Counts update as products finish verifying.</>
+            ) : unverifiedCount > 0 ? (
+              <><span className="font-medium text-yellow-600">{unverifiedCount.toLocaleString()} product{unverifiedCount !== 1 ? "s" : ""} not yet checked</span> — verification was cut short. Click <strong>Resume</strong> to continue from where it stopped.</>
             ) : marketplace === "amazon_us" ? (
               <><span className="font-medium text-green-700">{verifiedCount} SKU{verifiedCount !== 1 ? "s" : ""}</span> will be included in the {marketplaceLabel} export file (Matched only). Warnings, mismatches and discontinued items are excluded.</>
             ) : (

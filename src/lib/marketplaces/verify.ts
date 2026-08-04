@@ -1101,6 +1101,10 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         // Seller API had no match — fall through to the Affiliate lookup below.
       }
 
+      // Track whether the UPC lookup specifically failed so we can apply a
+      // stricter title guard on the name-search fallback result.
+      let upcLookupFailed = false;
+
       if (p.upc) {
         // Try UPC-based lookup first; fall back to name search if Walmart doesn't index by UPC.
         // Some legitimate products (especially newer listings) aren't indexed by UPC yet.
@@ -1125,6 +1129,31 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
       }
 
       if (!item) return notFound(p.id);
+
+      // Guard against false positives from the name-search fallback.
+      // When the vendor has a UPC that Walmart's index didn't carry, and the
+      // name search returns a product with a COMPLETELY DIFFERENT UPC, we likely
+      // found a similar-looking product from the same brand (e.g. "Bon 14-460
+      // Band Breaker" matching "Bon 14-284 Base Plate").  Require the title to
+      // meet the "ok" similarity bar before accepting the match; below that,
+      // treat it as not found rather than surfacing a wrong comparison.
+      if (upcLookupFailed && p.upc && item.upc) {
+        const upcDigits = (u: string) => u.replace(/\D/g, "");
+        const vD = upcDigits(p.upc);
+        const lD = upcDigits(item.upc);
+        const sameUpc = vD === lD
+          || (vD.length === 12 && lD === "0" + vD)
+          || (lD.length === 12 && vD === "0" + lD);
+        if (!sameUpc) {
+          const wv = normalizeTitle(p.name);
+          const wl = normalizeTitle(item.name ?? "");
+          const sim = titleSim(p.name, item.name ?? "");
+          let hits = 0;
+          for (const w of wv) if (wl.has(w)) hits++;
+          const recall = wv.size > 0 ? hits / wv.size : 0;
+          if (sim < 0.35 && recall < 0.55) return notFound(p.id);
+        }
+      }
 
       const priceInCents = item.salePrice != null ? Math.round(item.salePrice * 100) : null;
       // Build Walmart product page URL from itemId (not the image URL)
