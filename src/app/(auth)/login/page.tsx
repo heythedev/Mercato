@@ -28,10 +28,25 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const res = await signIn("credentials", { email, password, redirect: false });
+    let res;
+    try {
+      res = await signIn("credentials", { email, password, redirect: false });
+    } catch {
+      // Network-level failure reaching the auth endpoint itself.
+      setLoading(false);
+      toast.error("Service temporarily unavailable. Please try again shortly.");
+      return;
+    }
     setLoading(false);
     if (res?.error) {
-      toast.error("Invalid email or password");
+      // Distinguish a real credential rejection from a system failure (e.g. the
+      // database being unreachable), which authorize() flags with this code.
+      // Blaming the user's password for a server outage is misleading.
+      if (res.code === "ServiceUnavailable") {
+        toast.error("Service temporarily unavailable. Please try again shortly.");
+      } else {
+        toast.error("Invalid email or password");
+      }
     } else {
       toast.success("Signed in successfully");
       router.push("/projects");

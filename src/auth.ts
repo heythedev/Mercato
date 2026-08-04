@@ -1,10 +1,18 @@
-import NextAuth from "next-auth";
+import NextAuth, { CredentialsSignin } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/db";
 import { authConfig } from "@/auth.config";
 import { z } from "zod";
+
+// Thrown when authentication can't be completed for a system reason (e.g. the
+// database is unreachable) rather than because the credentials were wrong. The
+// `code` surfaces to the client via NextAuth so the login page can show a
+// service-unavailable message instead of "Invalid email or password".
+class AuthServiceError extends CredentialsSignin {
+  code = "ServiceUnavailable";
+}
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -42,7 +50,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const parsed = loginSchema.safeParse(creds);
         if (!parsed.success) return null;
         const { email, password } = parsed.data;
-        const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+
+        // Separate "bad credentials" (return null → "Invalid email or password")
+        // from "we couldn't check" (DB down → throw). Without this split, a
+        // database outage looks identical to a wrong password and misleads the
+        // user into thinking their credentials are bad. The thrown error carries
+        // a `code` the login page reads to show a service-unavailable message.
+        let user;
+        try {
+          user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+        } catch (err) {
+          console.error("[auth] credential lookup failed (DB unreachable?)", err);
+          throw new AuthServiceError();
+        }
+
         if (!user?.password) return null;
         const ok = await bcrypt.compare(password, user.password);
         if (!ok) return null;
