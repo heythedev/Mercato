@@ -10,6 +10,105 @@ import { looksLikeSkuName } from "@/lib/ai/resolve-sku";
 
 const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ── Cross-process in-memory cache ─────────────────────────────────────────────
+// Survives across requests for the lifetime of the server process (hours/days
+// on Render). Key = "marketplace:normalised_name" → exact leaf category path.
+// Cost saving: same product name across multiple projects, or re-runs after
+// tweaks, skips the API entirely.
+const categorizationCache = new Map<string, string>();
+function cacheKey(marketplace: string, name: string): string {
+  return `${marketplace.toLowerCase()}:${name.toLowerCase().replace(/\s+/g, " ").trim()}`;
+}
+
+// ── Temu keyword pre-classifier ───────────────────────────────────────────────
+// Maps obvious product-name signals to exact Temu leaf paths. Applied before
+// the AI call so clear-cut products never consume API credits. Rules are
+// ordered most-specific first; first match wins. Only paths present in the
+// loaded taxonomy are accepted — validated against allowedSet at call time.
+const TEMU_KEYWORD_RULES: Array<[RegExp, string]> = [
+  // Hand Tools (specific → general)
+  [/\bscrewdriver\b/i, "Tools & Home Improvement > Hand Tools > Screwdrivers"],
+  [/\bhammer\b|\bmallet\b/i, "Tools & Home Improvement > Hand Tools > Hammers & Mallets"],
+  [/\bplier(s)?\b|\bwire[\s-]cutter\b|\bbolt[\s-]cutter\b/i, "Tools & Home Improvement > Hand Tools > Pliers & Cutters"],
+  [/\bwrench\b|\bspanner\b|\bratchet\b(?!.*strap)/i, "Tools & Home Improvement > Hand Tools > Wrenches & Spanners"],
+  [/\btape[\s-]measure\b|\bmeasuring[\s-]tape\b/i, "Tools & Home Improvement > Hand Tools > Tape Measures"],
+  [/\b(spirit[\s-])?level\b(?!.*floor|.*rug|.*loop|.*table)/i, "Tools & Home Improvement > Hand Tools > Levels & Measuring Tools"],
+  // Power Tools
+  [/\b(cordless|electric|power)[\s-]drill\b/i, "Tools & Home Improvement > Power Tools > Drills & Drivers"],
+  [/\bdrill[\s-]bit(s)?\b|\bbit[\s-]set\b/i, "Tools & Home Improvement > Power Tools > Power Tool Accessories"],
+  [/\b(impact|screw)[\s-]driver\b/i, "Tools & Home Improvement > Power Tools > Drills & Drivers"],
+  [/\b(jig|circular|reciprocating|miter|oscillating)[\s-]?saw\b/i, "Tools & Home Improvement > Power Tools > Saws"],
+  [/\b(orbital[\s-])?sander\b/i, "Tools & Home Improvement > Power Tools > Sanders"],
+  // Hardware
+  [/\bcabinet[\s-](handle|knob|pull)\b|\bdrawer[\s-]pull\b/i, "Tools & Home Improvement > Hardware > Cabinet Hardware"],
+  [/\bdoor[\s-](handle|knob|hinge|latch)\b/i, "Tools & Home Improvement > Hardware > Door Hardware"],
+  // Rugs (doormat first — most specific)
+  [/\bdoormat\b|\bwelcome[\s-]mat\b|\bentrance[\s-]mat\b/i, "Home & Garden > Rugs > Doormats"],
+  [/\brunner[\s-]rug\b|\bhallway[\s-]rug\b|\bstair[\s-]runner\b/i, "Home & Garden > Rugs > Runner Rugs"],
+  [/\b(area|floor|wool|shag|persian|outdoor|indoor|accent)[\s-]rug\b|\brug\b(?![\s-]pad)/i, "Home & Garden > Rugs > Area Rugs"],
+  // Lighting
+  [/\b(led|light|rgb)[\s-]strip\b|\bstrip[\s-]light\b/i, "Home & Garden > Lighting > LED Strip Lights"],
+  [/\b(string|fairy|twinkle)[\s-]light\b/i, "Home & Garden > Lighting > String Lights"],
+  [/\bfloor[\s-]lamp\b|\btorchiere\b/i, "Home & Garden > Lighting > Floor Lamps"],
+  [/\b(table|desk|bedside|accent)[\s-]lamp\b/i, "Home & Garden > Lighting > Table Lamps"],
+  [/\bnight[\s-]?light\b|\bnightlight\b/i, "Home & Garden > Lighting > Night Lights"],
+  // Home Decor
+  [/\bwall[\s-](art|print)\b|\bcanvas[\s-](print|art)\b|\bposter\b/i, "Home & Garden > Home Decor > Wall Art & Prints"],
+  [/\b(throw|decorative|accent|toss)[\s-]pillow\b|\bpillow[\s-]cover\b|\bcushion[\s-]cover\b/i, "Home & Garden > Home Decor > Throw Pillows & Covers"],
+  [/\bvase\b|\bdecorative[\s-]bottle\b/i, "Home & Garden > Home Decor > Vases & Decorative Bottles"],
+  [/\bcandle[\s-]holder\b|\bcandlestick\b|\btealight\b|\bcandle\b/i, "Home & Garden > Home Decor > Candles & Candle Holders"],
+  [/\bpicture[\s-]frame\b|\bphoto[\s-]frame\b/i, "Home & Garden > Home Decor > Picture Frames"],
+  [/\b(decorative[\s-])?(figurine|sculpture|statue)\b/i, "Home & Garden > Home Decor > Decorative Figurines & Sculptures"],
+  [/\bwall[\s-](sticker|decal)\b/i, "Home & Garden > Home Decor > Wall Stickers & Decals"],
+  [/\b(wall|mantel|alarm)[\s-]?clock\b/i, "Home & Garden > Home Decor > Clocks"],
+  [/\bartificial[\s-](plant|flower)\b|\bfaux[\s-](plant|flower)\b|\bfake[\s-](plant|flower)\b/i, "Home & Garden > Home Decor > Artificial Plants & Flowers"],
+  // Furniture — Living Room (sectional before sofa, loveseat before sofa)
+  [/\bsectional\b/i, "Furniture > Living Room Furniture > Sectional Sofas"],
+  [/\bloveseat\b/i, "Furniture > Living Room Furniture > Loveseats"],
+  [/\b(sofa|couch)\b/i, "Furniture > Living Room Furniture > Sofas & Couches"],
+  [/\b(accent[\s-])?chair\b|\barmchair\b|\brecliner\b/i, "Furniture > Living Room Furniture > Accent Chairs & Armchairs"],
+  [/\bcoffee[\s-]table\b/i, "Furniture > Living Room Furniture > Coffee Tables"],
+  [/\b(tv|media|entertainment)[\s-](stand|console|center|unit)\b/i, "Furniture > Living Room Furniture > TV Stands & Media Consoles"],
+  [/\b(end|side)[\s-]table\b|\baccent[\s-]table\b/i, "Furniture > Living Room Furniture > Side & End Tables"],
+  [/\bbookshelf\b|\bbookcase\b/i, "Furniture > Living Room Furniture > Bookshelves & Bookcases"],
+  // Furniture — Bedroom
+  [/\bbed[\s-]frame\b|\bplatform[\s-]bed\b/i, "Furniture > Bedroom Furniture > Bed Frames"],
+  [/\bheadboard\b/i, "Furniture > Bedroom Furniture > Headboards"],
+  [/\bdresser\b|\bchest[\s-]of[\s-]drawers\b|\bdrawer[\s-]chest\b/i, "Furniture > Bedroom Furniture > Dressers & Chests"],
+  [/\bnightstand\b|\bnight[\s-]stand\b|\bbedside[\s-]table\b/i, "Furniture > Bedroom Furniture > Nightstands"],
+  [/\bwardrobe\b|\barmoire\b/i, "Furniture > Bedroom Furniture > Wardrobes & Armoires"],
+  // Furniture — Dining
+  [/\bdining[\s-]table\b|\bkitchen[\s-]table\b/i, "Furniture > Dining Room Furniture > Dining Tables"],
+  [/\bdining[\s-]chair\b/i, "Furniture > Dining Room Furniture > Dining Chairs"],
+  [/\bbar[\s-]stool\b|\bcounter[\s-]stool\b/i, "Furniture > Dining Room Furniture > Bar Stools & Counter Stools"],
+  [/\bdining[\s-]set\b/i, "Furniture > Dining Room Furniture > Dining Sets"],
+  // Furniture — Office
+  [/\boffice[\s-]chair\b|\bdesk[\s-]chair\b|\bgaming[\s-]chair\b/i, "Furniture > Office Furniture > Office Chairs"],
+  [/\bfiling[\s-]cabinet\b|\bfile[\s-]cabinet\b/i, "Furniture > Office Furniture > Filing Cabinets"],
+  [/\b(office|computer|writing|standing)[\s-]desk\b/i, "Furniture > Office Furniture > Desks"],
+  // Bedding
+  [/\bduvet[\s-]cover\b|\bcomforter[\s-]cover\b/i, "Home & Garden > Bedding > Duvet Covers"],
+  [/\b(bed[\s-])?sheet([\s-]set)?\b|\bfitted[\s-]sheet\b/i, "Home & Garden > Bedding > Bed Sheet Sets"],
+  [/\b(down[\s-])?comforter\b|\bquilt\b|\bbedspread\b/i, "Home & Garden > Bedding > Comforters & Quilts"],
+  [/\bmattress[\s-](protector|pad|cover)\b/i, "Home & Garden > Bedding > Mattress Protectors"],
+  [/\bblanket\b|\bthrow\b(?![\s-]pillow)/i, "Home & Garden > Bedding > Blankets & Throws"],
+  // Bath
+  [/\bshower[\s-]curtain\b/i, "Home & Garden > Bath > Shower Curtains & Liners"],
+  [/\bbath[\s-]mat\b|\bbathroom[\s-]rug\b/i, "Home & Garden > Bath > Bath Mats & Rugs"],
+  [/\b(bath|hand|beach)[\s-]towel\b|\btowel[\s-]set\b/i, "Home & Garden > Bath > Bath Towels"],
+  // Cleaning
+  [/\b(steam[\s-])?mop\b|\bbroom\b|\bsweeper\b/i, "Home & Garden > Cleaning Supplies > Mops & Brooms"],
+  [/\b(cleaning|scrub|dish)[\s-]brush\b|\bsponge\b/i, "Home & Garden > Cleaning Supplies > Cleaning Tools & Brushes"],
+  [/\blaundry[\s-](detergent|pod|supply)\b|\bfabric[\s-]softener\b/i, "Home & Garden > Cleaning Supplies > Laundry Supplies"],
+];
+
+function keywordClassifyTemu(name: string, allowedSet: Set<string>): string | null {
+  for (const [pattern, path] of TEMU_KEYWORD_RULES) {
+    if (pattern.test(name) && allowedSet.has(path)) return path;
+  }
+  return null;
+}
+
 export type ProductInput = {
   id: string;
   name: string;
@@ -246,8 +345,45 @@ export async function categorizeProducts(
   );
   const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 10 : 12));
 
+  // ── Pre-classification: cache + keyword rules ────────────────────────────────
+  // Products handled here are removed from the AI batch queue entirely.
+  // Expected savings for a typical Temu file: 50-70% fewer API calls.
+  const allowedForKeyword = isConstrained && availableCategories
+    ? new Set([...availableCategories, "Uncategorized"])
+    : null;
+  const preClassified = new Map<string, CategorizeResult>();
+  const aiProducts: ProductInput[] = [];
+  const productById = new Map(products.map((p) => [p.id, p]));
+
+  for (const p of products) {
+    const key = cacheKey(marketplace, p.name);
+    const cached = categorizationCache.get(key);
+    if (cached) {
+      preClassified.set(p.id, { productId: p.id, category: cached, path: cached, confidence: 0.9 });
+      continue;
+    }
+    if (isTemuTop && allowedForKeyword) {
+      const kw = keywordClassifyTemu(p.name, allowedForKeyword);
+      if (kw) {
+        categorizationCache.set(key, kw);
+        preClassified.set(p.id, { productId: p.id, category: kw, path: kw, confidence: 0.8 });
+        continue;
+      }
+    }
+    aiProducts.push(p);
+  }
+
+  const preCount = preClassified.size;
+  if (preCount > 0) {
+    const kwCount = [...preClassified.values()].filter((r) => r.confidence === 0.8).length;
+    const cacheCount = preCount - kwCount;
+    console.log(`[categorize] Pre-classified ${preCount}/${products.length} (cache=${cacheCount}, keyword=${kwCount}); ${aiProducts.length} sent to AI`);
+    onProgress?.(preCount, products.length, "pre-classified");
+    await onResults?.([...preClassified.values()]);
+  }
+
   const batches: ProductInput[][] = [];
-  for (let i = 0; i < products.length; i += BATCH) batches.push(products.slice(i, i + BATCH));
+  for (let i = 0; i < aiProducts.length; i += BATCH) batches.push(aiProducts.slice(i, i + BATCH));
 
   const allResults: CategorizeResult[] = [];
 
@@ -311,13 +447,16 @@ export async function categorizeProducts(
     if (isConstrained && i + PARALLEL < batches.length) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    // Report progress after every parallel wave. The job store's updatedAt advances,
-    // so the client's stall detector sees a live run instead of one frozen phase string
-    // for the whole (multi-minute) categorization of a large project.
-    onProgress?.(Math.min(allResults.length, products.length), products.length);
-    // Stream this wave's verdicts to the caller immediately — same "show finished
-    // results while the rest keeps running" pattern as verification, instead of a
-    // blank spinner until the entire (multi-minute) run completes.
+    // Cache successful AI results so future runs/re-runs can skip the API.
+    for (const r of waveResults) {
+      if (r.category !== "Uncategorized" && r.category !== batchFallback) {
+        const p = productById.get(r.productId);
+        if (p) categorizationCache.set(cacheKey(marketplace, p.name), r.category);
+      }
+    }
+    // Report progress after every parallel wave (include pre-classified in total done).
+    onProgress?.(Math.min(preCount + allResults.length, products.length), products.length);
+    // Stream this wave's verdicts to the caller immediately.
     if (waveResults.length) await onResults?.(waveResults);
   }
 
@@ -427,7 +566,13 @@ export async function categorizeProducts(
     }
   }
 
-  return allResults;
+  // Merge pre-classified + AI results, returning in original input order.
+  if (preCount === 0) return allResults;
+  const aiById = new Map(allResults.map((r) => [r.productId, r]));
+  return products.map(
+    (p) => preClassified.get(p.id) ?? aiById.get(p.id) ??
+      { productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1 },
+  );
 }
 
 // ── Batch categorization (reasoning-first) ────────────────────────────────────
