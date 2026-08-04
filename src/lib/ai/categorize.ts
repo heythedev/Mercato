@@ -1,5 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
 import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
@@ -8,7 +8,12 @@ import { formatSearsTaxonomyForPrompt, loadSearsCategoryPaths } from "@/lib/ai/s
 import { formatWayfairTaxonomyForPrompt, loadWayfairCategoryPaths, hasWayfairTaxonomy } from "@/lib/ai/wayfair-taxonomy";
 import { looksLikeSkuName } from "@/lib/ai/resolve-sku";
 
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Kimi (Moonshot AI) — OpenAI-compatible API, significantly cheaper than Anthropic.
+// Set KIMI_API_KEY on Render. Model override via CATEGORIZE_MODEL env var.
+const kimi = createOpenAI({
+  apiKey: process.env.KIMI_API_KEY ?? "",
+  baseURL: "https://api.moonshot.cn/v1",
+});
 
 // ── Cross-process in-memory cache ─────────────────────────────────────────────
 // Survives across requests for the lifetime of the server process (hours/days
@@ -220,29 +225,33 @@ export class CategorizationServiceError extends Error {
 /** Inspect a batch rejection and return a systemic-failure kind, or null if it
  *  looks like an ordinary transient/parse error worth tolerating per-batch. */
 function classifySystemicError(reason: unknown): CategorizationServiceError | null {
-  const err = reason as { statusCode?: number; message?: string; data?: { error?: { type?: string } } } | undefined;
-  const status = err?.statusCode;
-  const msg = String(err?.message ?? reason ?? "");
-  const providerType = err?.data?.error?.type ?? "";
+  const err = reason as {
+    statusCode?: number; status?: number; message?: string;
+    data?: { error?: { type?: string } };
+    error?: { type?: string; code?: string; message?: string };
+  } | undefined;
+  const status = err?.statusCode ?? err?.status;
+  const msg = String(err?.message ?? err?.error?.message ?? reason ?? "");
+  const providerType = err?.data?.error?.type ?? err?.error?.type ?? "";
 
   // 401/403 or an explicit authentication error type → invalid/expired key.
   if (status === 401 || status === 403 || providerType === "authentication_error" || /api key is invalid|authentication/i.test(msg)) {
     return new CategorizationServiceError(
-      "Categorization service rejected the API key (invalid or expired).",
+      "Categorization service rejected the API key (invalid or expired). Check KIMI_API_KEY on Render.",
       "auth",
     );
   }
   // Billing / quota exhaustion.
-  if (status === 402 || providerType === "billing_error" || /credit|quota|billing|insufficient/i.test(msg)) {
+  if (status === 402 || providerType === "billing_error" || /credit|quota|billing|insufficient|balance/i.test(msg)) {
     return new CategorizationServiceError(
-      "Categorization service is out of credit or over quota. Check the Anthropic account balance, then re-run.",
+      "Categorization service is out of credit or over quota. Check the Kimi account balance, then re-run.",
       "quota",
     );
   }
   // A rejected/unknown model id fails every batch identically.
   if (status === 404 && /model/i.test(msg)) {
     return new CategorizationServiceError(
-      "Categorization model was not found.",
+      "Categorization model was not found. Check CATEGORIZE_MODEL env var.",
       "provider",
     );
   }
@@ -328,13 +337,9 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Model: Haiku for all marketplaces. For constrained taxonomies (Temu, BestBuy,
-  // Walmart, Mathis, Sears) the AI just needs to match a product to one path from
-  // a fixed CSV list — Haiku is equally accurate at this and ~10x faster than Sonnet.
-  // The validation+retry pass already rejects any invalid picks and re-asks with a
-  // stricter prompt. Sonnet took 30+ minutes for 7k products; Haiku takes ~2 minutes.
-  // Override with CATEGORIZE_ANTHROPIC_MODEL env var if a specific run needs Sonnet.
-  const model = process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+  // Model: Kimi moonshot-v1-32k by default (needs 32k+ context to fit the full
+  // taxonomy prompt + product batch). Override with CATEGORIZE_MODEL env var.
+  const model = process.env.CATEGORIZE_MODEL ?? process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "moonshot-v1-32k";
 
   // Larger batches for Haiku — it responds in ~1-2s vs 10-15s for Sonnet, so we can
   // send more products per call without blocking the wave for long.
@@ -893,45 +898,14 @@ ${pathHint}
   const perItemTokens = usesTaxonomySheet ? 110 : 80;
   const maxOutputTokens = Math.min(8000, Math.max(1500, products.length * perItemTokens + 500));
 
-  // Cache the static system prompt (which carries the multi-thousand-token
-  // taxonomy) so repeated batches for the same marketplace hit the cache instead
-  // of re-billing the sheet. Only the sheet-based marketplaces have a system
-  // prompt large enough to clear Anthropic's ~1024-token cache minimum and
-  // benefit; for the rest, caching is a no-op we skip to avoid needless overhead.
-  //
-  // The cache breakpoint must sit at the END of the static system content and
-  // BEFORE the variable product list, so it must be attached to the system
-  // MESSAGE specifically (a top-level `providerOptions.cacheControl` on
-  // generateText lands the breakpoint after the whole prompt, which re-writes
-  // the cache every call and never reads it — verified empirically). We build an
-  // explicit messages array to place the breakpoint precisely. The system
-  // content is our own static taxonomy (never user input), so the SDK's
-  // system-in-messages injection warning does not apply — suppressed below.
-  const messages: ModelMessage[] = usesTaxonomySheet
-    ? [
-        {
-          role: "system",
-          content: systemPrompt,
-          providerOptions: {
-            anthropic: {
-              // 1h cache: a large categorization run spans many minutes and
-              // hundreds of batches — the longer TTL keeps the sheet warm across
-              // the whole job rather than expiring mid-run (default is 5m).
-              cacheControl: { type: "ephemeral", ttl: "1h" },
-            },
-          },
-        },
-        { role: "user", content: userPrompt },
-      ]
-    : [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ];
+  const messages: ModelMessage[] = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ];
 
   const { text, finishReason } = await generateText({
-    model: anthropic(model),
+    model: kimi(model),
     messages,
-    allowSystemInMessages: true,
     // Temu/BestBuy/Mathis use a closed taxonomy — any valid path is correct.
     // A small temperature (0.3) helps the AI reason through niche product types
     // instead of anchoring on the first taxonomy entry seen at temperature=0.
