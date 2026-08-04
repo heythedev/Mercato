@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { ArrowLeft } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LottieLoader } from "@/components/ui/lottie-loader";
 
@@ -54,26 +56,40 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="relative min-h-screen flex items-center justify-center p-4">
-      <div className="absolute right-4 top-4 z-10">
-        <ThemeToggle className="bg-background" />
+    <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden">
+      {/* Soft ambient gradients — same washes as the landing page */}
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-40 left-1/2 h-[34rem] w-[54rem] -translate-x-1/2 rounded-full bg-gradient-to-br from-violet-300/45 via-fuchsia-200/30 to-transparent blur-3xl dark:from-violet-600/20 dark:via-fuchsia-500/10" />
+        <div className="absolute top-1/3 -left-48 h-[28rem] w-[28rem] rounded-full bg-gradient-to-tr from-indigo-300/40 to-transparent blur-3xl dark:from-indigo-500/15" />
+        <div className="absolute -right-48 bottom-0 h-[30rem] w-[30rem] rounded-full bg-gradient-to-tl from-purple-300/40 to-transparent blur-3xl dark:from-purple-500/15" />
       </div>
-      <div className="dots-backdrop absolute inset-0" />
+      {/* Back to landing — floating pill, top left */}
+      <Link
+        href="/"
+        aria-label="Back to home"
+        className="absolute left-4 top-4 z-10 inline-flex h-10 items-center gap-1.5 rounded-full border bg-background/70 px-4 text-sm font-medium text-muted-foreground backdrop-blur-md transition hover:text-foreground supports-[backdrop-filter]:bg-background/50 sm:left-8"
+      >
+        <ArrowLeft className="h-4 w-4" /> Back
+      </Link>
+      {/* Theme toggle — floating pill, top right (same inset as the landing header) */}
+      <div className="absolute right-4 top-4 z-10 sm:right-8">
+        <ThemeToggle className="h-10 w-10 rounded-full border bg-background/70 backdrop-blur-md supports-[backdrop-filter]:bg-background/50" />
+      </div>
       <div className="relative w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <h1 className="inline-block bg-background px-3 py-1 text-4xl font-semibold tracking-wide [font-family:var(--font-brand)]">
+          <h1 className="inline-block px-3 py-1 text-4xl font-semibold tracking-wide [font-family:var(--font-brand)]">
             Mercato
           </h1>
           <p className="mt-1">
-            <span className="inline-block bg-background px-2 py-0.5 text-sm text-muted-foreground">
+            <span className="inline-block px-2 py-0.5 text-sm text-muted-foreground">
               Multi-marketplace sourcing platform
             </span>
           </p>
         </div>
 
         {/* Card */}
-        <div className="bg-card rounded-2xl p-8">
+        <div className="rounded-2xl border bg-card/80 p-8 shadow-xl shadow-black/[0.06] backdrop-blur-md supports-[backdrop-filter]:bg-card/60 dark:shadow-black/30">
           <h2 className="text-lg font-semibold mb-6">Sign in to your account</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>

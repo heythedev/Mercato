@@ -9,9 +9,11 @@ export const proxy = auth((req) => {
 
   const isAuthPage = nextUrl.pathname.startsWith("/login");
   const isApiAuth = nextUrl.pathname.startsWith("/api/auth");
+  const isLanding = nextUrl.pathname === "/";
 
   if (isApiAuth) return;
-  if (isAuthPage) {
+  if (isAuthPage || isLanding) {
+    // Public pages — but signed-in users go straight to the app.
     if (isLoggedIn) return Response.redirect(new URL("/projects", nextUrl));
     return;
   }
