@@ -1,9 +1,18 @@
 import { requireUser } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { AdminTemplatesClient } from "@/components/admin/templates-client";
+import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 
 export default async function TemplatesPage() {
   const user = await requireUser();
+  const isAdmin = (user as { role?: string }).role === "admin";
+
+  // Marketplaces this user may work with — admins get all tiles.
+  const account = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { allowedMarketplaces: true },
+  });
+  const allowedTiles = isAdmin ? MARKETPLACE_IDS : account?.allowedMarketplaces ?? [];
 
   // Fetch admin user IDs so their templates also appear as global defaults.
   // Some may have userId=adminId instead of null if uploaded before the null convention.
@@ -36,7 +45,7 @@ export default async function TemplatesPage() {
           Upload your marketplace template files — columns are auto-detected and used for export
         </p>
       </div>
-      <AdminTemplatesClient templates={templates} isAdmin={(user as { role?: string }).role === "admin"} />
+      <AdminTemplatesClient templates={templates} isAdmin={isAdmin} allowedTiles={allowedTiles} />
     </div>
   );
 }

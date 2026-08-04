@@ -16,6 +16,8 @@ import { KeepaBalance } from "./keepa-balance";
 
 type Props = {
   role: string;
+  /** Whether to show the Keepa balance widget (Amazon-access users + admins). */
+  showKeepa?: boolean;
 };
 
 const userNav = [
@@ -29,7 +31,7 @@ const adminNav = [
   { href: "/admin/templates", label: "Templates", icon: FileText },
 ];
 
-export function Sidebar({ role }: Props) {
+export function Sidebar({ role, showKeepa = false }: Props) {
   const path = usePathname();
   const isAdmin = role === "admin";
   const navItems = isAdmin ? adminNav : userNav;
@@ -130,8 +132,9 @@ export function Sidebar({ role }: Props) {
           })}
         </nav>
 
-        {/* Keepa token balance — pinned to the card footer */}
-        <KeepaBalance />
+        {/* Keepa token balance — pinned to the card footer. Amazon-specific,
+            so only shown to admins or users with Amazon access. */}
+        {showKeepa && <KeepaBalance />}
       </aside>
     </>
   );
