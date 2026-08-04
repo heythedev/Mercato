@@ -159,6 +159,15 @@ export async function categorizeProducts(
   products: ProductInput[],
   availableCategories?: string[],
   onProgress?: CategorizeProgress,
+  /**
+   * Streaming hook: called with each wave's results as soon as that wave lands (and
+   * again with corrected results from the validation/rescue/forced passes). The caller
+   * commits these to the database incrementally so the UI can display finished products
+   * while the run is still going — same pattern as verification. Results may be emitted
+   * more than once for the same product (a later pass correcting an earlier verdict);
+   * the last emission wins.
+   */
+  onResults?: (results: CategorizeResult[]) => void | Promise<void>,
 ): Promise<CategorizeResult[]> {
   const mpLower = marketplace.toLowerCase();
   const isMathis = mpLower === "mathis";
@@ -279,6 +288,7 @@ export async function categorizeProducts(
     const settled = await Promise.allSettled(
       group.map((b) => withRateLimitRetry(() => categorizeBatch(b, marketplace, model, availableCategories)))
     );
+    const waveResults: CategorizeResult[] = [];
     settled.forEach((s, gi) => {
       if (s.status === "rejected") {
         failedBatches++;
@@ -288,10 +298,11 @@ export async function categorizeProducts(
         // grinding through the whole run producing all-Uncategorized results.
         systemicError ??= classifySystemicError(s.reason);
       }
-      allResults.push(...(s.status === "fulfilled"
+      waveResults.push(...(s.status === "fulfilled"
         ? s.value
         : group[gi].map((p) => ({ productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1 }))));
     });
+    allResults.push(...waveResults);
     // Bail out early on a systemic failure — no point calling the API hundreds of
     // more times with a key/quota/model that will reject every one of them.
     if (systemicError) throw systemicError;
@@ -304,6 +315,10 @@ export async function categorizeProducts(
     // so the client's stall detector sees a live run instead of one frozen phase string
     // for the whole (multi-minute) categorization of a large project.
     onProgress?.(Math.min(allResults.length, products.length), products.length);
+    // Stream this wave's verdicts to the caller immediately — same "show finished
+    // results while the rest keeps running" pattern as verification, instead of a
+    // blank spinner until the entire (multi-minute) run completes.
+    if (waveResults.length) await onResults?.(waveResults);
   }
 
   // No systemic error was classified, but EVERY batch still failed (e.g. a
@@ -327,21 +342,23 @@ export async function categorizeProducts(
       const retryInputs = products.filter((p) => offListIds.has(p.id));
       for (let i = 0; i < retryInputs.length; i += BATCH) {
         const batch = retryInputs.slice(i, i + BATCH);
+        const changed: CategorizeResult[] = [];
         try {
           const retryResults = await categorizeBatch(batch, marketplace, model, availableCategories, true);
           for (const r of retryResults) {
             if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; r.confidence = 0.1; }
             const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) allResults[idx] = r;
+            if (idx !== -1) { allResults[idx] = r; changed.push(r); }
           }
         } catch {
           for (const p of batch) {
             const idx = allResults.findIndex((a) => a.productId === p.id);
-            if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; }
+            if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; changed.push(allResults[idx]); }
           }
         }
         // Keep the run visibly alive through the retry pass too.
         onProgress?.(Math.min(i + batch.length, retryInputs.length), retryInputs.length, "correcting off-list results");
+        if (changed.length) await onResults?.(changed);
       }
     }
 
@@ -364,15 +381,17 @@ export async function categorizeProducts(
       // Re-categorize with search context in small batches
       for (let i = 0; i < enriched.length; i += 5) {
         const batch = enriched.slice(i, i + 5);
+        const changed: CategorizeResult[] = [];
         try {
           const rescueResults = await categorizeBatchWithContext(batch, marketplace, model, availableCategories);
           for (const r of rescueResults) {
             if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; }
             const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) allResults[idx] = r;
+            if (idx !== -1) { allResults[idx] = r; changed.push(r); }
           }
         } catch { /* keep Uncategorized */ }
         onProgress?.(Math.min(i + batch.length, enriched.length), enriched.length, "web-search rescue");
+        if (changed.length) await onResults?.(changed);
       }
     }
 
@@ -392,16 +411,18 @@ export async function categorizeProducts(
         .filter((p): p is ProductInput => !!p && !looksLikeSkuName(p.name, p.sku));
       for (let i = 0; i < retryable.length; i += BATCH) {
         const batch = retryable.slice(i, i + BATCH);
+        const changed: CategorizeResult[] = [];
         try {
           const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true);
           for (const r of forced) {
             // Accept only a verbatim on-list path; anything else stays Uncategorized.
             if (r.category === "Uncategorized" || !allowed.has(r.category)) continue;
             const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) allResults[idx] = { ...r, confidence: Math.min(r.confidence, 0.5) };
+            if (idx !== -1) { allResults[idx] = { ...r, confidence: Math.min(r.confidence, 0.5) }; changed.push(allResults[idx]); }
           }
         } catch { /* keep Uncategorized */ }
         onProgress?.(Math.min(i + batch.length, retryable.length), retryable.length, "resolving refused products");
+        if (changed.length) await onResults?.(changed);
       }
     }
   }

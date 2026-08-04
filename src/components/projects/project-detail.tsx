@@ -283,11 +283,67 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     return () => { cancelled = true; clearInterval(iv); };
   }
 
+  /**
+   * Poll the incremental categorization feed and merge finished products into
+   * state as they land — the categorize-step analogue of startVerifyFeed above.
+   * Returns a stop function.
+   */
+  function startCategorizeFeed(): () => void {
+    let cancelled = false;
+    let cursor: string | null = null;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        // Drain everything currently available before sleeping, so a fast run
+        // isn't rate-limited by the poll interval.
+        for (;;) {
+          if (cancelled) return;
+          const qs = new URLSearchParams({ limit: "200" });
+          if (cursor) qs.set("cursor", cursor);
+          const res = await fetch(`/api/projects/${project.id}/categorize/progress?${qs}`);
+          if (!res.ok) break;
+          const data = await res.json();
+          if (cancelled) return;
+
+          if (data.products?.length) {
+            cursor = data.nextCursor ?? cursor;
+            setProducts((prev) => {
+              const byId = new Map(prev.map((p: Product) => [p.id, p]));
+              for (const incoming of data.products as Product[]) {
+                const existing = byId.get(incoming.id);
+                // Merge rather than replace: the feed carries a subset of
+                // columns, and clobbering would drop verification fields.
+                byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
+              }
+              // Preserve the original catalog order.
+              return prev.map((p: Product) => byId.get(p.id) ?? p);
+            });
+          }
+
+          // Caught up with what's committed so far — wait for more.
+          if (data.exhausted) break;
+        }
+      } catch {
+        // A failed poll is not fatal: the run continues server-side and the
+        // next tick picks up whatever landed meanwhile.
+      }
+    };
+
+    void poll();
+    const iv = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }
+
   async function runCategorize(force = false) {
     setLoading(true);
     setLoadingStep(2);
     // Move to the Categorize step up front so its loader shows there.
     setActiveStep(2);
+    // A re-categorize (force) clears the previous run's results first, otherwise the
+    // stale list would sit there looking like fresh progress — matches runVerify.
+    if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null })));
+    const stopPolling = startCategorizeFeed();
     try {
       // Categorization is a background job (large catalogs make dozens of model
       // round-trips and run well past the request timeout). POST returns a jobId
@@ -366,6 +422,9 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       console.error("Categorize error:", e);
       toast.error("Categorization failed — check the server console for details.");
     } finally {
+      // Stop the feed before the final refresh so a late poll can't overwrite
+      // the authoritative full payload with a partial page.
+      stopPolling();
       setLoading(false);
       setLoadingStep(null);
     }

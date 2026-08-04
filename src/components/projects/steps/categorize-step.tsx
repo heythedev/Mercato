@@ -42,6 +42,11 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
   const categorized = products.filter((p) => p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized");
   const pending = products.filter((p) => !p.marketplaceCategory);
+  // Products that already have a verdict RIGHT NOW. During a run this grows as waves
+  // land (see startCategorizeFeed in project-detail.tsx), which is what lets the
+  // results table render mid-run instead of waiting for the whole catalog to finish —
+  // same streaming pattern as the Verify step.
+  const hasStreamedResults = loading && (categorized.length > 0 || uncategorized.length > 0);
 
   // Live running timer while categorizing (server persists elapsedMs only on
   // completion, so we tick client-side from when this run started).
@@ -117,7 +122,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           </p>
           {loading && formatDuration(liveElapsedMs) && (
             <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
-              Categorizing… {formatDuration(liveElapsedMs)} elapsed
+              {categorized.length + uncategorized.length > 0 && total > 0
+                ? <>Categorizing {(categorized.length + uncategorized.length).toLocaleString()} / {total.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>
+                : <>Categorizing… {formatDuration(liveElapsedMs)} elapsed</>}
             </p>
           )}
           {!loading && completedAt && formatDuration(elapsedMs) && (
@@ -156,7 +163,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           {hasResults && (
             <button
               onClick={downloadCsv}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition"
+              disabled={loading}
+              title={loading ? "Available when categorization completes" : undefined}
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Download className="w-4 h-4" />
               Download CSV
@@ -184,7 +193,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
       </div>
 
       {/* Progress */}
-      {hasResults && (
+      {(hasResults || hasStreamedResults) && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
           <div className="rounded-2xl p-5 bg-green-50/70 dark:bg-green-950/20">
             <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categorized.length}</p>
@@ -200,9 +209,14 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           </div>
         </div>
       )}
+      {loading && (hasResults || hasStreamedResults) && (
+        <p className="text-xs text-muted-foreground -mt-4 mb-6">Counts update as products finish categorizing.</p>
+      )}
 
-      {/* Uncategorized warning banner */}
-      {hasResults && uncategorized.length > 0 && (
+      {/* Uncategorized warning banner — suppressed while still streaming, since the
+          count (and which products) is provisional until the run finishes; the
+          bulletproofing gate can still downgrade or upgrade entries at the end. */}
+      {hasResults && !loading && uncategorized.length > 0 && (
         <div className="mb-6 rounded-2xl bg-orange-50/70 dark:bg-orange-950/20 p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
@@ -234,19 +248,29 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
         </div>
       )}
 
-      {loading && (
+      {/* Full-page loader only until the first results arrive. Once products start
+          streaming in, they replace it and the run reports progress at the bottom
+          of the table instead — the user can start reviewing immediately rather
+          than waiting for the final batch (mirrors the Verify step). */}
+      {loading && !hasStreamedResults && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <LottieLoader size={96} className="mb-2" />
           <p className="text-sm font-medium">Categorizing products with AI…</p>
-          <p className="text-xs text-muted-foreground mt-1">This may take a minute for large batches</p>
+          {categorized.length + uncategorized.length > 0 && total > 0 ? (
+            <p className="text-sm font-medium mt-1 tabular-nums">
+              Categorized {(categorized.length + uncategorized.length).toLocaleString()} of {total.toLocaleString()} products
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground mt-1">This may take a minute for large batches</p>
+          )}
           {formatDuration(liveElapsedMs) && (
-            <p className="text-sm font-medium mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
+            <p className="text-sm text-muted-foreground mt-3 tabular-nums">{formatDuration(liveElapsedMs)} elapsed</p>
           )}
         </div>
       )}
 
       {/* Results table */}
-      {hasResults && !loading && (
+      {(hasResults || hasStreamedResults) && (
         <div className="rounded-2xl bg-muted/20 overflow-x-auto overflow-y-hidden">
           <table className="w-full text-sm">
             <thead className="bg-muted/40">
@@ -258,7 +282,11 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
               </tr>
             </thead>
             <tbody className="divide-y divide-border/40">
-              {products.map((p) => {
+              {/* While a run is streaming, show only products that already have a
+                  verdict — the not-yet-processed remainder would otherwise render as
+                  a wall of "—" placeholder rows. Once the run finishes, show
+                  everything (matches the Verify step's resultPool pattern). */}
+              {(loading ? products.filter((p) => p.marketplaceCategory) : products).map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
                 return (
                   <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50" : "hover:bg-muted/30"}`}>

@@ -324,6 +324,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               : `Categorizing ${done}/${total} (${pct}%)…`,
           );
         },
+        // Stream each wave's verdicts to the DB as soon as they land — same
+        // "show finished results while the rest keeps running" pattern used for
+        // verification, instead of a blank spinner for the whole (multi-minute) run.
+        // These are provisional: the bulletproofing gate below may still downgrade a
+        // low-confidence or unresolved-SKU result to Uncategorized once the full run
+        // settles, and that corrected value overwrites this one in the final write.
+        async (wave) => {
+          await inChunks(wave, (r) =>
+            prisma.product.update({
+              where: { id: r.productId },
+              data: {
+                marketplaceCategory: r.category,
+                categoryPath: r.path,
+                categoryConfidence: r.confidence,
+                categorizedAt: new Date(),
+              },
+            }).catch(() => {}), // a transient write failure here is not fatal — the final bulk write is authoritative
+          );
+        },
       );
 
       // ── Bulletproofing: route uncertain products to review instead of guessing ──
