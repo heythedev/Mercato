@@ -15,6 +15,7 @@ import { VerifyStep } from "./steps/verify-step";
 import { CategorizeStep } from "./steps/categorize-step";
 import { ExportStep } from "./steps/export-step";
 import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
+import { startPolling, sleepForPoll } from "@/lib/poll-scheduler";
 
 type Product = {
   id: string;
@@ -236,51 +237,51 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     // empty; a resume continues past whatever is already on screen.
     if (!fromScratch) cursor = null;
 
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        // Drain everything currently available before sleeping, so a fast run
-        // isn't rate-limited by the poll interval.
-        for (;;) {
-          if (cancelled) return;
-          const qs = new URLSearchParams({ limit: "200" });
-          if (cursor) qs.set("cursor", cursor);
-          const res = await fetch(`/api/projects/${project.id}/verify/progress?${qs}`);
-          if (!res.ok) break;
-          const data = await res.json();
-          if (cancelled) return;
+    // Returns true when this poll produced new rows, so the scheduler can stay on
+    // the fast cadence while data flows and ease off when the run goes quiet.
+    const poll = async (): Promise<boolean> => {
+      if (cancelled) return false;
+      let sawData = false;
+      // Drain everything currently available before sleeping, so a fast run
+      // isn't rate-limited by the poll interval.
+      for (;;) {
+        if (cancelled) return sawData;
+        const qs = new URLSearchParams({ limit: "200" });
+        if (cursor) qs.set("cursor", cursor);
+        const res = await fetch(`/api/projects/${project.id}/verify/progress?${qs}`);
+        if (!res.ok) break;
+        const data = await res.json();
+        if (cancelled) return sawData;
 
-          if (data.products?.length) {
-            cursor = data.nextCursor ?? cursor;
-            setProducts((prev) => {
-              const byId = new Map(prev.map((p: Product) => [p.id, p]));
-              for (const incoming of data.products as Product[]) {
-                const existing = byId.get(incoming.id);
-                // Merge rather than replace: the feed carries a subset of
-                // columns, and clobbering would drop categorization fields.
-                byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
-              }
-              // Preserve the original catalog order.
-              return prev.map((p: Product) => byId.get(p.id) ?? p);
-            });
-          }
-
-          if (data.verifiedTotal != null && data.total != null && data.verifiedTotal < data.total) {
-            setVerifyProgress({ done: data.verifiedTotal, total: data.total });
-          }
-
-          // Caught up with what's committed so far — wait for more.
-          if (data.exhausted) break;
+        if (data.products?.length) {
+          sawData = true;
+          cursor = data.nextCursor ?? cursor;
+          setProducts((prev) => {
+            const byId = new Map(prev.map((p: Product) => [p.id, p]));
+            for (const incoming of data.products as Product[]) {
+              const existing = byId.get(incoming.id);
+              // Merge rather than replace: the feed carries a subset of
+              // columns, and clobbering would drop categorization fields.
+              byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
+            }
+            // Preserve the original catalog order.
+            return prev.map((p: Product) => byId.get(p.id) ?? p);
+          });
         }
-      } catch {
-        // A failed poll is not fatal: the run continues server-side and the
-        // next tick picks up whatever landed meanwhile.
+
+        if (data.verifiedTotal != null && data.total != null && data.verifiedTotal < data.total) {
+          setVerifyProgress({ done: data.verifiedTotal, total: data.total });
+        }
+
+        // Caught up with what's committed so far — wait for more.
+        if (data.exhausted) break;
       }
+      return sawData;
     };
 
-    void poll();
-    const iv = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(iv); };
+    // Visibility-aware, non-overlapping, backs off when idle — see poll-scheduler.
+    const scheduler = startPolling({ poll });
+    return () => { cancelled = true; scheduler.stop(); };
   }
 
   /**
@@ -292,47 +293,47 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     let cancelled = false;
     let cursor: string | null = null;
 
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        // Drain everything currently available before sleeping, so a fast run
-        // isn't rate-limited by the poll interval.
-        for (;;) {
-          if (cancelled) return;
-          const qs = new URLSearchParams({ limit: "200" });
-          if (cursor) qs.set("cursor", cursor);
-          const res = await fetch(`/api/projects/${project.id}/categorize/progress?${qs}`);
-          if (!res.ok) break;
-          const data = await res.json();
-          if (cancelled) return;
+    // Returns true when this poll produced new rows, so the scheduler can stay on
+    // the fast cadence while data flows and ease off when the run goes quiet.
+    const poll = async (): Promise<boolean> => {
+      if (cancelled) return false;
+      let sawData = false;
+      // Drain everything currently available before sleeping, so a fast run
+      // isn't rate-limited by the poll interval.
+      for (;;) {
+        if (cancelled) return sawData;
+        const qs = new URLSearchParams({ limit: "200" });
+        if (cursor) qs.set("cursor", cursor);
+        const res = await fetch(`/api/projects/${project.id}/categorize/progress?${qs}`);
+        if (!res.ok) break;
+        const data = await res.json();
+        if (cancelled) return sawData;
 
-          if (data.products?.length) {
-            cursor = data.nextCursor ?? cursor;
-            setProducts((prev) => {
-              const byId = new Map(prev.map((p: Product) => [p.id, p]));
-              for (const incoming of data.products as Product[]) {
-                const existing = byId.get(incoming.id);
-                // Merge rather than replace: the feed carries a subset of
-                // columns, and clobbering would drop verification fields.
-                byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
-              }
-              // Preserve the original catalog order.
-              return prev.map((p: Product) => byId.get(p.id) ?? p);
-            });
-          }
-
-          // Caught up with what's committed so far — wait for more.
-          if (data.exhausted) break;
+        if (data.products?.length) {
+          sawData = true;
+          cursor = data.nextCursor ?? cursor;
+          setProducts((prev) => {
+            const byId = new Map(prev.map((p: Product) => [p.id, p]));
+            for (const incoming of data.products as Product[]) {
+              const existing = byId.get(incoming.id);
+              // Merge rather than replace: the feed carries a subset of
+              // columns, and clobbering would drop verification fields.
+              byId.set(incoming.id, existing ? { ...existing, ...incoming } : incoming);
+            }
+            // Preserve the original catalog order.
+            return prev.map((p: Product) => byId.get(p.id) ?? p);
+          });
         }
-      } catch {
-        // A failed poll is not fatal: the run continues server-side and the
-        // next tick picks up whatever landed meanwhile.
+
+        // Caught up with what's committed so far — wait for more.
+        if (data.exhausted) break;
       }
+      return sawData;
     };
 
-    void poll();
-    const iv = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(iv); };
+    // Visibility-aware, non-overlapping, backs off when idle — see poll-scheduler.
+    const scheduler = startPolling({ poll });
+    return () => { cancelled = true; scheduler.stop(); };
   }
 
   async function runCategorize(force = false) {
@@ -370,7 +371,10 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       let lastUpdatedAt = 0;
 
       while (Date.now() - startedAt < HARD_LIMIT_MS) {
-        await new Promise((r) => setTimeout(r, 2500));
+        // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
+        // return) — keeps the job-completion check alive without burning CPU or
+        // requests while the user works elsewhere.
+        await sleepForPoll(2500);
 
         const pollRes = await fetch(
           `/api/projects/${project.id}/categorize?jobId=${encodeURIComponent(jobId)}`,

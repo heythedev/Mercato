@@ -379,7 +379,7 @@ function DateRangeFilter({
   );
 }
 
-export function ProjectsView({ projects: initial }: { projects: Project[] }) {
+export function ProjectsView({ projects: initial, allowedTiles }: { projects: Project[]; allowedTiles: string[] }) {
   const router = useRouter();
   const confirm = useConfirm();
   const [projects, setProjects] = useState(initial);
@@ -851,7 +851,7 @@ export function ProjectsView({ projects: initial }: { projects: Project[] }) {
         </div>
       )}
 
-      <NewProjectModal open={newProjectOpen} onClose={() => setNewProjectOpen(false)} />
+      <NewProjectModal open={newProjectOpen} onClose={() => setNewProjectOpen(false)} allowedTiles={allowedTiles} />
     </div>
   );
 }

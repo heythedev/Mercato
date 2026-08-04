@@ -7,9 +7,11 @@ import { NewProjectForm } from "./new-project-form";
 export function NewProjectModal({
   open,
   onClose,
+  allowedTiles,
 }: {
   open: boolean;
   onClose: () => void;
+  allowedTiles: string[];
 }) {
   useEffect(() => {
     if (!open) return;
@@ -60,7 +62,7 @@ export function NewProjectModal({
           </button>
         </div>
 
-        <NewProjectForm />
+        <NewProjectForm allowedTiles={allowedTiles} />
       </div>
     </div>
   );

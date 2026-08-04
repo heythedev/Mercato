@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import bcrypt from "bcryptjs";
+import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 
 export async function GET() {
   const { response } = await adminGuard();
   if (response) return response;
 
   const users = await prisma.user.findMany({
-    select: { id: true, name: true, email: true, role: true, createdAt: true },
+    select: { id: true, name: true, email: true, role: true, allowedMarketplaces: true, createdAt: true },
     orderBy: { createdAt: "desc" },
   });
 
@@ -32,7 +33,7 @@ export async function POST(req: NextRequest) {
   const hash = await bcrypt.hash(password, 12);
   const user = await prisma.user.create({
     data: { name: name ?? null, email, password: hash, role: role ?? "user" },
-    select: { id: true, name: true, email: true, role: true, createdAt: true },
+    select: { id: true, name: true, email: true, role: true, allowedMarketplaces: true, createdAt: true },
   });
 
   return NextResponse.json(user);
@@ -54,13 +55,49 @@ export async function PATCH(req: NextRequest) {
   if (response) return response;
 
   const body = await req.json();
-  const { id, role } = body;
-  if (!id || !role) return NextResponse.json({ error: "id and role required" }, { status: 400 });
+  const { id, role, password, allowedMarketplaces } = body as {
+    id?: string;
+    role?: string;
+    password?: string;
+    allowedMarketplaces?: unknown;
+  };
+  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+
+  // Build only the fields actually provided, so one endpoint handles role
+  // changes, password resets, and marketplace-access edits independently.
+  const data: {
+    role?: string;
+    password?: string;
+    allowedMarketplaces?: string[];
+  } = {};
+
+  if (typeof role === "string") data.role = role;
+
+  if (typeof password === "string") {
+    if (password.length < 8) {
+      return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
+    }
+    data.password = await bcrypt.hash(password, 12);
+  }
+
+  if (allowedMarketplaces !== undefined) {
+    if (!Array.isArray(allowedMarketplaces) || allowedMarketplaces.some((m) => typeof m !== "string")) {
+      return NextResponse.json({ error: "allowedMarketplaces must be a string array" }, { status: 400 });
+    }
+    // Keep only known ids and de-dupe.
+    data.allowedMarketplaces = [...new Set(
+      (allowedMarketplaces as string[]).filter((m) => MARKETPLACE_IDS.includes(m)),
+    )];
+  }
+
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+  }
 
   const user = await prisma.user.update({
     where: { id },
-    data: { role },
-    select: { id: true, name: true, email: true, role: true, createdAt: true },
+    data,
+    select: { id: true, name: true, email: true, role: true, allowedMarketplaces: true, createdAt: true },
   });
 
   return NextResponse.json(user);

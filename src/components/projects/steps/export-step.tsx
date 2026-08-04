@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
 import { buildDownloadName } from "@/lib/export/filename";
 import { LottieLoader } from "@/components/ui/lottie-loader";
+import { sleepForPoll } from "@/lib/poll-scheduler";
 
 type Template = {
   id: string;
@@ -226,7 +227,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       let lastPhase = "";
 
       while (Date.now() - startedAt < HARD_LIMIT_MS) {
-        await new Promise((r) => setTimeout(r, 2500));
+        // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
+        // return) — the export keeps building server-side either way.
+        await sleepForPoll(2500);
         if (!mountedRef.current) return;
 
         const pollRes = await fetch(

@@ -3,6 +3,7 @@ import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { parseVendorFile } from "@/lib/vendor/parse";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
+import { canUseMarketplace } from "@/lib/marketplaces/catalog";
 
 export const maxDuration = 300;
 
@@ -20,6 +21,20 @@ export async function POST(req: NextRequest) {
 
   if (!file || !name || !marketplace) {
     return NextResponse.json({ error: "file, name and marketplace are required" }, { status: 400 });
+  }
+
+  // Enforce marketplace access. Read role + allow-list fresh from the DB (the
+  // session may predate an admin's access change) rather than trusting the JWT.
+  const account = await prisma.user.findUnique({
+    where: { id: user!.id },
+    select: { role: true, allowedMarketplaces: true },
+  });
+  if (!account) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!canUseMarketplace(marketplace, account)) {
+    return NextResponse.json(
+      { error: "You don't have access to create projects for this marketplace." },
+      { status: 403 },
+    );
   }
 
   const bytes = await file.arrayBuffer();

@@ -57,8 +57,20 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
       if (startRef.current == null) startRef.current = Date.now();
       const tick = () => setLiveElapsedMs(Date.now() - startRef.current!);
       tick();
-      const iv = setInterval(tick, 1000);
-      return () => clearInterval(iv);
+      // Ticking re-renders the component every second for the whole run. While the
+      // tab is hidden nobody can read the clock, so stop it entirely rather than
+      // repaint in the background — the value is derived from wall-clock time, so
+      // it's simply recomputed (correctly) the moment the tab is visible again.
+      let iv: ReturnType<typeof setInterval> | null = null;
+      const start = () => { if (iv == null) iv = setInterval(tick, 1000); };
+      const stop = () => { if (iv != null) { clearInterval(iv); iv = null; } };
+      const sync = () => {
+        if (document.visibilityState === "hidden") stop();
+        else { tick(); start(); }
+      };
+      sync();
+      document.addEventListener("visibilitychange", sync);
+      return () => { stop(); document.removeEventListener("visibilitychange", sync); };
     }
     startRef.current = null;
     setLiveElapsedMs(null);

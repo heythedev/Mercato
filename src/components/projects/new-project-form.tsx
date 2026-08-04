@@ -6,17 +6,7 @@ import { toast } from "sonner";
 import { Upload, FileSpreadsheet, X, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LottieLoader } from "@/components/ui/lottie-loader";
-
-// Top-level tiles; Amazon expands to a US/International sub-toggle
-const MARKETPLACE_TILES = [
-  { id: "amazon", label: "Amazon", domain: "amazon.com" },
-  { id: "walmart", label: "Walmart", domain: "walmart.com" },
-  { id: "bestbuy", label: "Best Buy", domain: "bestbuy.com" },
-  { id: "temu", label: "Temu", domain: "temu.com" },
-  { id: "mathis", label: "Mathis", domain: "mathishome.com" },
-  { id: "sears", label: "Sears", domain: "sears.com" },
-  // { id: "wayfair", label: "Wayfair", domain: "wayfair.com" },
-] as const;
+import { MARKETPLACE_TILES } from "@/lib/marketplaces/catalog";
 
 function MarketplaceLogo({ domain, className }: { domain: string; className?: string }) {
   return (
@@ -33,8 +23,10 @@ const AMAZON_VARIANTS = [
   { id: "amazon", label: "International" },
 ] as const;
 
-export function NewProjectForm() {
+export function NewProjectForm({ allowedTiles }: { allowedTiles: string[] }) {
   const router = useRouter();
+  // Only marketplaces this user is allowed to use. The server enforces this too.
+  const tiles = MARKETPLACE_TILES.filter((m) => allowedTiles.includes(m.id));
   const inputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [marketplace, setMarketplace] = useState("");
@@ -162,8 +154,13 @@ export function NewProjectForm() {
       {/* Marketplace */}
       <div>
         <label className="block text-sm font-medium mb-2">Marketplace</label>
+        {tiles.length === 0 ? (
+          <div className="rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">
+            You don&apos;t have access to any marketplaces yet. Ask an admin to grant access.
+          </div>
+        ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {MARKETPLACE_TILES.map((m) => {
+          {tiles.map((m) => {
             const isAmazon = m.id === "amazon";
             const isActive = isAmazon ? amazonGroup : marketplace === m.id;
             return (
@@ -192,6 +189,7 @@ export function NewProjectForm() {
             );
           })}
         </div>
+        )}
 
         {/* Amazon sub-variant toggle */}
         {amazonGroup && (
