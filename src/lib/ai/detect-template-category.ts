@@ -1,7 +1,5 @@
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { moonshot, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 
 const GENERIC_SHEET = /^(sheet\d*|template|data|catalog|products?|items?|listing|upload|feed|export|flatfile|flat.?file)$/i;
 const GENERIC_FILE_WORDS = /\b(template|walmart|amazon|bestbuy|best.buy|marketplace|export|upload|listing|catalog|products?|items?|data|feed|flat.?file|v\d+|\d{4,})\b/gi;
@@ -27,9 +25,8 @@ export async function detectTemplateCategory(
 
   // 3. AI fallback — infer from column headers + filename
   try {
-    const model = process.env.DEFAULT_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
     const { text } = await generateText({
-      model: anthropic(model),
+      model: moonshot(MOONSHOT_TEXT_MODEL),
       prompt: `What product category does this marketplace template file belong to?
 Filename: ${filename}
 Sheet: ${sheetName ?? "none"}

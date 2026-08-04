@@ -1,5 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
+import { moonshot } from "@/lib/ai/moonshot";
 import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
 import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
@@ -9,11 +9,7 @@ import { formatWayfairTaxonomyForPrompt, loadWayfairCategoryPaths, hasWayfairTax
 import { looksLikeSkuName } from "@/lib/ai/resolve-sku";
 
 // Kimi (Moonshot AI) — OpenAI-compatible API, significantly cheaper than Anthropic.
-// Set KIMI_API_KEY on Render. Model override via CATEGORIZE_MODEL env var.
-const kimi = createOpenAI({
-  apiKey: process.env.KIMI_API_KEY ?? "",
-  baseURL: "https://api.moonshot.cn/v1",
-});
+// Set MOONSHOT_KEY. Model override via CATEGORIZE_MODEL env var.
 
 // ── Cross-process in-memory cache ─────────────────────────────────────────────
 // Survives across requests for the lifetime of the server process (hours/days
@@ -237,7 +233,7 @@ function classifySystemicError(reason: unknown): CategorizationServiceError | nu
   // 401/403 or an explicit authentication error type → invalid/expired key.
   if (status === 401 || status === 403 || providerType === "authentication_error" || /api key is invalid|authentication/i.test(msg)) {
     return new CategorizationServiceError(
-      "Categorization service rejected the API key (invalid or expired). Check KIMI_API_KEY on Render.",
+      "Categorization service rejected the API key (invalid or expired). Check MOONSHOT_KEY on Render.",
       "auth",
     );
   }
@@ -337,9 +333,9 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Model: Kimi moonshot-v1-32k by default (needs 32k+ context to fit the full
-  // taxonomy prompt + product batch). Override with CATEGORIZE_MODEL env var.
-  const model = process.env.CATEGORIZE_MODEL ?? process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "moonshot-v1-32k";
+  // Model: moonshot-v1-auto picks the 8k/32k/128k tier per request, so the full
+  // taxonomy prompt + product batch always fits. Override with CATEGORIZE_MODEL.
+  const model = process.env.CATEGORIZE_MODEL ?? "moonshot-v1-auto";
 
   // Larger batches for Haiku — it responds in ~1-2s vs 10-15s for Sonnet, so we can
   // send more products per call without blocking the wave for long.
@@ -904,7 +900,7 @@ ${pathHint}
   ];
 
   const { text, finishReason } = await generateText({
-    model: kimi(model),
+    model: moonshot(model),
     messages,
     // Temu/BestBuy/Mathis use a closed taxonomy — any valid path is correct.
     // A small temperature (0.3) helps the AI reason through niche product types

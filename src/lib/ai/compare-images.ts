@@ -1,8 +1,6 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
 
 export type ImageCompareVerdict = "match" | "mismatch" | "unsure";
 
@@ -74,8 +72,8 @@ export async function compareProductImages(
   liveImageUrl: string,
   productName: string,
 ): Promise<ImageCompareResult> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return { verdict: "unsure", reason: "ANTHROPIC_API_KEY not configured" };
+  if (!moonshotConfigured()) {
+    return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
 
   const [vendorImg, liveImg] = await Promise.all([
@@ -85,11 +83,9 @@ export async function compareProductImages(
   if (!vendorImg) return { verdict: "unsure", reason: "Could not download catalog image" };
   if (!liveImg) return { verdict: "unsure", reason: "Could not download marketplace image" };
 
-  const model = process.env.DEFAULT_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
-
   try {
     const { text } = await generateText({
-      model: anthropic(model),
+      model: moonshot(MOONSHOT_VISION_MODEL),
       messages: [
         {
           role: "user",
@@ -153,8 +149,8 @@ export async function compareVendorAgainstAllImages(
 ): Promise<ImageCompareResult> {
   const urls = liveImageUrls.filter((u) => u && u.startsWith("http")).slice(0, maxAngles);
   if (!urls.length) return { verdict: "unsure", reason: "No marketplace images available" };
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return { verdict: "unsure", reason: "ANTHROPIC_API_KEY not configured" };
+  if (!moonshotConfigured()) {
+    return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
 
   const [vendorImg, ...liveImgs] = await Promise.all([
@@ -165,14 +161,13 @@ export async function compareVendorAgainstAllImages(
   const usableLive = liveImgs.filter((i): i is FetchedImage => !!i);
   if (!usableLive.length) return { verdict: "unsure", reason: "Could not download marketplace image" };
 
-  const model = process.env.DEFAULT_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
   const listingLabel = usableLive.length === 1
     ? `Image 2 is from a marketplace listing`
     : `Images 2-${usableLive.length + 1} are different photos from a single marketplace listing`;
 
   try {
     const { text } = await generateText({
-      model: anthropic(model),
+      model: moonshot(MOONSHOT_VISION_MODEL),
       messages: [
         {
           role: "user",

@@ -123,7 +123,8 @@ export async function applyAiVerificationPasses(
 // warning. Degrades gracefully: without an API key nothing changes.
 
 async function applyImageComparison(results: VerifyResult[], products: Product[]): Promise<void> {
-  if (!process.env.ANTHROPIC_API_KEY) return;
+  const { moonshotConfigured } = await import("@/lib/ai/moonshot");
+  if (!moonshotConfigured()) return;
 
   const isUrl = (v: string | undefined): v is string => !!v && v.startsWith("http");
   const nameById = new Map(products.map((p) => [p.id, p.name]));
@@ -193,7 +194,8 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
 // genuine matches to "ok" and catches semantic mismatches word-overlap misses.
 
 async function applySemanticTitleCheck(results: VerifyResult[], products: Product[]): Promise<void> {
-  if (!process.env.ANTHROPIC_API_KEY) return;
+  const { moonshotConfigured } = await import("@/lib/ai/moonshot");
+  if (!moonshotConfigured()) return;
 
   const nameById = new Map(products.map((p) => [p.id, p.name]));
 
@@ -211,9 +213,7 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
   if (!targets.length) return;
 
   const { generateText } = await import("ai");
-  const { createAnthropic } = await import("@ai-sdk/anthropic");
-  const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const model = process.env.DEFAULT_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+  const { moonshot, MOONSHOT_TEXT_MODEL } = await import("@/lib/ai/moonshot");
 
   const CONCURRENCY = 5;
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
@@ -221,7 +221,7 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
     await Promise.all(batch.map(async (t) => {
       try {
         const { text } = await generateText({
-          model: anthropic(model),
+          model: moonshot(MOONSHOT_TEXT_MODEL),
           messages: [{
             role: "user",
             content:

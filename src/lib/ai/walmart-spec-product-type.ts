@@ -1,13 +1,11 @@
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
+import { moonshot, moonshotConfigured } from "@/lib/ai/moonshot";
 
 // Walmart's "Spec Product Type" is a required field on the new-listing template
 // (e.g. "Bicycle Tires", "Dream Catcher"). The valid list is Walmart's Product
 // Type taxonomy, fetched live from the Seller API — it is not embedded in the
 // template. This module caches that list and assigns each product a product
-// type from it via Claude.
-
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// type from it via the AI model.
 
 // In-process cache of the product-type NAMES. The taxonomy is large and
 // changes rarely, so one fetch serves a whole categorize run (and beyond, until
@@ -56,13 +54,15 @@ export async function assignSpecProductTypes(
   products: SpecTypeInput[],
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  if (!products.length || !process.env.ANTHROPIC_API_KEY) return result;
+  if (!products.length || !moonshotConfigured()) return result;
 
   const types = await loadSpecProductTypes();
   if (!types.length) return result; // taxonomy unavailable → leave blank
 
   const allowed = new Set(types);
-  const model = process.env.CATEGORIZE_ANTHROPIC_MODEL ?? "claude-sonnet-5";
+  // The full taxonomy list goes into every batch prompt, so the auto-tier model
+  // (up to 128k) keeps large taxonomies from overflowing context.
+  const model = process.env.CATEGORIZE_MODEL ?? "moonshot-v1-auto";
 
   // The full taxonomy can be very large. Send it once per batch; keep batches
   // small so the list + products fit comfortably in context.
@@ -84,7 +84,7 @@ export async function assignSpecProductTypes(
 
     try {
       const { text } = await generateText({
-        model: anthropic(model),
+        model: moonshot(model),
         prompt: `You are a Walmart listing expert. Assign each product the single best "Spec Product Type" from Walmart's official list below. Copy the value character-for-character. If none fits, use "" (empty).
 
 Valid Spec Product Types:

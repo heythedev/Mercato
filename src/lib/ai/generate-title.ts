@@ -1,12 +1,9 @@
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
+import { moonshot, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 import type { Product } from "@prisma/client";
 
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-// Haiku: fast, low-memory, handles title generation well at this batch size.
-// Override via TITLE_ANTHROPIC_MODEL env var if a stronger model is needed.
-const TITLE_MODEL = process.env.TITLE_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+// Override via TITLE_MODEL env var if a stronger model is needed.
+const TITLE_MODEL = process.env.TITLE_MODEL ?? MOONSHOT_TEXT_MODEL;
 
 const TITLE_RULES: Record<string, { maxLen: number; guidance: string }> = {
   walmart: {
@@ -107,7 +104,7 @@ export async function generateMarketplaceTitles(
 
     try {
       const { text } = await generateText({
-        model: anthropic(TITLE_MODEL),
+        model: moonshot(TITLE_MODEL),
         prompt: `You are an expert ${marketplace} e-commerce copywriter. Write a NEW, optimised product title for each product below.
 
 ${cfg.guidance}

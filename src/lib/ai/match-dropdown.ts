@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
+import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 
 /**
  * AI fallback for template dropdown (dataValidation) columns.
@@ -20,10 +20,8 @@ import { createAnthropic } from "@ai-sdk/anthropic";
  * the caller keeps its deterministic result — so an export never breaks on AI errors.
  */
 
-const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-// Haiku is sufficient for constrained option matching and keeps exports fast.
-const MODEL = process.env.DROPDOWN_ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+// Constrained option matching is a simple task; override via DROPDOWN_MODEL if needed.
+const MODEL = process.env.DROPDOWN_MODEL ?? MOONSHOT_TEXT_MODEL;
 
 /** Skip AI for option lists too large to fit sensibly in a prompt (e.g. full taxonomies). */
 const MAX_OPTIONS = 300;
@@ -62,11 +60,11 @@ export async function matchDropdownValues(
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!queries.length) return out;
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!moonshotConfigured()) {
     // Without a key every unmatched value blanks out, which looks like data loss in the
     // exported sheet. Say so loudly — this is a misconfiguration, not a normal outcome.
     console.error(
-      `[match-dropdown] ANTHROPIC_API_KEY is not set — ${queries.length} dropdown value(s) ` +
+      `[match-dropdown] MOONSHOT_KEY is not set — ${queries.length} dropdown value(s) ` +
       `cannot be matched and will be left blank in the export.`,
     );
     return out;
@@ -100,7 +98,7 @@ export async function matchDropdownValues(
         }).join("\n\n");
 
         const { text } = await generateText({
-          model: anthropic(MODEL),
+          model: moonshot(MODEL),
           temperature: 0,
           prompt: `You map vendor product values onto a marketplace template's fixed dropdown options.
 
