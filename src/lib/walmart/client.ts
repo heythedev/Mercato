@@ -72,7 +72,15 @@ export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | nul
     }
     const data = await res.json() as Record<string, unknown>;
     const items = (data.items as WalmartItem[] | undefined) ?? [];
-    return items.find((i) => normalizeUpc(i.upc ?? "") === normalized) ?? items[0] ?? null;
+    const exact = items.find((i) => normalizeUpc(i.upc ?? "") === normalized);
+    if (exact) return exact;
+    // A response whose items carry a DIFFERENT barcode is not our product —
+    // Walmart sometimes answers a UPC query with related items. Falling back to
+    // items[0] here silently swapped in a sibling SKU, so prefer an item with no
+    // barcode at all (unverifiable, reported as such) over one that contradicts.
+    const noUpc = items.find((i) => !normalizeUpc(i.upc ?? ""));
+    if (noUpc) return noUpc;
+    return null;
   } catch (e) {
     if (e instanceof RateLimitError) throw e; // let the limiter see the pushback
     console.error("[walmart] UPC search error:", e);
@@ -120,6 +128,43 @@ export async function searchWalmartByName(
     if (e instanceof RateLimitError) throw e; // let the limiter see the pushback
     console.error("[walmart] Name search error:", e);
     return null;
+  }
+}
+
+/**
+ * Keyword search returning ALL candidates rather than just the first hit.
+ *
+ * Walmart's relevance ranking is not identity: for a query like
+ * "Bon 11-482 Flat Slicker" it will happily rank a sibling SKU from the same
+ * product family first. Taking `items[0]` on faith is what produced ~1700 wrong
+ * matches in a real 7k run — adjacent model numbers, different sizes.
+ *
+ * Handing the caller every candidate lets it pick by evidence (barcode, model
+ * code, title) instead of by position, and reject the whole result set when
+ * nothing is actually the product being looked for.
+ */
+export async function searchWalmartCandidates(query: string): Promise<WalmartItem[]> {
+  try {
+    const headers = generateAuthHeaders();
+    const res = await fetchWithRetry(
+      `${BASE}/search?query=${encodeURIComponent(query)}&numItems=10`,
+      { headers },
+    );
+    if (!res.ok) {
+      console.error(`[walmart] Name search ${res.status}:`, await res.text().catch(() => ""));
+      return [];
+    }
+    const data = await res.json() as Record<string, unknown>;
+    const search = data.search as Record<string, unknown> | undefined;
+    return (
+      (search?.items as WalmartItem[] | undefined) ??
+      (data.items as WalmartItem[] | undefined) ??
+      []
+    );
+  } catch (e) {
+    if (e instanceof RateLimitError) throw e;
+    console.error("[walmart] Name search error:", e);
+    return [];
   }
 }
 

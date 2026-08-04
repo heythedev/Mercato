@@ -53,10 +53,13 @@ type AddMode = "file" | "manual";
 
 export function AdminTemplatesClient({ templates: initial, isAdmin = false, allowedTiles = [] }: { templates: Template[]; isAdmin?: boolean; allowedTiles?: string[] }) {
   const confirm = useConfirm();
-  // Marketplaces this user may use. amazon_us/amazon both map to the "amazon"
-  // tile via toTileId, so a single grant covers both variants.
+  // Marketplaces this user may use. Admins always get every marketplace; for
+  // everyone else it's their granted tiles. amazon_us/amazon both map to the
+  // "amazon" tile via toTileId, so a single grant covers both variants.
   const allowedSet = new Set(allowedTiles);
-  const allowedMarketplaces = MARKETPLACES.filter((mp) => allowedSet.has(toTileId(mp)));
+  const allowedMarketplaces = isAdmin
+    ? MARKETPLACES
+    : MARKETPLACES.filter((mp) => allowedSet.has(toTileId(mp)));
   const [templates, setTemplates] = useState(initial);
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState<AddMode>("file");
@@ -256,9 +259,10 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
             // Default the marketplace selects to one the user actually has access
             // to, so the add form never opens on a disallowed/hidden option.
             const first = allowedMarketplaces[0];
+            const allow = new Set(allowedMarketplaces);
             if (first) {
-              setFileForm((f) => (allowedSet.has(toTileId(f.marketplace)) ? f : { ...f, marketplace: first }));
-              setManualForm((f) => (allowedSet.has(toTileId(f.marketplace)) ? f : { ...f, marketplace: first }));
+              setFileForm((f) => (allow.has(f.marketplace) ? f : { ...f, marketplace: first }));
+              setManualForm((f) => (allow.has(f.marketplace) ? f : { ...f, marketplace: first }));
             }
             setShowAdd(true);
           }}
