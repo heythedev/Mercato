@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && prisma migrate deploy && next build",
-    "start": "next start -p 3020",
+    "start": "node --max-old-space-size=460 node_modules/.bin/next start -p 3020",
     "lint": "eslint",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "prisma db seed",
