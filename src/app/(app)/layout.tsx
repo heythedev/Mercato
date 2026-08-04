@@ -1,4 +1,5 @@
 import { requireUser } from "@/lib/auth-helpers";
+import { prisma } from "@/lib/db";
 import { SidebarProvider, SidebarInset } from "@/components/layout/sidebar-context";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AppNavbar } from "@/components/layout/app-navbar";
@@ -6,11 +7,19 @@ import { AppNavbar } from "@/components/layout/app-navbar";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
   const role = (user as { role?: string }).role ?? "user";
+  const isAdmin = role === "admin";
+
+  // Keepa is Amazon-specific — only surface the balance widget to admins or
+  // users granted the Amazon marketplace.
+  const account = isAdmin
+    ? null
+    : await prisma.user.findUnique({ where: { id: user.id }, select: { allowedMarketplaces: true } });
+  const showKeepa = isAdmin || (account?.allowedMarketplaces.includes("amazon") ?? false);
 
   return (
     <SidebarProvider>
       <div className="flex min-h-screen">
-        <Sidebar role={role} />
+        <Sidebar role={role} showKeepa={showKeepa} />
         <SidebarInset>
           {/* Floating action pill (theme + user menu) — replaces the old navbar */}
           <AppNavbar

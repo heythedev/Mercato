@@ -4,6 +4,7 @@ import { useState, useRef, useCallback } from "react";
 import { FileText, Plus, Trash2, X, ChevronDown, ChevronUp, Upload, FileSpreadsheet, Pencil, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { toTileId } from "@/lib/marketplaces/catalog";
 
 type Template = {
   id: string;
@@ -50,8 +51,12 @@ function parseColumns(raw: unknown): ColumnDef[] {
 
 type AddMode = "file" | "manual";
 
-export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { templates: Template[]; isAdmin?: boolean }) {
+export function AdminTemplatesClient({ templates: initial, isAdmin = false, allowedTiles = [] }: { templates: Template[]; isAdmin?: boolean; allowedTiles?: string[] }) {
   const confirm = useConfirm();
+  // Marketplaces this user may use. amazon_us/amazon both map to the "amazon"
+  // tile via toTileId, so a single grant covers both variants.
+  const allowedSet = new Set(allowedTiles);
+  const allowedMarketplaces = MARKETPLACES.filter((mp) => allowedSet.has(toTileId(mp)));
   const [templates, setTemplates] = useState(initial);
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState<AddMode>("file");
@@ -230,26 +235,38 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
     }
   }
 
-  const grouped = MARKETPLACES.map((mp) => ({
+  const grouped = allowedMarketplaces.map((mp) => ({
     label: mp, items: templates.filter((t) => t.marketplace === mp),
   })).filter((g) => g.items.length > 0);
 
   const ungrouped = templates.filter((t) => !MARKETPLACES.includes(t.marketplace));
   const allGroups = [...grouped, ...(ungrouped.length ? [{ label: "other", items: ungrouped }] : [])];
+  const visibleCount = allGroups.reduce((n, g) => n + g.items.length, 0);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <FileText className="w-4 h-4" />
-          {templates.length} template{templates.length !== 1 ? "s" : ""}
+          {visibleCount} template{visibleCount !== 1 ? "s" : ""}
         </div>
+        {allowedMarketplaces.length > 0 && (
         <button
-          onClick={() => setShowAdd(true)}
+          onClick={() => {
+            // Default the marketplace selects to one the user actually has access
+            // to, so the add form never opens on a disallowed/hidden option.
+            const first = allowedMarketplaces[0];
+            if (first) {
+              setFileForm((f) => (allowedSet.has(toTileId(f.marketplace)) ? f : { ...f, marketplace: first }));
+              setManualForm((f) => (allowedSet.has(toTileId(f.marketplace)) ? f : { ...f, marketplace: first }));
+            }
+            setShowAdd(true);
+          }}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition"
         >
           <Plus className="w-3.5 h-3.5" /> Add Template
         </button>
+        )}
       </div>
 
       {/* Add form */}
@@ -338,7 +355,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
                   onChange={(e) => setFileForm((f) => ({ ...f, marketplace: e.target.value }))}
                   className="h-9 rounded-lg border bg-background px-3 text-sm capitalize"
                 >
-                  {MARKETPLACES.map((mp) => <option key={mp} value={mp} className="capitalize">{mp}</option>)}
+                  {allowedMarketplaces.map((mp) => <option key={mp} value={mp} className="capitalize">{mp}</option>)}
                 </select>
                 <div className="sm:col-span-2">
                   <label className="text-xs text-muted-foreground mb-1 block">
@@ -374,7 +391,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
               <select value={manualForm.marketplace}
                 onChange={(e) => setManualForm((f) => ({ ...f, marketplace: e.target.value }))}
                 className="h-9 rounded-lg border bg-background px-3 text-sm capitalize">
-                {MARKETPLACES.map((mp) => <option key={mp} value={mp} className="capitalize">{mp}</option>)}
+                {allowedMarketplaces.map((mp) => <option key={mp} value={mp} className="capitalize">{mp}</option>)}
               </select>
               <input placeholder="Category (optional)" value={manualForm.category}
                 onChange={(e) => setManualForm((f) => ({ ...f, category: e.target.value }))}
@@ -456,7 +473,11 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false }: { 
                             onChange={(e) => setEditForm((f) => ({ ...f, marketplace: e.target.value }))}
                             className="h-8 rounded-lg border bg-background px-3 text-sm capitalize"
                           >
-                            {MARKETPLACES.map((mp) => <option key={mp} value={mp}>{mp}</option>)}
+                            {/* Include the template's current marketplace even if
+                                the user no longer has access, so editing keeps it. */}
+                            {Array.from(new Set([editForm.marketplace, ...allowedMarketplaces]))
+                              .filter(Boolean)
+                              .map((mp) => <option key={mp} value={mp}>{mp}</option>)}
                           </select>
                           <input
                             value={editForm.category}

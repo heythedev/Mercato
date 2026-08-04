@@ -11,6 +11,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
+import { toTileId } from "@/lib/marketplaces/catalog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { NewProjectModal } from "@/components/projects/new-project-modal";
 
@@ -395,14 +396,21 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
   const [newProjectOpen, setNewProjectOpen] = useState(false);
 
   const marketplaceOptions = useMemo(() => {
+    const allowed = new Set(allowedTiles);
+    // Never hide a marketplace the user actually has projects in (e.g. Wayfair,
+    // which isn't a grantable tile) — otherwise those projects become unfilterable.
+    const owned = new Set(initial.map((p) => toTileId(p.marketplace)));
     return Object.entries(MARKETPLACE_LABELS)
+      // Only marketplaces this user may use (admins get all tiles) or already owns.
+      // Variants like amazon_us collapse to the "amazon" tile via toTileId.
+      .filter(([value]) => allowed.has(toTileId(value)) || owned.has(toTileId(value)))
       .map(([value, label]) => ({
         value,
         label,
         logoDomain: MARKETPLACE_DOMAIN[value],
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, []);
+  }, [allowedTiles, initial]);
 
   const hasActiveFilters = !!(search || statusFilter || marketplaceFilter || dateFrom);
 
