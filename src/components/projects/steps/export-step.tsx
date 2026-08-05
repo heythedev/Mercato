@@ -24,8 +24,8 @@ type Product = {
   marketplaceCategory: string | null;
 };
 
-function matchTemplate(category: string, templates: Template[]): Template {
-  if (templates.length === 1) return templates[0];
+function matchTemplate(category: string, templates: Template[]): { template: Template; score: number } {
+  if (templates.length === 1) return { template: templates[0], score: 1 };
   // Fold accents so "Décor" ↔ "Decor" before stripping to alphanumerics — this
   // MUST match the server's findBestTemplate (zip.ts) exactly, or this preview
   // will disagree with the actual export (e.g. falsely warn a category will be
@@ -75,7 +75,7 @@ function matchTemplate(category: string, templates: Template[]): Template {
     );
     if (score > bestScore) { bestScore = score; best = t; }
   }
-  return best;
+  return { template: best, score: bestScore };
 }
 
 export function ExportStep({ projectId, projectName, marketplace, products, projectStatus }: {
@@ -174,7 +174,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const preExportMissingCategories: string[] = isTemu && templates.length > 1 && templates.some(isGenericTemplate)
     ? categories
         .map(([cat]) => cat)
-        .filter(cat => isGenericTemplate(matchTemplate(cat, templates)))
+        .filter(cat => isGenericTemplate(matchTemplate(cat, templates).template))
     : [];
 
   // Category-split (Mathis/Temu/BestBuy): needs categorized products; Mathis also requires templates
@@ -499,36 +499,57 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             </div>
           )}
 
-          {usesCategoryZip && categories.length > 0 && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Files that will be created</h3>
-              <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
-                {categories
-                  .filter(([category]) => !preExportMissingCategories.includes(category))
-                  .map(([category, count]) => {
-                    const matched = hasTemplates ? matchTemplate(category, templates) : null;
-                    return (
-                      <div key={category} className="flex items-center gap-3 px-4 py-2.5">
-                        <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
-                        <span className="text-sm flex-1 truncate">{category}</span>
-                        {matched && (
-                          <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
-                            <Shuffle className="w-3 h-3" />
-                            {matched.name}
-                            {matched.userId === null && (
-                              <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
-                            )}
-                          </span>
-                        )}
-                        <span className="text-xs text-muted-foreground shrink-0">
-                          {count} product{count !== 1 ? "s" : ""}
+          {usesCategoryZip && categories.length > 0 && (() => {
+            const rows = categories
+              .filter(([category]) => !preExportMissingCategories.includes(category))
+              .map(([category, count]) => {
+                const matchResult = hasTemplates ? matchTemplate(category, templates) : null;
+                const matched = matchResult?.template ?? null;
+                const hasGoodMatch = (matchResult?.score ?? 0) > 0;
+                return { category, count, matched, hasGoodMatch };
+              });
+            const noMatchCount = rows.filter(r => hasTemplates && !r.hasGoodMatch).length;
+            return (
+              <div>
+                <h3 className="text-sm font-medium mb-2">Files that will be created</h3>
+                {noMatchCount > 0 && (
+                  <div className="mb-3 rounded-xl bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 p-3 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-amber-800 dark:text-amber-300">
+                      <span className="font-semibold">{noMatchCount} categor{noMatchCount === 1 ? "y has" : "ies have"} no matching template.</span>{" "}
+                      Upload the missing templates in the Templates section, then click Refresh. Products in unmatched categories will export with standard columns.
+                    </p>
+                  </div>
+                )}
+                <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
+                  {rows.map(({ category, count, matched, hasGoodMatch }) => (
+                    <div key={category} className="flex items-center gap-3 px-4 py-2.5">
+                      <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
+                      <span className="text-sm flex-1 truncate">{category}</span>
+                      {hasTemplates && matched && hasGoodMatch && (
+                        <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
+                          <Shuffle className="w-3 h-3" />
+                          {matched.name}
+                          {matched.userId === null && (
+                            <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
+                          )}
                         </span>
-                      </div>
-                    );
-                  })}
+                      )}
+                      {hasTemplates && !hasGoodMatch && (
+                        <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 font-medium shrink-0">
+                          <AlertTriangle className="w-3 h-3" />
+                          No template
+                        </span>
+                      )}
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {count} product{count !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ── SINGLE-TEMPLATE MARKETPLACES ── */}
           {!usesCategoryZip && products.length === 0 && (
