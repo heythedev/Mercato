@@ -40,6 +40,27 @@ function isAmazonMarketplace(marketplace: string): boolean {
 }
 
 /**
+ * True when a result has two images that nothing has actually compared.
+ *
+ * Selecting AI targets by product status alone is not enough: an unchecked
+ * images row is reported as "ok" (a warning must mean something looks wrong,
+ * not that we didn't look), so these products are "ok" overall and would be
+ * filtered out before the AI pass ever saw them — which is precisely the case
+ * the deep check exists to resolve.
+ */
+function needsImageCheck(r: { fields: unknown }): boolean {
+  const fields = (r.fields ?? []) as Array<{ field: string; note?: string; liveImage?: string; stored?: string }>;
+  const img = fields.find((f) => f.field === "images");
+  if (!img) return false;
+  return (
+    !!img.stored?.startsWith("http") &&
+    !!img.liveImage?.startsWith("http") &&
+    // The note the comparison-less path sets; an AI verdict replaces it.
+    !!img.note?.startsWith("Images not compared")
+  );
+}
+
+/**
  * Product updates in flight at any one time.
  *
  * These are deliberately NOT wrapped in a transaction. Each row is independent,
@@ -415,7 +436,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         // by catalog size, so a large run no longer OOMs.
         if (useAi) {
           const flaggedInBatch = results.filter(
-            (r) => r.status === "warning" || r.status === "mismatch",
+            (r) => r.status === "warning" || r.status === "mismatch" || needsImageCheck(r),
           );
           if (flaggedInBatch.length) {
             const ids = new Set(flaggedInBatch.map((r) => r.productId));

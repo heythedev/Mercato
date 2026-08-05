@@ -121,7 +121,20 @@ export async function applyAiVerificationPasses(
 ): Promise<void> {
   let targets = results;
   if (options?.onlyFlagged) {
-    targets = results.filter((r) => r.status === "warning" || r.status === "mismatch");
+    // Keep flagged products AND any whose images were never compared. Filtering
+    // on status alone would drop the latter: an unchecked images row reports as
+    // "ok" (a warning must mean something looks wrong, not that we didn't look),
+    // so those products are "ok" overall — yet they are exactly what a deep
+    // check is for. Callers may pre-narrow the set; this is a safety net for
+    // direct callers, not the primary filter.
+    targets = results.filter(
+      (r) =>
+        r.status === "warning" ||
+        r.status === "mismatch" ||
+        r.fields.some(
+          (f) => f.field === "images" && f.note?.startsWith("Images not compared"),
+        ),
+    );
     if (!targets.length) return;
     // Narrow the product list to match, so the passes don't scan the full set.
     const ids = new Set(targets.map((r) => r.productId));
@@ -1457,6 +1470,53 @@ function compareToLive(
     severity: !vendorModel || !liveModel ? "ok" : modelMatch ? "ok" : "warning",
   });
 
+  // Colour — derived from the vendor title/description on our side, and from the
+  // marketplace's colour attribute (falling back to its title) on theirs.
+  // Reported as two explicit values so a reviewer can see both without opening
+  // the listing. A colour stated on only one side is "not stated", not a
+  // conflict: most vendor titles omit it entirely.
+  const vendorColour = extractColour(
+    `${p.name ?? ""} ${vendorDesc}`,
+    (p.vendorData as Record<string, unknown> | null) ?? null,
+  );
+  const liveColour = extractColour(
+    `${liveTitle} ${liveDesc}`,
+    liveData as Record<string, unknown>,
+  );
+  const colourComparable = !!vendorColour && !!liveColour;
+  const colourMatch = !colourComparable || vendorColour === liveColour;
+  fields.push({
+    field: "colour", label: "Colour",
+    stored: vendorColour ?? "Not stated",
+    live: liveColour ?? "Not stated",
+    match: colourMatch,
+    // Soft: a colour difference is worth surfacing, but marketplaces and vendors
+    // name shades differently often enough that it should not condemn a product
+    // on its own. It escalates only when the AI/other hard fields also disagree.
+    severity: colourMatch ? "ok" : "warning",
+    ...(colourComparable && !colourMatch
+      ? { note: `Colour differs: catalog "${vendorColour}" vs ${marketplace} "${liveColour}"` }
+      : !colourComparable
+        ? { note: "Colour not stated on both sides — could not compare" }
+        : {}),
+  });
+
+  // Pack / Set quantity — extracted from title and description on both sides.
+  // The title check above already treats a pack-quantity difference as a hard
+  // mismatch (a single unit is not a 6-pack); this row exists so the report
+  // shows the two quantities side by side, which is what a reviewer needs to
+  // confirm the call.
+  fields.push({
+    field: "pack", label: "Pack / Set Qty",
+    stored: String(vendorQty),
+    live: String(liveQty),
+    match: vendorQty === liveQty,
+    severity: vendorQty === liveQty ? "ok" : "mismatch",
+    ...(vendorQty !== liveQty
+      ? { note: `Pack quantity differs: catalog ${vendorQty} vs ${marketplace} ${liveQty}` }
+      : {}),
+  });
+
   // Images — start as "warning" whenever a vendor image exists; the AI visual
   // comparison post-pass (applyImageComparison) upgrades this to "ok" or
   // "mismatch" after actually looking at both images. If the AI is unavailable
@@ -1485,9 +1545,20 @@ function compareToLive(
   // identical images still surfaced as a Warning — and since the AI visual check
   // is opt-in, nothing ever cleared it. That made Warning the default state for
   // correctly-matched products rather than a signal worth acting on.
+  // Both sides have an image but nothing has actually compared them: the AI
+  // visual check is opt-in, so on a normal run this is simply "not checked".
+  // Reporting that as a warning made images the single largest source of noise
+  // (a client run surfaced ~6.9k warnings on 7k products), which buries the rows
+  // that do need attention. A warning must mean "something looks wrong", not
+  // "we didn't look" — so this is reported as ok with an explicit note, and the
+  // AI pass upgrades or downgrades it when the user runs a deep check.
+  const imagesUnchecked = hasVendorImage && hasLiveImages && !upcConfirmed;
   const imgSeverity: "ok" | "warning" =
     !hasVendorImage ? "ok"
     : upcConfirmed && hasLiveImages ? "ok"
+    : imagesUnchecked ? "ok"
+    // Only genuine evidence of a problem stays a warning: our catalog has an
+    // image and the marketplace listing has none.
     : "warning";
   // For the report `live` value: prefer a product page URL over raw image URL —
   // more useful in the exported report. The UI uses the dedicated liveImage /
@@ -1510,14 +1581,14 @@ function compareToLive(
     // with its verdict when it runs; if it's skipped (opt-in / no API key) or
     // errors, this stays so the row never shows a bare, unexplained state.
     note: imgSeverity === "warning"
-      ? (hasVendorImage && !hasLiveImages
-          ? "Catalog has an image but the marketplace listing has none — review manually."
-          : "Compare the catalog and marketplace images to confirm they show the same product.")
+      ? "Catalog has an image but the marketplace listing has none — review manually."
       : hasVendorImage && upcConfirmed && hasLiveImages
         // Say why this passed without a visual comparison — otherwise a silent
         // "ok" looks like the images were checked when they were not.
         ? "Product identity confirmed by exact UPC match — images not compared."
-        : undefined,
+        : imagesUnchecked
+          ? "Images not compared — run AI deep check to compare them visually."
+          : undefined,
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });
@@ -1918,6 +1989,119 @@ export function filterPackCompatible(vendorTitle: string, candidates: any[]): an
 // Extracts the item-count / pack size from a product title.
 // No mention → treated as 1 (single unit). Used to flag qty mismatches between
 // the vendor title and the live marketplace title (Pack of 6 ≠ Pack of 1).
+
+/**
+ * Colour words we recognise in titles, descriptions and attribute fields.
+ *
+ * Deliberately a fixed vocabulary rather than "any adjective": product titles
+ * are full of words that look like colours but are not (a "Silver Series"
+ * mixer, "Rose Gold Edition" packaging), and free-form guessing produces more
+ * false differences than it resolves. Multi-word entries come first so
+ * "rose gold" wins over a bare "gold", and "off white" over "white".
+ */
+const COLOUR_TERMS = [
+  "rose gold", "off white", "navy blue", "sky blue", "royal blue", "light blue",
+  "dark blue", "light grey", "dark grey", "light gray", "dark gray",
+  "stainless steel", "gun metal", "space gray", "space grey",
+  "black", "white", "grey", "gray", "silver", "gold", "bronze", "copper",
+  "brass", "chrome", "nickel", "red", "burgundy", "maroon", "pink", "magenta",
+  "purple", "violet", "lavender", "blue", "teal", "turquoise", "aqua", "cyan",
+  "green", "olive", "lime", "mint", "yellow", "mustard", "orange", "peach",
+  "coral", "brown", "tan", "beige", "cream", "ivory", "khaki", "charcoal",
+  "natural", "clear", "transparent", "multicolor", "multicolour", "multi color",
+  // Shade names marketplaces use where a vendor title says the base colour.
+  // canonicalColour() folds each onto its family so they compare equal.
+  "taupe", "mocha", "cocoa", "walnut", "almond", "chestnut", "espresso",
+  "coffee", "caramel", "hazelnut", "chocolate", "sage", "forest", "emerald",
+  "hunter", "crimson", "scarlet", "ruby", "indigo", "cobalt", "denim",
+  "blush", "rose", "salmon", "slate", "graphite", "pewter", "sand",
+  "oatmeal", "linen",
+] as const;
+
+/**
+ * Fold colour synonyms onto one canonical term.
+ *
+ * Vendors and marketplaces name the same shade differently — a "stainless
+ * steel" finish is listed as "silver", "grey" and "gray" are spelling variants,
+ * "multicolour" has three forms. Comparing the raw strings reported ~700 colour
+ * "differences" on a 7k catalog, nearly all of them naming the same colour.
+ */
+function canonicalColour(c: string): string {
+  const SYNONYM: Record<string, string> = {
+    "stainless steel": "silver",
+    chrome: "silver",
+    nickel: "silver",
+    // Marketplaces list specific shades where vendor titles say the base colour
+    // ("brown" vs "walnut"/"mocha"/"taupe"). Folding shades onto their family
+    // removed the largest remaining group of false differences; a genuine
+    // brown-vs-blue conflict still reports.
+    taupe: "brown", mocha: "brown", cocoa: "brown", walnut: "brown",
+    almond: "brown", chestnut: "brown", espresso: "brown", coffee: "brown",
+    caramel: "brown", hazelnut: "brown", chocolate: "brown",
+    sage: "green", forest: "green", emerald: "green", hunter: "green",
+    crimson: "red", scarlet: "red", ruby: "red",
+    indigo: "blue", cobalt: "blue", denim: "blue",
+    blush: "pink", rose: "pink", salmon: "pink",
+    slate: "grey", graphite: "grey", pewter: "grey",
+    sand: "beige", oatmeal: "beige", linen: "beige",
+    gray: "grey",
+    "light gray": "light grey",
+    "dark gray": "dark grey",
+    "space gray": "grey",
+    "space grey": "grey",
+    "gun metal": "grey",
+    charcoal: "grey",
+    multicolour: "multicolor",
+    "multi color": "multicolor",
+    transparent: "clear",
+    ivory: "cream",
+    magenta: "pink",
+    violet: "purple",
+    aqua: "turquoise",
+    cyan: "turquoise",
+    maroon: "burgundy",
+  };
+  return SYNONYM[c] ?? c;
+}
+
+/**
+ * Pull a colour from a product title, description, or marketplace attributes.
+ *
+ * Checks explicit colour attributes first (the marketplace usually publishes
+ * one, and it is authoritative), then falls back to scanning text. Returns the
+ * canonical lowercase term, or null when no colour is stated — which is common
+ * and is NOT the same as a colour mismatch.
+ */
+export function extractColour(
+  text: string,
+  attributes?: Record<string, unknown> | null,
+): string | null {
+  // 1. An explicit colour attribute beats anything parsed out of prose.
+  if (attributes) {
+    for (const [k, v] of Object.entries(attributes)) {
+      if (!/\bcolou?r\b/i.test(k)) continue;
+      const val = String(v ?? "").trim().toLowerCase();
+      if (!val) continue;
+      // "Multi-color" is Walmart's catch-all for "we didn't categorise this",
+      // not a claim about the product. Treating it as a colour produced a large
+      // batch of false differences (e.g. stainless steel vs multi-color), so
+      // read it as "not stated" and fall through to the text scan.
+      if (/^multi[\s-]?colou?r(ed)?$/.test(val) || val === "assorted" || val === "various") break;
+      const known = COLOUR_TERMS.find((c) => val === c || val.includes(c));
+      if (known) return canonicalColour(known);
+      // An unrecognised attribute value is still the marketplace's stated
+      // colour — report it rather than pretending none exists.
+      if (val.length <= 30) return val;
+    }
+  }
+
+  // 2. Scan the text. Word boundaries keep "redwood" from matching "red".
+  const t = ` ${text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ")} `;
+  for (const c of COLOUR_TERMS) {
+    if (t.includes(` ${c} `)) return canonicalColour(c);
+  }
+  return null;
+}
 
 export function extractPackQty(title: string, description = ""): number {
   // Check title first, then description as fallback

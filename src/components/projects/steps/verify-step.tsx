@@ -216,11 +216,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               Download Report
             </button>
           )}
-          {hasResults && (warningCount > 0 || mismatchCount > 0) && (
+          {/* Also shown when nothing is flagged: products whose images were never
+              compared report as "ok", and those are exactly what a deep check
+              resolves. Gating on warnings alone hid the button from them. */}
+          {hasResults && (
             <button
               onClick={() => onRunVerify(true, true)}
               disabled={loading}
-              title="Re-check flagged products with AI image and title comparison. Slower, and only examines warnings and mismatches."
+              title="Compare catalog and marketplace images with AI, ignoring differences in background, angle, lighting and cropping. Also re-checks flagged titles. Slower — it examines flagged products plus any whose images have not been compared."
               className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
             >
               <Sparkles className="w-4 h-4" />

@@ -46,6 +46,13 @@ function isFresh(at: Date, ttlMs: number): boolean {
 }
 
 /**
+ * Master kill switch (see the Keepa cache). When set, reads return nothing and
+ * writes are no-ops, so every Walmart lookup re-fetches and nothing is stored.
+ * Set `CACHE_DISABLED=true` to keep the table from growing; unset to restore.
+ */
+const CACHE_DISABLED = process.env.CACHE_DISABLED === "true";
+
+/**
  * Cache key for a name-search query. Queries are free-text and can be long, so
  * they're hashed rather than stored raw; the prefix keeps them from colliding
  * with the GTIN keyspace.
@@ -73,6 +80,7 @@ export type CachedLookup<T> = { hit: true; item: T | null } | { hit: false };
  * never cached (or have expired) and must be fetched.
  */
 export async function getCachedItems<T>(keys: string[]): Promise<Map<string, T | null>> {
+  if (CACHE_DISABLED) return new Map();
   const unique = [...new Set(keys.filter(Boolean))];
   if (!unique.length) return new Map();
 
@@ -99,6 +107,7 @@ export async function cacheItem(
   item: unknown | null,
   source: CacheSource,
 ): Promise<void> {
+  if (CACHE_DISABLED) return;
   if (!key) return;
   const data = {
     item: (item ?? null) as never,
@@ -117,6 +126,7 @@ export async function cacheItem(
 export async function cacheItems(
   entries: Array<{ key: string; item: unknown | null; source: CacheSource }>,
 ): Promise<void> {
+  if (CACHE_DISABLED) return;
   const valid = entries.filter((e) => e.key);
   if (!valid.length) return;
 

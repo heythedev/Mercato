@@ -36,6 +36,15 @@ function isFresh(at: Date, ttlMs: number): boolean {
 }
 
 /**
+ * Master kill switch. When set, the cache is fully bypassed: reads return
+ * nothing (so every lookup re-fetches from Keepa) and writes are no-ops (so
+ * nothing is ever stored). Trades API cost/latency for zero cache storage — set
+ * `CACHE_DISABLED=true` to keep the DB from growing. Flip it back off to restore
+ * caching with no other code change.
+ */
+const CACHE_DISABLED = process.env.CACHE_DISABLED === "true";
+
+/**
  * Look up cached code→ASIN mappings.
  *
  * Returns only entries still considered valid; expired negatives and stale
@@ -46,6 +55,7 @@ export async function getCachedCodeLookups(
   domain: number,
   codes: string[],
 ): Promise<Map<string, string[]>> {
+  if (CACHE_DISABLED) return new Map();
   const keys = [...new Set(codes.map(toGtin14).filter((c): c is string => !!c))];
   if (!keys.length) return new Map();
 
@@ -76,6 +86,7 @@ export async function cacheCodeLookup(
   asins: string[],
   source: LookupSource,
 ): Promise<void> {
+  if (CACHE_DISABLED) return;
   const code = toGtin14(rawCode);
   if (!code) return;
   const data = { asins, source, fetchedAt: new Date() };
@@ -96,6 +107,7 @@ export async function cacheCodeLookups(
   domain: number,
   entries: { code: string; asins: string[]; source: LookupSource }[],
 ): Promise<void> {
+  if (CACHE_DISABLED) return;
   const rows = entries
     .map((e) => ({ code: toGtin14(e.code), asins: e.asins, source: e.source }))
     .filter((r): r is { code: string; asins: string[]; source: LookupSource } => !!r.code);
@@ -135,6 +147,7 @@ export async function getCachedProducts(
   domain: number,
   asins: string[],
 ): Promise<Map<string, KeepaProduct>> {
+  if (CACHE_DISABLED) return new Map();
   const keys = [...new Set(asins.filter(Boolean))];
   if (!keys.length) return new Map();
 
@@ -157,6 +170,7 @@ export async function getCachedProducts(
 
 /** Store raw Keepa payloads. Never throws — a cache write can't fail a verify. */
 export async function cacheProducts(domain: number, products: KeepaProduct[]): Promise<void> {
+  if (CACHE_DISABLED) return;
   const rows = products.filter((p) => typeof p.asin === "string" && p.asin);
   if (!rows.length) return;
 
