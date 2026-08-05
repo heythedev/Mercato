@@ -3,7 +3,7 @@ import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate, Prisma } from "@prisma/client";
 import { generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
-import { createJob, resolveJob, rejectJob, getJob, setJobPhase } from "@/lib/export/job-store";
+import { createJob, resolveJob, rejectJob, getJob, setJobPhase, touchJob } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
 
 export const maxDuration = 300;
@@ -96,6 +96,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // All heavy work (loading products JSON, loading template fileData BYTEA) runs here in background.
   // The HTTP response returns the jobId above; client polls GET until done.
   void (async () => {
+    // Heartbeat: bump updatedAt every 20s for the whole job so long single
+    // operations (the product load, one giant model batch) never look dead to
+    // the client's stall detector even when the phase string is unchanged.
+    const heartbeat = setInterval(() => touchJob(jobId), 20_000);
     try {
       const useAutoMatch = autoMatch || !!templateId;
       const useTemplateIds = !autoMatch && !templateId && templateIds.length > 0;
@@ -245,7 +249,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         try {
           setJobPhase(jobId, `Generating optimised titles for ${products.length} products…`);
           const { generateMarketplaceTitles } = await import("@/lib/ai/generate-title");
-          const titleMap = await generateMarketplaceTitles("walmart", products);
+          // Per-batch progress: a 7k catalog makes ~470 title batches, and a
+          // single static phase for all of them reads as a stalled export to
+          // the client's 5-minute no-progress detector.
+          const titleMap = await generateMarketplaceTitles("walmart", products, (done, total) =>
+            setJobPhase(jobId, `Generating optimised titles ${done}/${total}…`),
+          );
           if (titleMap.size > 0) {
             products = products.map((p) =>
               titleMap.has(p.id) ? { ...p, name: titleMap.get(p.id)! } : p
@@ -253,6 +262,48 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           }
         } catch (err) {
           console.warn("[export] title generation failed, using vendor names:", err);
+        }
+      }
+
+      // ── Disambiguate identical titles ─────────────────────────────────────
+      // Vendor sheets carry genuine variants under one name: this catalog has
+      // 11 rows of "Caroline's Treasures Peacock Throw Pillow…", each a
+      // different artwork/size with its own UPC. Exported as-is they read as
+      // one product repeated with contradictory UPCs. Each duplicate gets a
+      // distinguishing suffix — its size when sizes differ, otherwise the
+      // design code from its SKU — so every row is identifiable.
+      {
+        const byName = new Map<string, typeof products>();
+        for (const p of products) {
+          const k = (p.name ?? "").trim().toLowerCase();
+          if (!k) continue;
+          const arr = byName.get(k);
+          if (arr) arr.push(p); else byName.set(k, [p]);
+        }
+        const suffixFor = (p: (typeof products)[number], sizesDiffer: boolean): string => {
+          const vd = (p.vendorData ?? {}) as Record<string, unknown>;
+          const dims = String(vd.dimensions ?? "").trim();
+          if (sizesDiffer && dims) return dims;
+          // Design code: the trailing alphanumeric run of the SKU
+          // (CTTS-DAC3248PW1818 → DAC3248PW1818) names the variant precisely.
+          const m = (p.vendorSku ?? "").match(/([A-Z0-9]{4,})$/i);
+          return m ? m[1] : (p.upc ?? "").slice(-6);
+        };
+        let disambiguated = 0;
+        for (const group of byName.values()) {
+          if (group.length < 2) continue;
+          const dims = new Set(group.map((p) => String(((p.vendorData ?? {}) as Record<string, unknown>).dimensions ?? "")));
+          const sizesDiffer = dims.size > 1;
+          for (const p of group) {
+            const suffix = suffixFor(p, sizesDiffer);
+            if (suffix && !p.name.toLowerCase().includes(suffix.toLowerCase())) {
+              p.name = `${p.name} - ${suffix}`;
+              disambiguated++;
+            }
+          }
+        }
+        if (disambiguated) {
+          console.log(`[export] disambiguated ${disambiguated} identical titles with size/design suffixes`);
         }
       }
 
@@ -341,6 +392,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       console.error("[export] background job failed:", msg);
       rejectJob(jobId, msg);
       await prisma.project.update({ where: { id }, data: { status: "categorized" } }).catch(() => {});
+    } finally {
+      // The heartbeat must stop with the job — touchJob is a no-op once the
+      // job leaves "processing", but the interval itself would leak forever.
+      clearInterval(heartbeat);
     }
   })();
 

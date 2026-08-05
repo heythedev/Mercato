@@ -225,6 +225,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       const startedAt = Date.now();
       let lastProgressAt = Date.now();
       let lastPhase = "";
+      let lastUpdatedAt = 0;
 
       while (Date.now() - startedAt < HARD_LIMIT_MS) {
         // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
@@ -298,6 +299,14 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           lastPhase = data.phase;
           lastProgressAt = Date.now();
           setStatusMsg(data.phase);
+        }
+        // The server also bumps updatedAt on every setJobPhase call, even when
+        // the phase string is unchanged. Honouring it (as the categorize poller
+        // does) means a long single-phase stretch — a slow DB load, one huge
+        // batch — still reads as alive rather than stalled.
+        if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAt) {
+          lastUpdatedAt = data.updatedAt;
+          lastProgressAt = Date.now();
         }
         if (Date.now() - lastProgressAt > STALL_LIMIT_MS) {
           toast.error("Export stalled — no progress from the server. Please try again.");

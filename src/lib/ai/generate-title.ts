@@ -79,19 +79,20 @@ function mineAttributes(vd: Record<string, unknown> | null): string {
 export async function generateMarketplaceTitles(
   marketplace: string,
   products: Product[],
+  onProgress?: (done: number, total: number) => void,
 ): Promise<Map<string, string>> {
   const titleMap = new Map<string, string>();
   if (!products.length) return titleMap;
 
   const cfg = TITLE_RULES[marketplace.toLowerCase()] ?? TITLE_RULES.walmart;
   const BATCH = Number(process.env.TITLE_BATCH_SIZE ?? 15);
-  // Batches were previously awaited one at a time, so a 500-product export made
-  // ~34 serial model calls (several minutes) before ZIP generation could even
-  // start — the single biggest cause of export timeouts. The batches are fully
-  // independent, so run several in flight at once. Raised 6 → 10 so several-
-  // thousand-product Walmart exports finish title generation well inside the
-  // request budget; tunable via env for larger runs.
-  const CONCURRENCY = Number(process.env.TITLE_CONCURRENCY ?? 10);
+  // The batches are fully independent, so run many in flight at once. The
+  // configured Moonshot models were measured sustaining 30-45 concurrent calls
+  // with flat latency and zero failures (see categorize.ts), and a 7k-product
+  // Walmart export makes ~470 batches — at the previous concurrency of 10 that
+  // was 20+ minutes of title generation alone, which the client's stall
+  // detector read as a dead export. Tunable via env.
+  const CONCURRENCY = Number(process.env.TITLE_CONCURRENCY ?? 30);
 
   // Precompute every batch's payload, then run them in bounded-concurrency waves.
   const batches: Product[][] = [];
@@ -155,14 +156,30 @@ ${JSON.stringify(input, null, 2)}`,
     }
   };
 
-  // Bounded-concurrency waves. Failures are already swallowed per batch, so one
-  // bad batch never takes down the rest of the export.
-  for (let i = 0; i < batches.length; i += CONCURRENCY) {
-    const wave = batches.slice(i, i + CONCURRENCY);
-    await Promise.all(wave.map((b, j) => runBatch(b, i + j)));
-    // Yield between waves so the event loop stays responsive to status polls.
-    await new Promise<void>((r) => setImmediate(r));
-  }
+  // Sliding worker pool rather than fixed waves: batch latency on the
+  // configured model varies several-fold, and a wave barrier makes every group
+  // cost its slowest call. A freed slot immediately takes the next batch, so
+  // all CONCURRENCY slots stay busy until the queue drains. Failures are
+  // already swallowed per batch, so one bad batch never takes down the export.
+  let nextBatch = 0;
+  let completed = 0;
+  const worker = async () => {
+    for (;;) {
+      const idx = nextBatch++;
+      if (idx >= batches.length) return;
+      await runBatch(batches[idx], idx);
+      completed++;
+      // Progress per batch keeps the export's phase string moving — without
+      // it, a 7k-product run sat behind one static phase for 20+ minutes and
+      // the client's stall detector killed a healthy export.
+      onProgress?.(Math.min(completed * BATCH, products.length), products.length);
+      // Yield so the event loop stays responsive to status polls.
+      await new Promise<void>((r) => setImmediate(r));
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker),
+  );
 
   return titleMap;
 }

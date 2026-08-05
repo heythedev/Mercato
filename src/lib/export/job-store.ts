@@ -38,6 +38,21 @@ export function createJob(id: string): void {
 }
 
 /** Report the current phase so the client can show real progress. */
+/**
+ * Bump a processing job's heartbeat without changing its phase.
+ *
+ * The client treats an advancing `updatedAt` as proof of life. Long single
+ * operations (a multi-minute product load against a remote database) set one
+ * phase and then go quiet, which the client's stall detector reads as a dead
+ * export — call this on an interval while such an operation runs.
+ */
+export function touchJob(id: string): void {
+  const j = jobs.get(id);
+  if (j && j.status === "processing") {
+    jobs.set(id, { ...j, updatedAt: Date.now() });
+  }
+}
+
 export function setJobPhase(id: string, phase: string): void {
   const j = jobs.get(id);
   if (j && j.status === "processing") {
