@@ -543,8 +543,12 @@ export async function categorizeProducts(
     // "Uncategorized is not acceptable — pick the closest path". Only products with a
     // resolved human-readable name qualify: raw SKU codes stay Uncategorized, because
     // forcing a choice on a bare code would just be a guess.
+    //
+    // Skip Best Buy: Uncategorized is a CORRECT answer for off-platform products
+    // (construction tools, masonry supplies, etc.). Forcing a choice would produce
+    // wrong electronics categories for products that don't belong on Best Buy at all.
     const stillRefused = allResults.filter((r) => r.category === "Uncategorized");
-    if (stillRefused.length > 0) {
+    if (stillRefused.length > 0 && !isBestBuyTop) {
       const inputById = new Map(products.map((p) => [p.id, p]));
       const retryable = stillRefused
         .map((r) => inputById.get(r.productId))
@@ -646,11 +650,13 @@ ${closestMatchRule}`;
     const taxonomy = formatBestBuyTaxonomyForPrompt();
     const closestMatchRule = `
 MANDATORY ASSIGNMENT RULES:
-1. Every product MUST get a leaf path. NEVER output "Uncategorized" for a product that can be sold on Best Buy.
-2. Focus on the product's primary technology function and use case.
-3. Peripherals (keyboards, mice, webcams) → Computers & Tablets > Computer Accessories.
-4. Wearable tech (smartwatches, fitness bands) → Health & Wellness > Wearables.
-5. If a product spans two categories, pick the one matching its PRIMARY function.`;
+1. Best Buy sells ONLY electronics, computers, home appliances, home theater, gaming, cameras, mobile devices, and health/fitness tech.
+2. If a product belongs on Best Buy, assign it the closest leaf path — do NOT use "Uncategorized".
+3. If a product clearly does NOT belong on Best Buy (e.g. construction tools, masonry supplies, hardware materials, industrial chemicals, plumbing parts, craft brushes, raw materials), you MUST use "Uncategorized".
+4. Focus on the product's primary technology function and use case.
+5. Peripherals (keyboards, mice, webcams) → Computers & Tablets > Computer Accessories.
+6. Wearable tech (smartwatches, fitness bands) → Health & Wellness > Wearables.
+7. If a product spans two categories, pick the one matching its PRIMARY function.`;
     categorySection = `exactly one leaf path from this Best Buy category taxonomy (copy character-for-character as "Category > Subcategory > Sub-Subcategory"):
 
 ${taxonomy}
@@ -729,7 +735,7 @@ If nothing fits, use "Uncategorized".`;
     : isTemu
     ? "You are a product categorization expert for the Temu marketplace seller portal. You are given the EXACT Temu category taxonomy (Category > Sub-Category > Product Type) sourced directly from Temu's seller listing system. Your job is to match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. The output must be directly usable for listing on Temu's seller portal without any manual remapping. Do not invent paths. Do not shorten paths to 1 or 2 levels. Always output the full 3-level path."
     : isBestBuy
-    ? "You are a product categorization expert for the Best Buy marketplace. You are given the EXACT Best Buy category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. Focus on the product's primary technology function. Do not invent paths. Always output the full 3-level path."
+    ? "You are a product categorization expert for the Best Buy marketplace. Best Buy sells ONLY electronics, computers, home appliances, home theater, gaming, cameras, mobile devices, and health/fitness tech. You are given the EXACT Best Buy category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. If a product clearly does not belong on Best Buy (construction tools, masonry materials, hardware supplies, industrial parts, raw materials, etc.), use 'Uncategorized'. Do not invent paths. Always output the full 3-level path for products that DO belong on Best Buy."
     : isSears
     ? "You are a product categorization expert for the Sears Marketplace. You are given the EXACT Sears category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. Sears sells tools, appliances, clothing, electronics, lawn care, automotive, and home goods. Do not invent paths. Always output the full 3-level path."
     : isWalmart
@@ -751,9 +757,10 @@ STEP 3 — Pick the single leaf within that section that most closely matches. C
 IMPORTANT: Base the category on WHAT the item is, not who it's for. A hat for a child is still a hat → Hats & Caps, not Kids' Clothing.`
     : isBestBuy
     ? `For EACH product, follow these steps:
-STEP 1 — Identify the product's primary technology function (e.g. "wireless headphones", "laptop", "smart doorbell").
-STEP 2 — Find the Best Buy taxonomy section matching that function (e.g. headphones → Audio > Headphones; laptop → Computers & Tablets > Laptops).
-STEP 3 — Pick the single leaf that most closely matches the product's specific type. Copy it character-for-character.`
+STEP 1 — Ask: "Is this an electronics, computer, appliance, home theater, gaming, camera, mobile device, or health/fitness tech product?" If NO (e.g. it is a construction tool, masonry supply, hardware material, industrial part, acid brush, raw material, plumbing part) → assign "Uncategorized" immediately. Do not go to step 2.
+STEP 2 — Identify the product's primary technology function (e.g. "wireless headphones", "laptop", "smart doorbell").
+STEP 3 — Find the Best Buy taxonomy section matching that function (e.g. headphones → Audio > Headphones; laptop → Computers & Tablets > Laptops).
+STEP 4 — Pick the single leaf that most closely matches the product's specific type. Copy it character-for-character.`
     : isSears
     ? `For EACH product, follow these steps:
 STEP 1 — Identify what department the product belongs to on Sears (Appliances, Tools & Hardware, Clothing, Electronics, Lawn & Garden, etc.).

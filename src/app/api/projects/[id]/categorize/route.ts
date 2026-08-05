@@ -353,21 +353,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       //      so the AI had nothing real to categorize. Never trust that guess.
       //   2. Low confidence — the AI itself signalled uncertainty below the threshold.
       //
-      // For constrained-taxonomy marketplaces (Temu, BestBuy, Mathis) the AI can ONLY
-      // return valid paths from a fixed CSV list — there is no risk of hallucinated category
-      // names. A "best guess within the valid set" at moderate confidence is always better
-      // than "Uncategorized", so we use a much lower threshold for these marketplaces.
-      // For constrained-taxonomy marketplaces (Temu, BestBuy, Mathis) the AI can ONLY
-      // return valid paths from a fixed CSV list — the validation+retry in categorizeProducts
-      // already rejects any hallucinated name. Applying a confidence gate here would exclude
-      // legitimate "nearest match" assignments that the AI marks 0.1–0.3 simply because
-      // the product is niche (crowns, kippot, tarboosh hats, etc.). Any valid path is better
-      // than Uncategorized for these marketplaces, so skip the confidence check entirely.
-      // Walmart categorizes against a fixed list too (rich taxonomy or the 75
-      // template values), so like the other constrained marketplaces any valid
-      // assignment beats "Uncategorized" — skip the confidence gate.
+      // For constrained-taxonomy marketplaces (Temu, BestBuy, Mathis, Walmart) the AI
+      // can ONLY return valid paths from a fixed list, so hallucinated names are already
+      // rejected. A "nearest valid match" at moderate confidence is generally better than
+      // Uncategorized — but a truly random guess at very low confidence is NOT.
+      // Example: "Acid Brush" landing in "TV & Home Theater > Home Theater in a Box"
+      // at confidence 0.05 should be Uncategorized, not exported in the wrong category.
+      //
+      // Two-tier threshold:
+      //   - Non-constrained (open-ended AI categories): use MIN_CONFIDENCE (default 0.6)
+      //   - Constrained (fixed CSV taxonomy): use a low floor (0.2) so legitimate
+      //     niche matches (crowns, kippot, tarboosh hats at 0.25–0.3) survive while
+      //     clearly wrong random guesses (tools → Home Theater at 0.05) are excluded.
       const isConstrainedTaxonomy = ["temu", "bestbuy", "sears", "mathis", "walmart"].includes(mpLower);
       const MIN_CONFIDENCE = Number(process.env.CATEGORIZE_MIN_CONFIDENCE ?? 0.6);
+      const CONSTRAINED_MIN_CONFIDENCE = Number(process.env.CATEGORIZE_CONSTRAINED_MIN_CONFIDENCE ?? 0.2);
       const inputById = new Map(productInputs.map((p) => [p.id, p]));
 
       for (const r of results) {
@@ -377,7 +377,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const stillRawSku = input
           ? looksLikeSkuName(input.name, input.sku) && !input.description && !input.vendorCategory
           : false;
-        const failsConfidence = !isConstrainedTaxonomy && r.confidence < MIN_CONFIDENCE;
+        const failsConfidence = isConstrainedTaxonomy
+          ? r.confidence < CONSTRAINED_MIN_CONFIDENCE
+          : r.confidence < MIN_CONFIDENCE;
         if (r.category !== "Uncategorized" && (stillRawSku || failsConfidence)) {
           r.category = "Uncategorized";
           r.path = "Uncategorized";
