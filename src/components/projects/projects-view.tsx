@@ -542,8 +542,8 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
 
   return (
     <div className="p-4 sm:p-8 max-w-6xl mx-auto">
-      {/* Header — extra right padding on large screens clears the fixed pill */}
-      <div className="flex items-center justify-between mb-6">
+      {/* Header — carded so the initial screen reads as structured panels */}
+      <div className="mb-6 flex items-center justify-between rounded-2xl border bg-card px-5 py-4 sm:px-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
           <p className="text-sm text-muted-foreground mt-1">
@@ -655,7 +655,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
 
       {/* Empty state */}
       {projects.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-24 text-center">
+        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed bg-card/50 py-24 text-center">
           <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
             <FolderOpen className="w-7 h-7 text-muted-foreground" />
           </div>
@@ -676,7 +676,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
 
       {/* No filter results */}
       {projects.length > 0 && filtered.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-24 text-center gap-3">
+        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed bg-card/50 py-24 text-center gap-3">
           <p className="text-sm text-muted-foreground">
             No projects match the current filters
             {search ? ` for “${search}”` : ""}
