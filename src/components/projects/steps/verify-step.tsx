@@ -195,9 +195,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                 : <>Verifying… {formatDuration(liveElapsedMs)} elapsed</>}
             </p>
           )}
-          {!loading && completedAt && formatDuration(elapsedMs) && (
+          {/* Same as Categorize: a run recovered after its process died has no
+              recorded duration, and gating on one hid the completion line
+              entirely. */}
+          {!loading && completedAt && (
             <p className="text-xs text-green-700 mt-1 font-medium">
-              Verification done in {formatDuration(elapsedMs)}
+              {formatDuration(elapsedMs)
+                ? <>Verification done in {formatDuration(elapsedMs)}</>
+                : <>Verification complete</>}
             </p>
           )}
         </div>

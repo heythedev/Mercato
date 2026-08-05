@@ -1198,8 +1198,18 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
       ].filter((u): u is string => !!u && u.startsWith("http"))
        .filter((u, i, arr) => arr.indexOf(u) === i); // deduplicate
 
+      // `variants` and `imageEntities` are the two largest fields Walmart
+      // returns and nothing downstream reads either: the angles we care about
+      // are already flattened into `images` above. Keeping them made liveData
+      // ~13KB per product, so a 7k export spent a minute loading 87MB of JSON
+      // it never looked at. Dropped before persisting.
+      const {
+        variants: _variants,
+        imageEntities: _imageEntities,
+        ...itemForStorage
+      } = item as typeof item & { variants?: unknown };
       const liveDataForCompare = {
-        ...item,
+        ...itemForStorage,
         images: allImages,
         description: item.shortDescription ?? item.longDescription ?? "",
         productUrl: walmartProductUrl,

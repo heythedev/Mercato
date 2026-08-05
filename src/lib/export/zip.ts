@@ -1,5 +1,33 @@
 import JSZip from "jszip";
-import type { Product, ExportTemplate } from "@prisma/client";
+import type { Product as PrismaProduct, ExportTemplate } from "@prisma/client";
+
+/**
+ * The product shape the export actually needs.
+ *
+ * Deliberately narrower than Prisma's `Product`: the export route selects only
+ * these columns, because loading every column (notably `liveData`, Walmart's
+ * full listing payload at ~13KB each) cost 87MB and ~68s on a 7k project before
+ * any rows were written. Typing against the real requirement keeps that select
+ * honest — adding a field here is a compile error until the route selects it.
+ */
+type Product = Pick<
+  PrismaProduct,
+  | "id"
+  | "name"
+  | "vendorSku"
+  | "upc"
+  | "asin"
+  | "brand"
+  | "price"
+  | "description"
+  | "imageUrl"
+  | "marketplaceCategory"
+  | "categoryPath"
+  | "specProductType"
+  | "verifyStatus"
+  | "vendorData"
+  | "liveData"
+>;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { matchDropdownValues, dropdownKey, type DropdownQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";

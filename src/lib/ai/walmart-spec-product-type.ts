@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured } from "@/lib/ai/moonshot";
+import { moonshot, moonshotConfigured, moonshotTemperature } from "@/lib/ai/moonshot";
 
 // Walmart's "Spec Product Type" is a required field on the new-listing template
 // (e.g. "Bicycle Tires", "Dream Catcher"). The valid list is Walmart's Product
@@ -96,7 +96,7 @@ ${list}
 Respond ONLY with a JSON array, no markdown:
 [{"index":1,"productType":"<exact value or empty>"},...]`,
         maxOutputTokens: 1500,
-        temperature: 0.2,
+        temperature: moonshotTemperature(model, 0.2),
       });
 
       const match = text.match(/\[[\s\S]*\]/);

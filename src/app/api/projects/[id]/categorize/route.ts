@@ -13,11 +13,62 @@ import {
   getCategorizeJob,
 } from "@/lib/categorize/job-store";
 import { preCategorizeStatus } from "@/lib/projects/marketplace-flow";
+import {
+  implausibleWalmartCategory,
+  parseWalmartCategoryPath,
+} from "@/lib/categorize/walmart-category";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
 // Matches rows to products by SKU → vendorSku exact match, then by normalized name.
 // Useful for the workflow: AI categorize → download CSV → verify/edit → re-upload.
+
+/** Rows per bulk statement. Keeps the parameter count well under Postgres' 65535 cap. */
+const CATEGORY_WRITE_CHUNK = 500;
+
+/**
+ * Write categorization verdicts with one statement per chunk instead of one
+ * round-trip per product.
+ *
+ * Prisma has no bulk-update-with-distinct-values primitive (`updateMany` applies
+ * a single identical payload), so this builds an UPDATE ... FROM (VALUES ...).
+ * Values are passed as query parameters, never interpolated.
+ *
+ * The database is remote — a round-trip measures ~280ms from here — so 7k
+ * per-row updates at 10 concurrent cost minutes of pure network wait after the
+ * AI work is already finished. That was the "Saving results …" tail at the end
+ * of a run.
+ */
+async function bulkUpdateCategories(
+  rows: Array<{ productId: string; category: string; path: string; confidence: number }>,
+  onProgress?: (saved: number, total: number) => void,
+): Promise<void> {
+  if (!rows.length) return;
+  let saved = 0;
+  for (let i = 0; i < rows.length; i += CATEGORY_WRITE_CHUNK) {
+    const chunk = rows.slice(i, i + CATEGORY_WRITE_CHUNK);
+    const params: unknown[] = [];
+    const tuples: string[] = [];
+    for (const r of chunk) {
+      const n = params.length;
+      params.push(r.productId, r.category, r.path, r.confidence);
+      tuples.push(`($${n + 1}::text, $${n + 2}::text, $${n + 3}::text, $${n + 4}::double precision)`);
+    }
+    params.push(new Date());
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Product" AS p
+       SET "marketplaceCategory" = v.category,
+           "categoryPath"        = v.path,
+           "categoryConfidence"  = v.confidence,
+           "categorizedAt"       = $${params.length}::timestamp
+       FROM (VALUES ${tuples.join(",")}) AS v(id, category, path, confidence)
+       WHERE p.id = v.id`,
+      ...params,
+    );
+    saved += chunk.length;
+    onProgress?.(saved, rows.length);
+  }
+}
 
 // ── GET /api/projects/[id]/categorize?jobId=… ─────────────────────────────────
 // Poll a background categorization job started by POST. Returns the current
@@ -225,6 +276,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             vendorSku: true,
             marketplaceCategory: true,
             vendorData: true,
+            // Verification stores the matched marketplace listing here, which
+            // includes Walmart's own category path for the product.
+            liveData: true,
           },
         },
       },
@@ -249,6 +303,46 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       vendorContext: extractVendorContext(p.vendorData),
     }));
 
+    // ── Walmart's own category, harvested during verification ──────────────────
+    // When a product was matched to a real Walmart listing, that listing carries
+    // Walmart's category path — the authoritative answer for a Walmart export,
+    // and far more specific than a model guess ("Home Improvement > Paint >
+    // Paint Supplies & Tools > Putty Knives" vs "Tools"). Using it costs nothing
+    // (already fetched and stored) and removes the product from the AI queue.
+    //
+    // "UNNAV" is Walmart's placeholder for items with no navigable category, so
+    // it is not a usable answer and those products fall through to the AI.
+    //
+    // Walmart's taxonomy is authoritative for a Walmart export, but its own
+    // filing is not always right: measured on a real 7k catalog, 13% of Bon
+    // masonry tools sat under a non-tool top level — a concrete "Animal Track
+    // Stamp" under Arts & Crafts > Scrapbooking, a masonry "Lewis Pin" under
+    // Auto Parts, a texture stamp under Home > Rugs > Doormats (because the
+    // name contains "Mat"). Those are Walmart's errors riding along with an
+    // otherwise correct product match.
+    //
+    // So a path is only taken when it is plausible for the product, and
+    // implausible ones fall through to the AI instead of being accepted
+    // silently. `implausibleWalmartCategory` holds that judgement.
+    const walmartCategoryById = new Map<string, { category: string; path: string }>();
+    let walmartRejected = 0;
+    if (mpLower === "walmart") {
+      for (const p of project.products) {
+        const parsed = parseWalmartCategoryPath(
+          (p.liveData as Record<string, unknown> | null)?.categoryPath,
+        );
+        if (!parsed) continue;
+        if (implausibleWalmartCategory(p.name, parsed.path)) { walmartRejected++; continue; }
+        walmartCategoryById.set(p.id, parsed);
+      }
+      if (walmartRejected) {
+        console.log(
+          `[categorize] rejected ${walmartRejected} Walmart categories as implausible ` +
+            `for the product — those fall through to the AI`,
+        );
+      }
+    }
+
     // Reuse existing categories for repeatable re-runs: unless `force`, only send
     // products that don't yet have a confident category (null or "Uncategorized").
     // Already-categorized products are left untouched, so their result never changes.
@@ -259,6 +353,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return !cat || cat === "Uncategorized";
     };
     productInputs = productInputs.filter((p) => needsCategorization(p.id));
+
+    // Apply Walmart's own categories first. These are authoritative for a
+    // Walmart export, so they are written straight through and skip the AI
+    // entirely — which also makes the run faster the more products verified
+    // successfully.
+    const fromWalmart = productInputs
+      .filter((p) => walmartCategoryById.has(p.id))
+      .map((p) => {
+        const w = walmartCategoryById.get(p.id)!;
+        return { productId: p.id, category: w.category, path: w.path, confidence: 1 };
+      });
+    if (fromWalmart.length) {
+      setCategorizeJobPhase(jobId, `Applying Walmart categories to ${fromWalmart.length} products…`);
+      await bulkUpdateCategories(fromWalmart);
+      for (const r of fromWalmart) existingCatById.set(r.productId, r.category);
+      productInputs = productInputs.filter((p) => !walmartCategoryById.has(p.id));
+      console.log(
+        `[categorize] ${fromWalmart.length} products took Walmart's own category; ` +
+          `${productInputs.length} left for the AI`,
+      );
+    }
 
     let enrichedCount = 0;
 
@@ -317,10 +432,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // don't rewrite the phase on every batch.
         (done, total, note) => {
           const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+          // `note` marks a refinement pass (off-list retry, web-search rescue,
+          // forced-choice), which runs AFTER every product already has a result
+          // and reports its own much smaller totals. Labelling those
+          // "Categorizing 4/33" alongside a saturated 7,021/7,021 counter reads
+          // as a stuck run, so name the pass instead.
           setCategorizeJobPhase(
             jobId,
             note
-              ? `Categorizing ${done}/${total} (${pct}%) — ${note}…`
+              ? `${note.charAt(0).toUpperCase()}${note.slice(1)} ${done}/${total}`
               : `Categorizing ${done}/${total} (${pct}%)…`,
           );
         },
@@ -331,17 +451,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // low-confidence or unresolved-SKU result to Uncategorized once the full run
         // settles, and that corrected value overwrites this one in the final write.
         async (wave) => {
-          await inChunks(wave, (r) =>
-            prisma.product.update({
-              where: { id: r.productId },
-              data: {
-                marketplaceCategory: r.category,
-                categoryPath: r.path,
-                categoryConfidence: r.confidence,
-                categorizedAt: new Date(),
-              },
-            }).catch(() => {}), // a transient write failure here is not fatal — the final bulk write is authoritative
-          );
+          // Bulk-write the wave rather than one round-trip per product: with a
+          // remote database (~280ms RTT) and 32 waves in flight, per-row writes
+          // here both slow the run and monopolise the connection pool.
+          // A transient failure is not fatal — the final write below is authoritative.
+          await bulkUpdateCategories(wave).catch(() => {});
         },
       );
 
@@ -386,18 +500,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         }
       }
 
-      // Chunked: issuing all ~1100 updates at once exhausts the pg connection
-      // pool and fails the whole run with "timeout exceeded when trying to connect".
-      await inChunks(results, (r) =>
-        prisma.product.update({
-          where: { id: r.productId },
-          data: {
-            marketplaceCategory: r.category,
-            categoryPath: r.path,
-            categoryConfidence: r.confidence,
-            categorizedAt: new Date(),
-          },
-        })
+      // Bulk write. Each row gets distinct values, which Prisma cannot express
+      // (`updateMany` applies ONE payload to every match), so this issues an
+      // UPDATE ... FROM (VALUES ...) per chunk instead of one round-trip per row.
+      //
+      // This matters far more than it looks: the database is remote and a single
+      // round-trip measures ~280ms from here, so 7k per-row updates at 10
+      // concurrent is ~3+ minutes of pure waiting AFTER every product already
+      // shows a category — the "still saving" tail at the end of a run. The same
+      // fix is applied to verification's persist path for the same reason.
+      await bulkUpdateCategories(results, (saved, total) =>
+        setCategorizeJobPhase(jobId, `Saving results ${saved}/${total}`),
       );
 
       // Fold new results into the existing-category map so the response counts

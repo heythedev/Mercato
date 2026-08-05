@@ -20,6 +20,20 @@ export const moonshot = (modelId: string) => provider.chat(modelId);
 
 export const moonshotConfigured = (): boolean => Boolean(apiKey);
 
+/**
+ * Clamp a requested temperature to what the given model actually accepts.
+ *
+ * The newer Kimi models (kimi-k2.*, kimi-k3) reject anything other than
+ * temperature 1 with `invalid temperature: only 1 is allowed for this model`,
+ * while the moonshot-v1 line takes the usual 0-1 range. Callers ask for the
+ * temperature the task wants; this makes that request safe regardless of which
+ * model is configured, so swapping CATEGORIZE_MODEL can never turn every AI
+ * call into a hard error.
+ */
+export function moonshotTemperature(modelId: string, desired: number): number {
+  return /^kimi-k[23]/.test(modelId) ? 1 : desired;
+}
+
 // moonshot-v1-auto picks the 8k/32k/128k tier per request, so prompts of any
 // size fit and are billed at the smallest tier that holds them.
 export const MOONSHOT_TEXT_MODEL = process.env.MOONSHOT_MODEL ?? "moonshot-v1-auto";

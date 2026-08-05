@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
-import type { ExportTemplate } from "@prisma/client";
+import type { ExportTemplate, Prisma } from "@prisma/client";
 import { generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
 import { createJob, resolveJob, rejectJob, getJob, setJobPhase } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
@@ -116,8 +116,33 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // userId is included so we can prefer user-uploaded templates over admin/global ones.
       setJobPhase(jobId, "Loading products…");
       const templateSelect = { id: true, name: true, marketplace: true, category: true, fileFormat: true, columns: true, fileData: true, userId: true };
-      const [project, rawTemplates] = await Promise.all([
-        prisma.project.findUnique({ where: { id }, include: { products: true } }),
+      // Select only the columns the export actually reads. `include: products`
+      // pulled every column, and `liveData` alone (Walmart's full listing
+      // payload, ~13KB per product) made this 87MB / ~68s for a 7k project —
+      // before a single row was written. The fields below are every product
+      // property referenced by the template writer.
+      const productSelect = {
+        id: true,
+        name: true,
+        vendorSku: true,
+        upc: true,
+        asin: true,
+        brand: true,
+        price: true,
+        description: true,
+        imageUrl: true,
+        marketplaceCategory: true,
+        categoryPath: true,
+        specProductType: true,
+        verifyStatus: true,
+        vendorData: true,
+        // liveData is fetched separately and slimmed — see below.
+      } as const;
+      const [project, rawTemplates, liveDataRows] = await Promise.all([
+        prisma.project.findUnique({
+          where: { id },
+          include: { products: { select: productSelect } },
+        }),
         useAutoMatch
           ? prisma.exportTemplate.findMany({
               where: { marketplace: { in: mpFamily, mode: "insensitive" }, OR: templateOwnerOr },
@@ -129,6 +154,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               select: templateSelect,
               orderBy: { createdAt: "asc" },
             }),
+        // liveData holds Walmart's full listing payload (~13KB/product), but the
+        // export reads only a handful of scalar fields from it. Stripping the
+        // heavy nested values IN SQL cuts the transferred payload roughly 3x
+        // (76MB → 26MB on a 7k project) instead of shipping them across the wire
+        // just to ignore them.
+        //
+        // `- 'key'` removes a top-level key from a jsonb value. Only `variants`
+        // and `imageEntities` are dropped: they are the two largest fields
+        // (~45% of the payload) and nothing reads them — the image angles the
+        // export needs are already flattened into `images`. Description and
+        // image fields are KEPT, because the generic "match a template column
+        // name against a liveData key" fallback can legitimately resolve a
+        // Description or Image column from them.
+        prisma.$queryRawUnsafe<Array<{ id: string; liveData: unknown }>>(
+          `SELECT id, ("liveData" - 'variants' - 'imageEntities') AS "liveData"
+           FROM "Product"
+           WHERE "projectId" = $1 AND "liveData" IS NOT NULL`,
+          id,
+        ),
       ]);
 
       // Both user-uploaded and admin/global templates are included in the export pool.
@@ -143,6 +187,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       if (!project) throw new Error("Project not found");
 
+      // Attach the slimmed liveData fetched above. Products with no verification
+      // result simply have none, matching the previous behaviour.
+      const liveById = new Map(liveDataRows.map((r) => [r.id, r.liveData]));
+      type ExportProduct = (typeof project.products)[number] & { liveData: Prisma.JsonValue };
+      let products: ExportProduct[] = project.products.map((p) => ({
+        ...p,
+        liveData: (liveById.get(p.id) ?? null) as Prisma.JsonValue,
+      }));
+
       // ── Catalog back-fill: images + attributes ────────────────────────────────
       // SKU-only vendor sheets carry no images/size/color; those come from the vendor's
       // own catalog (Modway/TOV). Categorize-time enrichment only runs for rows whose
@@ -154,11 +207,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       try {
         const { fillCatalogAttributes } = await import("@/lib/ai/resolve-sku");
         const fills = await fillCatalogAttributes(
-          project.products,
+          products,
           (done, total) => setJobPhase(jobId, `Fetching product images ${done}/${total}…`),
         );
         if (fills.size > 0) {
-          project.products = project.products.map((p) => {
+          products = products.map((p) => {
             const f = fills.get(p.id);
             if (!f) return p;
             return {
@@ -168,7 +221,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               vendorData: { ...((p.vendorData ?? {}) as object), ...f.attributes } as any,
             };
           });
-          const originalById = new Map(project.products.map((p) => [p.id, p]));
+          const originalById = new Map(products.map((p) => [p.id, p]));
           await inChunks([...fills.keys()], (productId) => {
             const merged = originalById.get(productId);
             return prisma.product.update({
@@ -188,13 +241,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       // For Walmart exports: AI-generate optimised titles (meaning + attributes + USPs)
       // instead of copying vendor titles word-for-word. Falls back to vendor name on error.
-      if (mpLower === "walmart" && project.products.length > 0) {
+      if (mpLower === "walmart" && products.length > 0) {
         try {
-          setJobPhase(jobId, `Generating optimised titles for ${project.products.length} products…`);
+          setJobPhase(jobId, `Generating optimised titles for ${products.length} products…`);
           const { generateMarketplaceTitles } = await import("@/lib/ai/generate-title");
-          const titleMap = await generateMarketplaceTitles("walmart", project.products);
+          const titleMap = await generateMarketplaceTitles("walmart", products);
           if (titleMap.size > 0) {
-            project.products = project.products.map((p) =>
+            products = products.map((p) =>
               titleMap.has(p.id) ? { ...p, name: titleMap.get(p.id)! } : p
             );
           }
@@ -247,31 +300,31 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // a manually chosen template instead of auto-matching by category.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(project.products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
       } else if (usesCategoryExport && allTemplates.length) {
         // With uploaded templates: match each category to the closest template
         // and export in that template's column format — one file per matched category
-        const result = await generateCategoryZip(project.products, allTemplates, projectMeta.marketplace, templateId);
+        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId);
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
       } else if (usesCategoryExport) {
         // Without templates: split by AI-assigned category using flat columns
-        zipBuffer = await generateFlatCategoryZip(project.products, projectMeta.marketplace) as Buffer;
+        zipBuffer = await generateFlatCategoryZip(products, projectMeta.marketplace) as Buffer;
       } else if (isSears && allTemplates.length) {
         // Sears uses one generic template — all products go into a single file.
         // No category-splitting needed since a single template covers the whole catalogue.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(project.products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
       } else if (!allTemplates.length) {
         // No templates → flat export (one file, standard columns)
-        zipBuffer = await generateFlatExport(project.products, projectMeta.marketplace) as Buffer;
+        zipBuffer = await generateFlatExport(products, projectMeta.marketplace) as Buffer;
       } else if (useAutoMatch) {
-        const result = await generateCategoryZip(project.products, allTemplates, projectMeta.marketplace, templateId);
+        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId);
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
       } else {
-        zipBuffer = await generateExportZip(project.products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
+        zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
       }
 
       // A one-file export (Walmart always produces a single sheet) is delivered

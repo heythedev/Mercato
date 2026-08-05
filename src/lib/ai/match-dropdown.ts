@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
+import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, moonshotTemperature } from "@/lib/ai/moonshot";
 
 /**
  * AI fallback for template dropdown (dataValidation) columns.
@@ -99,7 +99,7 @@ export async function matchDropdownValues(
 
         const { text } = await generateText({
           model: moonshot(MODEL),
-          temperature: 0,
+          temperature: moonshotTemperature(MODEL, 0),
           prompt: `You map vendor product values onto a marketplace template's fixed dropdown options.
 
 For each item choose the single allowed option that is the nearest compatible match for the vendor value.

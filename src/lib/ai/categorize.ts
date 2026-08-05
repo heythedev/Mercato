@@ -1,5 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
-import { moonshot } from "@/lib/ai/moonshot";
+import { moonshot, moonshotTemperature } from "@/lib/ai/moonshot";
 import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
 import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
@@ -333,18 +333,38 @@ export async function categorizeProducts(
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
   //
-  // Model: moonshot-v1-auto picks the 8k/32k/128k tier per request, so the full
-  // taxonomy prompt + product batch always fits. Override with CATEGORIZE_MODEL.
-  const model = process.env.CATEGORIZE_MODEL ?? "moonshot-v1-auto";
+  // Model. Benchmarked on real batches of 40 products against the Walmart
+  // taxonomy (5 trials each, all returning valid on-list JSON):
+  //   kimi-k2.7-code-highspeed  ~11.8s   ← default
+  //   moonshot-v1-auto          ~28.0s
+  //   kimi-k3                   ~35.2s
+  // The highspeed model is ~2.4x faster at equal output quality, which is the
+  // difference between a ~5 minute and a ~12 minute run on a 7k catalog.
+  // Override with CATEGORIZE_MODEL.
+  const model = process.env.CATEGORIZE_MODEL ?? "kimi-k2.7-code-highspeed";
 
-  // Larger batches for Haiku — it responds in ~1-2s vs 10-15s for Sonnet, so we can
-  // send more products per call without blocking the wave for long.
-  // Tunable via CATEGORIZE_BATCH_SIZE / CATEGORIZE_PARALLELISM env vars.
+  // Batch size is bounded by output tokens, not speed: ~110 tokens per item and
+  // an 8000-token cap means 40 is close to the ceiling before the JSON array
+  // truncates and drops the tail of the batch.
+  //
+  // Parallelism is what governs throughput. The default used to be 10, chosen
+  // when this ran on a model that answered in ~1-2s. The configured model
+  // (moonshot-v1-auto) takes 35-90s for a batch of 40, so 10 in flight yielded
+  // only ~3.8 products/s — about 30 minutes for a 7k catalog.
+  //
+  // Measured against the live API, latency per call stays flat as concurrency
+  // rises and nothing is rate-limited:
+  //   parallel 10 →  4.2 products/s
+  //   parallel 20 →  8.3 products/s
+  //   parallel 30 → 21.8 products/s
+  //   parallel 45 → 26.0 products/s   (0 failures)
+  // 32 keeps a margin under the highest tested value while cutting a 7k run
+  // from ~30 minutes to roughly 5. Tunable via CATEGORIZE_PARALLELISM.
   const BATCH = Number(
     process.env.CATEGORIZE_BATCH_SIZE ??
       ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 40 : isConstrained ? 40 : 30),
   );
-  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? (isConstrained ? 10 : 12));
+  const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? 32);
 
   // ── Pre-classification: cache + keyword rules ────────────────────────────────
   // Products handled here are removed from the AI batch queue entirely.
@@ -420,45 +440,60 @@ export async function categorizeProducts(
     throw new Error("Max retries exceeded");
   }
 
-  for (let i = 0; i < batches.length; i += PARALLEL) {
-    const group = batches.slice(i, i + PARALLEL);
-    const settled = await Promise.allSettled(
-      group.map((b) => withRateLimitRetry(() => categorizeBatch(b, marketplace, model, availableCategories)))
+  // Sliding worker pool rather than fixed waves.
+  //
+  // The previous shape awaited Promise.allSettled over each group of PARALLEL
+  // batches, so every wave cost the SLOWEST call in it. Batch latency on this
+  // model ranges ~35-90s, which meant most slots sat idle waiting for one
+  // straggler and effective throughput was a fraction of what the API allows
+  // (measured 9.4 products/s in-pipeline vs 26/s for the same concurrency
+  // without the barrier). Here a finished slot immediately takes the next
+  // batch, so all PARALLEL slots stay busy until the queue drains.
+  {
+    let nextBatch = 0;
+    const worker = async () => {
+      for (;;) {
+        const idx = nextBatch++;
+        if (idx >= batches.length || systemicError) return;
+        const b = batches[idx];
+
+        let batchResults: CategorizeResult[];
+        try {
+          batchResults = await withRateLimitRetry(() =>
+            categorizeBatch(b, marketplace, model, availableCategories),
+          );
+        } catch (reason) {
+          failedBatches++;
+          console.error(`[categorize] Batch ${idx} failed (${marketplace}, model=${model}):`, reason);
+          // An auth/quota/model error means every remaining batch will fail the
+          // same way — capture it so we abort with an actionable message rather
+          // than grinding through the whole run producing all-Uncategorized.
+          systemicError ??= classifySystemicError(reason);
+          if (systemicError) return;
+          batchResults = b.map((p) => ({
+            productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1,
+          }));
+        }
+
+        allResults.push(...batchResults);
+        // Cache successful AI results so future runs/re-runs can skip the API.
+        for (const r of batchResults) {
+          if (r.category !== "Uncategorized" && r.category !== batchFallback) {
+            const p = productById.get(r.productId);
+            if (p) categorizationCache.set(cacheKey(marketplace, p.name), r.category);
+          }
+        }
+        onProgress?.(Math.min(preCount + allResults.length, products.length), products.length);
+        // Stream this batch's verdicts to the caller immediately.
+        if (batchResults.length) await onResults?.(batchResults);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PARALLEL, batches.length) }, worker),
     );
-    const waveResults: CategorizeResult[] = [];
-    settled.forEach((s, gi) => {
-      if (s.status === "rejected") {
-        failedBatches++;
-        console.error(`[categorize] Batch ${i + gi} failed (${marketplace}, model=${model}):`, s.reason);
-        // An auth/quota/model error means every remaining batch will fail the same
-        // way — capture it so we can abort with an actionable message rather than
-        // grinding through the whole run producing all-Uncategorized results.
-        systemicError ??= classifySystemicError(s.reason);
-      }
-      waveResults.push(...(s.status === "fulfilled"
-        ? s.value
-        : group[gi].map((p) => ({ productId: p.id, category: batchFallback, path: batchFallback, confidence: 0.1 }))));
-    });
-    allResults.push(...waveResults);
-    // Bail out early on a systemic failure — no point calling the API hundreds of
-    // more times with a key/quota/model that will reject every one of them.
+    // Bail out on a systemic failure — no point calling the API hundreds of more
+    // times with a key/quota/model that will reject every one of them.
     if (systemicError) throw systemicError;
-    // Minimal inter-wave pause — Haiku handles high concurrency well.
-    // Actual rate-limit backpressure is handled by withRateLimitRetry (2s→4s→8s→16s).
-    if (isConstrained && i + PARALLEL < batches.length) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    // Cache successful AI results so future runs/re-runs can skip the API.
-    for (const r of waveResults) {
-      if (r.category !== "Uncategorized" && r.category !== batchFallback) {
-        const p = productById.get(r.productId);
-        if (p) categorizationCache.set(cacheKey(marketplace, p.name), r.category);
-      }
-    }
-    // Report progress after every parallel wave (include pre-classified in total done).
-    onProgress?.(Math.min(preCount + allResults.length, products.length), products.length);
-    // Stream this wave's verdicts to the caller immediately.
-    if (waveResults.length) await onResults?.(waveResults);
   }
 
   // No systemic error was classified, but EVERY batch still failed (e.g. a
@@ -480,25 +515,35 @@ export async function categorizeProducts(
     const offListIds = new Set(allResults.filter((r) => !allowed.has(r.category)).map((r) => r.productId));
     if (offListIds.size > 0) {
       const retryInputs = products.filter((p) => offListIds.has(p.id));
+      // Concurrent: serial batches against a ~45s model made this correction
+      // pass a multi-minute tail after the main run already looked complete.
+      const retryBatches: ProductInput[][] = [];
       for (let i = 0; i < retryInputs.length; i += BATCH) {
-        const batch = retryInputs.slice(i, i + BATCH);
-        const changed: CategorizeResult[] = [];
-        try {
-          const retryResults = await categorizeBatch(batch, marketplace, model, availableCategories, true);
-          for (const r of retryResults) {
-            if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; r.confidence = 0.1; }
-            const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) { allResults[idx] = r; changed.push(r); }
+        retryBatches.push(retryInputs.slice(i, i + BATCH));
+      }
+      let retryDone = 0;
+      for (let w = 0; w < retryBatches.length; w += PARALLEL) {
+        const wave = retryBatches.slice(w, w + PARALLEL);
+        await Promise.all(wave.map(async (batch) => {
+          const changed: CategorizeResult[] = [];
+          try {
+            const retryResults = await categorizeBatch(batch, marketplace, model, availableCategories, true);
+            for (const r of retryResults) {
+              if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; r.confidence = 0.1; }
+              const idx = allResults.findIndex((a) => a.productId === r.productId);
+              if (idx !== -1) { allResults[idx] = r; changed.push(r); }
+            }
+          } catch {
+            for (const p of batch) {
+              const idx = allResults.findIndex((a) => a.productId === p.id);
+              if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; changed.push(allResults[idx]); }
+            }
           }
-        } catch {
-          for (const p of batch) {
-            const idx = allResults.findIndex((a) => a.productId === p.id);
-            if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; changed.push(allResults[idx]); }
-          }
-        }
-        // Keep the run visibly alive through the retry pass too.
-        onProgress?.(Math.min(i + batch.length, retryInputs.length), retryInputs.length, "correcting off-list results");
-        if (changed.length) await onResults?.(changed);
+          // Keep the run visibly alive through the retry pass too.
+          retryDone += batch.length;
+          onProgress?.(Math.min(retryDone, retryInputs.length), retryInputs.length, "correcting off-list results");
+          if (changed.length) await onResults?.(changed);
+        }));
       }
     }
 
@@ -518,20 +563,34 @@ export async function categorizeProducts(
         slice.forEach((p, j) => enriched.push({ ...p, searchContext: contexts[j] ?? undefined }));
       }
 
-      // Re-categorize with search context in small batches
-      for (let i = 0; i < enriched.length; i += 5) {
-        const batch = enriched.slice(i, i + 5);
-        const changed: CategorizeResult[] = [];
-        try {
-          const rescueResults = await categorizeBatchWithContext(batch, marketplace, model, availableCategories);
-          for (const r of rescueResults) {
-            if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; }
-            const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) { allResults[idx] = r; changed.push(r); }
-          }
-        } catch { /* keep Uncategorized */ }
-        onProgress?.(Math.min(i + batch.length, enriched.length), enriched.length, "web-search rescue");
-        if (changed.length) await onResults?.(changed);
+      // Re-categorize with search context. Batches stay small (search context
+      // makes each item's prompt much longer), but they run CONCURRENTLY: with a
+      // model that takes ~45s per call, issuing these one after another made the
+      // rescue pass alone take minutes on a catalog with a few dozen
+      // uncategorized products — the long silent tail at the end of a run.
+      const RESCUE_BATCH = 5;
+      const RESCUE_PARALLEL = 8;
+      const rescueBatches: Array<typeof enriched> = [];
+      for (let i = 0; i < enriched.length; i += RESCUE_BATCH) {
+        rescueBatches.push(enriched.slice(i, i + RESCUE_BATCH));
+      }
+      let rescueDone = 0;
+      for (let w = 0; w < rescueBatches.length; w += RESCUE_PARALLEL) {
+        const wave = rescueBatches.slice(w, w + RESCUE_PARALLEL);
+        await Promise.all(wave.map(async (batch) => {
+          const changed: CategorizeResult[] = [];
+          try {
+            const rescueResults = await categorizeBatchWithContext(batch, marketplace, model, availableCategories);
+            for (const r of rescueResults) {
+              if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; }
+              const idx = allResults.findIndex((a) => a.productId === r.productId);
+              if (idx !== -1) { allResults[idx] = r; changed.push(r); }
+            }
+          } catch { /* keep Uncategorized */ }
+          rescueDone += batch.length;
+          onProgress?.(Math.min(rescueDone, enriched.length), enriched.length, "web-search rescue");
+          if (changed.length) await onResults?.(changed);
+        }));
       }
     }
 
@@ -553,20 +612,31 @@ export async function categorizeProducts(
       const retryable = stillRefused
         .map((r) => inputById.get(r.productId))
         .filter((p): p is ProductInput => !!p && !looksLikeSkuName(p.name, p.sku));
+      // Concurrent for the same reason as the rescue pass above: serial batches
+      // against a ~45s model turn this final cleanup into minutes of apparent
+      // hang after every product already shows a category.
+      const forcedBatches: ProductInput[][] = [];
       for (let i = 0; i < retryable.length; i += BATCH) {
-        const batch = retryable.slice(i, i + BATCH);
-        const changed: CategorizeResult[] = [];
-        try {
-          const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true);
-          for (const r of forced) {
-            // Accept only a verbatim on-list path; anything else stays Uncategorized.
-            if (r.category === "Uncategorized" || !allowed.has(r.category)) continue;
-            const idx = allResults.findIndex((a) => a.productId === r.productId);
-            if (idx !== -1) { allResults[idx] = { ...r, confidence: Math.min(r.confidence, 0.5) }; changed.push(allResults[idx]); }
-          }
-        } catch { /* keep Uncategorized */ }
-        onProgress?.(Math.min(i + batch.length, retryable.length), retryable.length, "resolving refused products");
-        if (changed.length) await onResults?.(changed);
+        forcedBatches.push(retryable.slice(i, i + BATCH));
+      }
+      let forcedDone = 0;
+      for (let w = 0; w < forcedBatches.length; w += PARALLEL) {
+        const wave = forcedBatches.slice(w, w + PARALLEL);
+        await Promise.all(wave.map(async (batch) => {
+          const changed: CategorizeResult[] = [];
+          try {
+            const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true);
+            for (const r of forced) {
+              // Accept only a verbatim on-list path; anything else stays Uncategorized.
+              if (r.category === "Uncategorized" || !allowed.has(r.category)) continue;
+              const idx = allResults.findIndex((a) => a.productId === r.productId);
+              if (idx !== -1) { allResults[idx] = { ...r, confidence: Math.min(r.confidence, 0.5) }; changed.push(allResults[idx]); }
+            }
+          } catch { /* keep Uncategorized */ }
+          forcedDone += batch.length;
+          onProgress?.(Math.min(forcedDone, retryable.length), retryable.length, "resolving refused products");
+          if (changed.length) await onResults?.(changed);
+        }));
       }
     }
   }
@@ -899,7 +969,15 @@ ${pathHint}
   // products of the batch — the "large batches failing" symptom. ~110 tokens/item plus
   // headroom keeps the whole array inside the response.
   const perItemTokens = usesTaxonomySheet ? 110 : 80;
-  const maxOutputTokens = Math.min(8000, Math.max(1500, products.length * perItemTokens + 500));
+  // Reasoning models (kimi-k2.*/k3) spend part of this budget on hidden
+  // reasoning tokens before emitting any JSON — measured at ~300 on a batch of
+  // 40, and a small budget can be consumed entirely by reasoning, returning
+  // empty text. The extra headroom keeps the visible JSON inside the cap.
+  const reasoningHeadroom = /^kimi-k[23]/.test(model) ? 1500 : 0;
+  const maxOutputTokens = Math.min(
+    16000,
+    Math.max(1500, products.length * perItemTokens + 500 + reasoningHeadroom),
+  );
 
   const messages: ModelMessage[] = [
     { role: "system", content: systemPrompt },
@@ -912,7 +990,7 @@ ${pathHint}
     // Temu/BestBuy/Mathis use a closed taxonomy — any valid path is correct.
     // A small temperature (0.3) helps the AI reason through niche product types
     // instead of anchoring on the first taxonomy entry seen at temperature=0.
-    temperature: usesTaxonomySheet ? 0.3 : 0,
+    temperature: moonshotTemperature(model, usesTaxonomySheet ? 0.3 : 0),
     maxOutputTokens,
   });
 

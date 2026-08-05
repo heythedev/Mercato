@@ -1,4 +1,15 @@
-import type { Product } from "@prisma/client";
+import type { Product as PrismaProduct } from "@prisma/client";
+
+/**
+ * Only the fields the eligibility gates actually read. Keeping this narrow lets
+ * callers pass a partially-selected product — the export route selects a subset
+ * of columns for performance — without widening their query just to satisfy a
+ * type.
+ */
+type Product = Pick<
+  PrismaProduct,
+  "id" | "brand" | "marketplaceCategory" | "categoryPath" | "vendorData"
+>;
 
 /**
  * Wayfair-specific pre-export eligibility checks.
@@ -186,12 +197,12 @@ export function classifyWayfairProduct(p: Product): WayfairEligibility {
  * export and the review report (excluded + flagged). Kept products include flagged
  * ones — flags are advisory (surfaced in the report), exclusions are removed.
  */
-export function applyWayfairEligibility(products: Product[]): {
-  eligible: Product[];
+export function applyWayfairEligibility<T extends Product>(products: T[]): {
+  eligible: T[];
   report: WayfairEligibility[];
 } {
   const report: WayfairEligibility[] = [];
-  const eligible: Product[] = [];
+  const eligible: T[] = [];
   for (const p of products) {
     const r = classifyWayfairProduct(p);
     if (r.decision !== "keep") report.push(r);

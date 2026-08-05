@@ -1,6 +1,16 @@
 import { generateText } from "ai";
 import { moonshot, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
-import type { Product } from "@prisma/client";
+import type { Product as PrismaProduct } from "@prisma/client";
+
+/**
+ * Only the fields title generation reads. Narrow on purpose so callers that
+ * select a subset of product columns (the export route, for performance) can
+ * pass their rows without widening the query.
+ */
+type Product = Pick<
+  PrismaProduct,
+  "id" | "name" | "brand" | "description" | "marketplaceCategory" | "vendorData"
+>;
 
 // Override via TITLE_MODEL env var if a stronger model is needed.
 const TITLE_MODEL = process.env.TITLE_MODEL ?? MOONSHOT_TEXT_MODEL;

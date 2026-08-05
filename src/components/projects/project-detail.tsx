@@ -112,6 +112,8 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   const [loadingStep, setLoadingStep] = useState<number | null>(null);
   // Cumulative progress across the multi-pass verify loop; null when idle.
   const [verifyProgress, setVerifyProgress] = useState<{ done: number; total: number } | null>(null);
+  /** Latest server-reported categorization phase (e.g. "web-search rescue"). */
+  const [categorizePhase, setCategorizePhase] = useState<string | null>(null);
 
   const currentStepIndex = stepIndex(project.status);
 
@@ -341,6 +343,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     setLoadingStep(2);
     // Move to the Categorize step up front so its loader shows there.
     setActiveStep(2);
+    setCategorizePhase(null);
     // A re-categorize (force) clears the previous run's results first, otherwise the
     // stale list would sit there looking like fresh progress — matches runVerify.
     if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null })));
@@ -410,6 +413,11 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
         if (data.phase && data.phase !== lastPhase) {
           lastPhase = data.phase;
           lastProgressAt = Date.now();
+          // Surface it: after the streaming writes land, every product has a
+          // category row and the "N / total" counter saturates, but refinement
+          // passes are still running. The phase is the only honest progress
+          // signal left at that point.
+          setCategorizePhase(data.phase);
         }
         if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAt) {
           lastUpdatedAt = data.updatedAt;
@@ -431,6 +439,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       stopPolling();
       setLoading(false);
       setLoadingStep(null);
+      setCategorizePhase(null);
     }
   }
 
@@ -686,6 +695,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             marketplace={project.marketplace}
             elapsedMs={project.categorizeMs ?? null}
             completedAt={project.categorizeCompletedAt ?? null}
+            phase={categorizePhase}
             onRunCategorize={runCategorize}
             onNext={() => setActiveStep(3)}
           />

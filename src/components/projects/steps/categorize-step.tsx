@@ -17,7 +17,7 @@ type Product = {
   categorizedAt: Date | null;
 };
 
-export function CategorizeStep({ projectId, projectName, products, categorizedCount, loading, projectStatus, marketplace, elapsedMs, completedAt, onRunCategorize, onNext }: {
+export function CategorizeStep({ projectId, projectName, products, categorizedCount, loading, projectStatus, marketplace, elapsedMs, completedAt, phase, onRunCategorize, onNext }: {
   projectId: string;
   projectName: string;
   products: Product[];
@@ -27,6 +27,8 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   marketplace: string;
   elapsedMs?: number | null;
   completedAt?: string | null;
+  /** Server-reported phase, shown once the per-product count can no longer move. */
+  phase?: string | null;
   onRunCategorize: (force?: boolean) => void;
   onNext: () => void;
 }) {
@@ -134,14 +136,34 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           </p>
           {loading && formatDuration(liveElapsedMs) && (
             <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
-              {categorized.length + uncategorized.length > 0 && total > 0
-                ? <>Categorizing {(categorized.length + uncategorized.length).toLocaleString()} / {total.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>
-                : <>Categorizing… {formatDuration(liveElapsedMs)} elapsed</>}
+              {(() => {
+                const done = categorized.length + uncategorized.length;
+                // Every product has a row once the streaming writes land, but the
+                // run isn't over: off-list retry, web-search rescue and the
+                // forced-choice pass still refine results afterwards. Showing
+                // "7,021 / 7,021" through all of that reads as a frozen timer, so
+                // once the count saturates we show what the server is actually
+                // doing instead of a count that can no longer move.
+                if (done > 0 && total > 0 && done < total) {
+                  return <>Categorizing {done.toLocaleString()} / {total.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>;
+                }
+                if (done > 0 && total > 0) {
+                  return <>{phase ?? "Finishing up"} · {formatDuration(liveElapsedMs)} elapsed</>;
+                }
+                return <>Categorizing… {formatDuration(liveElapsedMs)} elapsed</>;
+              })()}
             </p>
           )}
-          {!loading && completedAt && formatDuration(elapsedMs) && (
+          {/* Show completion even when the duration is unknown. A run whose
+              process died after writing every product but before stamping
+              categorizeMs has a 0/null duration; requiring a formatted duration
+              here made the whole line vanish, so a finished run looked as if it
+              had never completed. */}
+          {!loading && completedAt && (
             <p className="text-xs text-green-700 mt-1 font-medium">
-              Categorization done in {formatDuration(elapsedMs)}
+              {formatDuration(elapsedMs)
+                ? <>Categorization done in {formatDuration(elapsedMs)}</>
+                : <>Categorization complete</>}
             </p>
           )}
         </div>
