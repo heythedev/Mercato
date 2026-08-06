@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { AlertTriangle, Download, FileSpreadsheet, Package, RefreshCw, Shuffle } from "lucide-react";
+import { AlertTriangle, Download, FileSpreadsheet, Package, Plus, RefreshCw, Shuffle, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
@@ -101,6 +101,10 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   // For single-template marketplaces: user picks which template to export with
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [missingTemplateCategories, setMissingTemplateCategories] = useState<string[]>([]);
+  const [uploadForCategory, setUploadForCategory] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadName, setUploadName] = useState("");
+  const [uploading, setUploading] = useState(false);
   const mountedRef = useRef(true);
 
   const isMathis = marketplace === "mathis";
@@ -158,6 +162,43 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
     void loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketplace]);
+
+  function openUploadPanel(category: string) {
+    setUploadForCategory(category);
+    setUploadFile(null);
+    setUploadName(category);
+  }
+
+  function closeUploadPanel() {
+    setUploadForCategory(null);
+    setUploadFile(null);
+    setUploadName("");
+  }
+
+  async function submitTemplateUpload() {
+    if (!uploadFile || !uploadName.trim() || !uploadForCategory) return;
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", uploadFile);
+      form.append("name", uploadName.trim());
+      form.append("marketplace", marketplace);
+      form.append("category", uploadForCategory);
+      const res = await fetch("/api/templates", { method: "POST", body: form });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({ error: "Upload failed" })) as { error?: string };
+        toast.error(error ?? "Upload failed");
+        return;
+      }
+      toast.success(`Template "${uploadName.trim()}" added`);
+      closeUploadPanel();
+      await loadTemplates(true);
+    } catch {
+      toast.error("Upload failed — check your connection");
+    } finally {
+      if (mountedRef.current) setUploading(false);
+    }
+  }
 
   // One entry per output FILE. Mathis produces one file per department, so all
   // "Baby & Kids > …" leaf paths collapse into a single "Baby & Kids" row here —
@@ -391,32 +432,84 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                 <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 mb-2">
                   Upload a dedicated template for each category below, then click Refresh to pick it up here (no page reload needed).
                 </p>
-                <ul className="flex flex-col gap-1 mb-3">
+                <ul className="flex flex-col gap-1.5 mb-3">
                   {allMissing.map((cat) => (
-                    <li key={cat} className="flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-                      {cat}
+                    <li key={cat}>
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                        <span className="text-xs text-amber-800 dark:text-amber-300 flex-1">{cat}</span>
+                        {uploadForCategory !== cat && (
+                          <button
+                            onClick={() => openUploadPanel(cat)}
+                            className="flex items-center gap-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:underline shrink-0"
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add
+                          </button>
+                        )}
+                      </div>
+                      {uploadForCategory === cat && (
+                        <div className="mt-2 ml-3.5 rounded-xl border border-amber-300 dark:border-amber-700 bg-background p-3 flex flex-col gap-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium">Add template for &ldquo;{cat}&rdquo;</span>
+                            <button onClick={closeUploadPanel} className="text-muted-foreground hover:text-foreground">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <label className={cn(
+                            "flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-border p-4 cursor-pointer transition hover:border-amber-400 hover:bg-amber-50/30 dark:hover:bg-amber-950/10",
+                            uploadFile && "border-amber-500 bg-amber-50/20 dark:bg-amber-950/10"
+                          )}>
+                            <Upload className="w-4 h-4 text-muted-foreground" />
+                            <span className="text-xs text-muted-foreground">
+                              {uploadFile ? uploadFile.name : "Click to pick .xlsx / .csv"}
+                            </span>
+                            <input
+                              type="file"
+                              accept=".xlsx,.xlsm,.csv,.tsv"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0] ?? null;
+                                setUploadFile(f);
+                                if (f && uploadName === cat) setUploadName(f.name.replace(/\.[^.]+$/, ""));
+                              }}
+                            />
+                          </label>
+                          <input
+                            type="text"
+                            value={uploadName}
+                            onChange={(e) => setUploadName(e.target.value)}
+                            placeholder="Template name"
+                            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                          <div className="flex gap-2 justify-end">
+                            <button
+                              onClick={closeUploadPanel}
+                              className="text-xs px-3 py-1.5 rounded-lg border border-border hover:bg-muted/40"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={submitTemplateUpload}
+                              disabled={!uploadFile || !uploadName.trim() || uploading}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white font-medium disabled:opacity-50 hover:bg-amber-700"
+                            >
+                              {uploading ? "Uploading…" : "Upload"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
-                <div className="flex items-center gap-2">
-                  <a
-                    href="/templates"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-600 text-white text-xs font-medium hover:bg-amber-700 transition"
-                  >
-                    <FileSpreadsheet className="w-3.5 h-3.5" />
-                    Upload template
-                  </a>
-                  <button
-                    onClick={() => loadTemplates(true)}
-                    disabled={refreshing}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 text-xs font-medium hover:bg-amber-200 dark:hover:bg-amber-900/60 transition disabled:opacity-50"
-                  >
-                    <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
-                    {refreshing ? "Refreshing…" : "Refresh templates"}
-                  </button>
-                </div>
+                <button
+                  onClick={() => loadTemplates(true)}
+                  disabled={refreshing}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 text-xs font-medium hover:bg-amber-200 dark:hover:bg-amber-900/60 transition disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
+                  {refreshing ? "Refreshing…" : "Refresh templates"}
+                </button>
               </div>
             </div>
           </div>
@@ -549,33 +642,95 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                     <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                     <p className="text-xs text-amber-800 dark:text-amber-300">
                       <span className="font-semibold">{noMatchCount} categor{noMatchCount === 1 ? "y has" : "ies have"} no matching template.</span>{" "}
-                      Upload the missing templates in the Templates section, then click Refresh. Products in unmatched categories will export with standard columns.
+                      Click <span className="font-semibold">+ Add</span> next to a category to upload its template directly, or go to the Templates section.
                     </p>
                   </div>
                 )}
                 <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
                   {rows.map(({ category, count, matched, hasGoodMatch }) => (
-                    <div key={category} className="flex items-center gap-3 px-4 py-2.5">
-                      <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
-                      <span className="text-sm flex-1 truncate">{category}</span>
-                      {hasTemplates && matched && hasGoodMatch && (
-                        <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
-                          <Shuffle className="w-3 h-3" />
-                          {matched.name}
-                          {matched.userId === null && (
-                            <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
-                          )}
+                    <div key={category}>
+                      <div className="flex items-center gap-3 px-4 py-2.5">
+                        <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
+                        <span className="text-sm flex-1 truncate">{category}</span>
+                        {hasTemplates && matched && hasGoodMatch && (
+                          <span className="flex items-center gap-1 text-xs text-blue-600 font-medium shrink-0">
+                            <Shuffle className="w-3 h-3" />
+                            {matched.name}
+                            {matched.userId === null && (
+                              <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
+                            )}
+                          </span>
+                        )}
+                        {hasTemplates && !hasGoodMatch && (
+                          <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 font-medium shrink-0">
+                            <AlertTriangle className="w-3 h-3" />
+                            No template
+                          </span>
+                        )}
+                        {hasTemplates && !hasGoodMatch && uploadForCategory !== category && (
+                          <button
+                            onClick={() => openUploadPanel(category)}
+                            className="flex items-center gap-1 text-xs text-primary font-medium shrink-0 hover:underline"
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add
+                          </button>
+                        )}
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {count} product{count !== 1 ? "s" : ""}
                         </span>
+                      </div>
+                      {uploadForCategory === category && (
+                        <div className="mx-4 mb-3 rounded-xl border border-border bg-background p-3 flex flex-col gap-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium">Add template for &ldquo;{category}&rdquo;</span>
+                            <button onClick={closeUploadPanel} className="text-muted-foreground hover:text-foreground">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <label className={cn(
+                            "flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-border p-4 cursor-pointer transition hover:border-primary/60 hover:bg-muted/30",
+                            uploadFile && "border-primary/50 bg-primary/5"
+                          )}>
+                            <Upload className="w-4 h-4 text-muted-foreground" />
+                            <span className="text-xs text-muted-foreground">
+                              {uploadFile ? uploadFile.name : "Click to pick .xlsx / .csv"}
+                            </span>
+                            <input
+                              type="file"
+                              accept=".xlsx,.xlsm,.csv,.tsv"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0] ?? null;
+                                setUploadFile(f);
+                                if (f && uploadName === category) setUploadName(f.name.replace(/\.[^.]+$/, ""));
+                              }}
+                            />
+                          </label>
+                          <input
+                            type="text"
+                            value={uploadName}
+                            onChange={(e) => setUploadName(e.target.value)}
+                            placeholder="Template name"
+                            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+                          />
+                          <div className="flex gap-2 justify-end">
+                            <button
+                              onClick={closeUploadPanel}
+                              className="text-xs px-3 py-1.5 rounded-lg border border-border hover:bg-muted/40"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={submitTemplateUpload}
+                              disabled={!uploadFile || !uploadName.trim() || uploading}
+                              className="text-xs px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-medium disabled:opacity-50 hover:opacity-90"
+                            >
+                              {uploading ? "Uploading…" : "Upload"}
+                            </button>
+                          </div>
+                        </div>
                       )}
-                      {hasTemplates && !hasGoodMatch && (
-                        <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 font-medium shrink-0">
-                          <AlertTriangle className="w-3 h-3" />
-                          No template
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        {count} product{count !== 1 ? "s" : ""}
-                      </span>
                     </div>
                   ))}
                 </div>
