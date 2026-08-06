@@ -257,7 +257,14 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       if (!startRes.ok) {
         const text = await startRes.text().catch(() => "");
         let msg = "Export failed";
-        try { msg = (JSON.parse(text) as { error?: string }).error ?? (text.slice(0, 300) || msg); } catch { msg = text.slice(0, 300) || msg; }
+        const isHtml = text.trimStart().startsWith("<");
+        if (isHtml) {
+          msg = startRes.status === 502 || startRes.status === 503
+            ? "Server is busy — export couldn't start. Please try again in a moment."
+            : `Export failed (${startRes.status}) — please try again.`;
+        } else {
+          try { msg = (JSON.parse(text) as { error?: string }).error ?? (text.slice(0, 300) || msg); } catch { msg = text.slice(0, 300) || msg; }
+        }
         toast.error(msg);
         return;
       }
