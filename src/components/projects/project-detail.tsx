@@ -708,6 +708,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             products={products}
             verifiedCount={exportCount}
             projectStatus={project.status}
+            isNewListing={!!project.isNewListing}
           />
         )}
           </div>

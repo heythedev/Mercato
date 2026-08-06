@@ -85,13 +85,14 @@ function matchTemplate(category: string, templates: Template[]): { template: Tem
   return { template: best, score: bestScore };
 }
 
-export function ExportStep({ projectId, projectName, marketplace, products, projectStatus }: {
+export function ExportStep({ projectId, projectName, marketplace, products, projectStatus, isNewListing }: {
   projectId: string;
   projectName: string;
   marketplace: string;
   products: Product[];
   verifiedCount: number;
   projectStatus: string;
+  isNewListing?: boolean;
 }) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(false);
@@ -100,9 +101,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const [refreshing, setRefreshing] = useState(false);
   // For single-template marketplaces: user picks which template to export with
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
-  // Walmart supports two modes: "new" (per-category, one file each) and
-  // "existing" (item match — all products in one file using a selected template)
-  const [walmartMode, setWalmartMode] = useState<"new" | "existing">("new");
+  // Walmart mode auto-derives from the project's isNewListing flag set at creation.
+  // New listing (checkbox checked) → per-category ZIP. Existing listing → item match.
+  const [walmartMode, setWalmartMode] = useState<"new" | "existing">(isNewListing ? "new" : "existing");
   const [missingTemplateCategories, setMissingTemplateCategories] = useState<string[]>([]);
   const [uploadForCategory, setUploadForCategory] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
