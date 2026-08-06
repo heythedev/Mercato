@@ -100,6 +100,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const [refreshing, setRefreshing] = useState(false);
   // For single-template marketplaces: user picks which template to export with
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  // Walmart supports two modes: "new" (per-category, one file each) and
+  // "existing" (item match — all products in one file using a selected template)
+  const [walmartMode, setWalmartMode] = useState<"new" | "existing">("new");
   const [missingTemplateCategories, setMissingTemplateCategories] = useState<string[]>([]);
   const [uploadForCategory, setUploadForCategory] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -113,10 +116,10 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   const isWayfair = marketplace === "wayfair";
   const isWalmart = marketplace === "walmart";
   // Category-split marketplaces: one file per category, matched to template automatically.
-  // Walmart is now included — Walmart rolled out category-specific listing templates
-  // so sellers need one template per category rather than a single generic file.
+  // Walmart in "new listings" mode splits per category; in "existing listings" mode
+  // all products go into one file using the selected Item Match template.
   // Wayfair splits per class (one class-specific template workbook per file).
-  const usesCategoryZip = isMathis || isTemu || isBestBuy || isWayfair || isWalmart;
+  const usesCategoryZip = isMathis || isTemu || isBestBuy || isWayfair || (isWalmart && walmartMode === "new");
 
   useEffect(() => {
     mountedRef.current = true;
@@ -239,14 +242,17 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
     setLoading(true);
     setStatusMsg("Starting export…");
     try {
-      // Category-split (Mathis/Temu/BestBuy): autoMatch=true — server matches each category to closest template
+      // Category-split (Mathis/Temu/BestBuy/Walmart-new): autoMatch=true
+      // Walmart existing listings: templateIds=[selectedId] → all products in one file
       // Single-template with selection: pass templateIds=[selectedId]
       // Fallback: autoMatch=true → flat export
-      const body = usesCategoryZip
-        ? { autoMatch: true }
-        : hasTemplates && selectedTemplateId
-          ? { templateIds: [selectedTemplateId] }
-          : { autoMatch: true };
+      const body = (isWalmart && walmartMode === "existing" && selectedTemplateId)
+        ? { templateIds: [selectedTemplateId] }
+        : usesCategoryZip
+          ? { autoMatch: true }
+          : hasTemplates && selectedTemplateId
+            ? { templateIds: [selectedTemplateId] }
+            : { autoMatch: true };
 
       const startRes = await fetch(`/api/projects/${projectId}/export`, {
         method: "POST",
@@ -424,8 +430,98 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         </button>
       </div>
 
+      {/* Walmart listing type toggle */}
+      {isWalmart && (
+        <div className="mb-6">
+          <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Listing type</p>
+          <div className="inline-flex rounded-xl border border-border overflow-hidden">
+            <button
+              onClick={() => setWalmartMode("new")}
+              className={cn(
+                "px-4 py-2 text-sm font-medium transition",
+                walmartMode === "new"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background text-muted-foreground hover:bg-muted/50"
+              )}
+            >
+              New listings
+            </button>
+            <button
+              onClick={() => setWalmartMode("existing")}
+              className={cn(
+                "px-4 py-2 text-sm font-medium border-l border-border transition",
+                walmartMode === "existing"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background text-muted-foreground hover:bg-muted/50"
+              )}
+            >
+              Existing listings (Item Match)
+            </button>
+          </div>
+          {walmartMode === "existing" && (
+            <p className="text-xs text-muted-foreground mt-2">
+              All products exported into one file using Walmart&apos;s Item Match template. Upload your <strong>item_match</strong> template in Templates, then select it below.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Walmart existing-listings: template picker (same as single-template marketplaces) */}
+      {isWalmart && walmartMode === "existing" && (
+        <div className="mb-6">
+          {!hasTemplates ? (
+            <div className="flex flex-col items-center justify-center py-10 text-center bg-muted/30 rounded-2xl">
+              <FileSpreadsheet className="w-10 h-10 text-muted-foreground mb-3" />
+              <p className="text-sm font-medium mb-1">No templates uploaded yet</p>
+              <p className="text-xs text-muted-foreground max-w-xs">
+                Go to Templates and upload your Walmart <strong>item_match</strong> Excel template. Its columns will be used to export all products into one file.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <h3 className="text-sm font-medium mb-2">Choose Item Match template</h3>
+              <p className="text-xs text-muted-foreground mb-3">All {products.length} products will be written into one file using this template.</p>
+              <div className="rounded-2xl bg-muted/20 divide-y divide-border/40 overflow-hidden">
+                {templates.map((t) => (
+                  <label
+                    key={t.id}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-3 cursor-pointer transition hover:bg-muted/40",
+                      selectedTemplateId === t.id && "bg-blue-50 dark:bg-blue-950/20 border-blue-200"
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="walmart-template"
+                      value={t.id}
+                      checked={selectedTemplateId === t.id}
+                      onChange={() => setSelectedTemplateId(t.id)}
+                      className="accent-primary"
+                    />
+                    <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <span className="text-sm flex-1 font-medium">{t.name}</span>
+                    {t.userId === null && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-medium">Admin</span>
+                    )}
+                    {t.category && (
+                      <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">{t.category}</span>
+                    )}
+                    <span className={cn(
+                      "text-xs px-1.5 py-0.5 rounded font-medium",
+                      t.fileFormat === "xlsx" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                    )}>
+                      {t.fileFormat.toUpperCase()}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Missing-template warning — shown before export so user knows what will be excluded */}
-      {(() => {
+      {walmartMode !== "existing" && (() => {
         const allMissing = [...new Set([...preExportMissingCategories, ...missingTemplateCategories])];
         if (allMissing.length === 0) return null;
         return (
@@ -745,8 +841,8 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             );
           })()}
 
-          {/* ── SINGLE-TEMPLATE MARKETPLACES ── */}
-          {!usesCategoryZip && products.length === 0 && (
+          {/* ── SINGLE-TEMPLATE MARKETPLACES ── (hidden for Walmart existing-listings — has its own picker above) */}
+          {!usesCategoryZip && !(isWalmart && walmartMode === "existing") && products.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <Package className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No products to export</p>
@@ -754,7 +850,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             </div>
           )}
 
-          {!usesCategoryZip && products.length > 0 && !hasTemplates && (
+          {!usesCategoryZip && !(isWalmart && walmartMode === "existing") && products.length > 0 && !hasTemplates && (
             <div className="flex flex-col items-center justify-center py-12 text-center bg-muted/30 rounded-2xl">
               <FileSpreadsheet className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm font-medium mb-1">No templates uploaded yet</p>
@@ -764,7 +860,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             </div>
           )}
 
-          {!usesCategoryZip && products.length > 0 && hasTemplates && (
+          {!usesCategoryZip && !(isWalmart && walmartMode === "existing") && products.length > 0 && hasTemplates && (
             <div>
               <h3 className="text-sm font-medium mb-2">Choose export template</h3>
               <p className="text-xs text-muted-foreground mb-3">
