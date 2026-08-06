@@ -500,14 +500,21 @@ export async function generateSingleTemplateExport(
   const columns = template.columns as Column[];
   const fileName = sanitize(template.name);
 
+  // For Walmart item_match: if a product has no marketplaceCategory, fall back to
+  // the template's own category so "Spec Product Type" is never left blank.
+  const templateCategory = (template as { category?: string | null }).category ?? null;
+  const withCategoryFallback = templateCategory && marketplace.toLowerCase() === "walmart"
+    ? eligible.map(p => p.marketplaceCategory ? p : { ...p, marketplaceCategory: templateCategory })
+    : eligible;
+
   if (template.fileFormat === "csv") {
-    zip.file(`${fileName}.csv`, generateCsv(eligible, columns));
+    zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns));
   } else if (fileData) {
     // Preserve original template formatting, dropdowns, validations
-    const buffer = await fillTemplateXlsx(eligible, columns, fileData, marketplace);
+    const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace);
     zip.file(`${fileName}.xlsx`, buffer);
   } else {
-    const buffer = await createXlsxFromScratch(eligible, columns, template.name);
+    const buffer = await createXlsxFromScratch(withCategoryFallback, columns, template.name);
     zip.file(`${fileName}.xlsx`, buffer);
   }
 
@@ -808,6 +815,32 @@ async function fillTemplateXlsx(
     return a.letter.localeCompare(b.letter);
   });
 
+  // Walmart item_match: "Spec Product Type" (column A) appears in a banner header
+  // row rather than the main field-code row, so the column-matching loop above
+  // doesn't find it. Scan every row up to the main header row and inject it so it
+  // is written per-product. This also sets isNewListingTemplate=true via the
+  // specproducttype key, which causes exportEntries to use ALL colEntries (correct
+  // for item_match — we want every data column, not just the required band).
+  if (marketplace.toLowerCase() === "walmart" && !colEntries.some(e => normalizeKey(String(e.col.key ?? "")) === "specproducttype")) {
+    outer: for (const rm of rowMatches) {
+      const rn = parseInt(rm[1]);
+      if (rn > headerRowNum) break;
+      const labels = readRowLabels(rm[0]);
+      for (const [letter, label] of labels) {
+        if (normalizeKey(label) === "specproducttype") {
+          colEntries.push({ col: { key: "specproducttype", label }, letter });
+          colLetterToHeader.set(letter, label);
+          break outer;
+        }
+      }
+    }
+    // Re-sort in case column A was injected at the end
+    colEntries.sort((a, b) => {
+      if (a.letter.length !== b.letter.length) return a.letter.length - b.letter.length;
+      return a.letter.localeCompare(b.letter);
+    });
+  }
+
   // ── Required-column detection ──────────────────────────────────────────────
   // Marketplace templates band their columns under a merged banner that reads
   // "Required" / "Optional" (Walmart: E2:H2 = Required, I2:R2 = Optional).
@@ -858,7 +891,8 @@ async function fillTemplateXlsx(
       return n === "productcategory" || n === "category";
     });
   };
-  const alwaysExport = (e: ColEntry): boolean => isCategoryCol(e);
+  const alwaysExport = (e: ColEntry): boolean =>
+    isCategoryCol(e) || normalizeKey(String(e.col.key ?? "")) === "specproducttype";
 
   // New-listing template detection: it carries a "specProductType" field code
   // (the MP-item template does not). For the new-listing template we fill EVERY
