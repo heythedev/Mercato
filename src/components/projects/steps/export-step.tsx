@@ -40,7 +40,11 @@ function matchTemplate(category: string, templates: Template[]): { template: Tem
   const department = category.split(/\s*>\s*/)[0]?.trim() || category;
   const normDept = norm(department);
   const normCat = norm(category);
-  const catWords = normCat.split(" ").filter((w) => w.length > 2);
+  // Deduplicate catWords so a word appearing multiple times in the path (e.g.
+  // "office" in "Office > Office Furniture > Ergonomic Office Chairs") only
+  // counts once — otherwise the repeated word inflates the score and causes
+  // false matches to templates that merely share the department name.
+  const catWords = [...new Set(normCat.split(" ").filter((w) => w.length > 2))];
 
   // Score one string against the product category — higher is better.
   const scoreTarget = (raw: string): number => {
@@ -49,7 +53,10 @@ function matchTemplate(category: string, templates: Template[]): { template: Tem
     const targetWords = target.split(" ").filter((w) => w.length > 2);
     let sc = 0;
     if (target === normDept || bareName === normDept) sc += 20;
-    else if (normDept.startsWith(target) || target.startsWith(normDept)) sc += 12;
+    // Give +12 prefix bonus only when the department is multi-word or long (≥ 9 chars).
+    // A single short word like "office" or "audio" would match any template whose
+    // name starts with that word — causing false matches. Require more specificity.
+    else if (normDept.startsWith(target) || (target.startsWith(normDept) && (normDept.includes(" ") || normDept.length >= 9))) sc += 12;
     else if (
       (target.length >= 5 && normDept.startsWith(target.slice(0, 5))) ||
       (normDept.length >= 5 && target.startsWith(normDept.slice(0, 5)))
@@ -226,6 +233,12 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       let lastProgressAt = Date.now();
       let lastPhase = "";
       let lastUpdatedAt = 0;
+      // Consecutive poll failures before giving up. A single 502 during a long
+      // xlsx-generation pass (Render proxy timeout while event loop is busy) should
+      // not abort an otherwise healthy export — the server keeps building and the
+      // next poll usually succeeds. Only give up after 3 consecutive failures.
+      let consecutiveErrors = 0;
+      const MAX_CONSECUTIVE_ERRORS = 3;
 
       while (Date.now() - startedAt < HARD_LIMIT_MS) {
         // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
@@ -279,10 +292,16 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         }
 
         if (!pollRes.ok) {
+          consecutiveErrors++;
+          // Transient 5xx (e.g. Render proxy timeout during a heavy xlsx pass)
+          // should not abort the export — the server keeps running. Only give up
+          // after several consecutive failures, which indicate a real server crash.
+          if (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) continue;
           const data = await pollRes.json().catch(() => ({ error: "Export failed" })) as { error?: string };
           toast.error(data.error ?? "Export failed");
           return;
         }
+        consecutiveErrors = 0; // reset on any successful poll
 
         const data = (await pollRes.json()) as {
           status: string; error?: string; phase?: string; updatedAt?: number;
@@ -514,7 +533,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
               .map(([category, count]) => {
                 const matchResult = hasTemplates ? matchTemplate(category, templates) : null;
                 const matched = matchResult?.template ?? null;
-                const hasGoodMatch = (matchResult?.score ?? 0) > 0;
+                // Score < 4 means only a single generic word overlapped (e.g. "office") —
+                // not a genuine match. Show "No template" so the user knows to upload one.
+                const hasGoodMatch = (matchResult?.score ?? 0) >= 4;
                 return { category, count, matched, hasGoodMatch };
               });
             const noMatchCount = rows.filter(r => hasTemplates && !r.hasGoodMatch).length;

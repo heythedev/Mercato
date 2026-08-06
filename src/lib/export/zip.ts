@@ -268,8 +268,12 @@ export async function generateCategoryZip(
         console.log(`[export] No matching template for "${catLabel}" — flagged as missing`);
         continue;
       } else {
-        // 2) Name/word-overlap (non-Temu, or Temu templates without any path data)
-        tpl = findBestTemplate(catLabel, templates, fallback);
+        // 2) Name/word-overlap (non-Temu, or Temu templates without any path data).
+        // minScore=4 guards against false matches from a single shared word
+        // (e.g. "office" scoring "Office Supplies File Cabinets" for "Office Furniture").
+        // When no template reaches the threshold, findBestTemplate returns fallback
+        // so the column-overlap pass below can make a better choice.
+        tpl = findBestTemplate(catLabel, templates, fallback, 4);
         // 3) Column overlap — only when no designated catch-all exists
         if (tpl === fallback && templates.length > 1 && !hasCatchAll) {
           tpl = bestByColumnOverlap(catProducts, templates, fallback);
@@ -323,6 +327,7 @@ export function findBestTemplate<T extends { id: string; name: string; category?
   category: string,
   templates: T[],
   fallback: T,
+  minScore = 0,
 ): T {
   if (templates.length <= 1) return fallback;
 
@@ -337,7 +342,11 @@ export function findBestTemplate<T extends { id: string; name: string; category?
   const department = category.split(/\s*>\s*/)[0]?.trim() || category;
   const normDept = norm(department);
   const normCat = norm(category);
-  const catWords = normCat.split(" ").filter((w) => w.length > 2);
+  // Deduplicate catWords so a word appearing multiple times in the path (e.g.
+  // "office" in "Office > Office Furniture > Ergonomic Office Chairs") only
+  // counts once — otherwise the repeated word inflates the score and causes
+  // false matches to templates that merely share the department name.
+  const catWords = [...new Set(normCat.split(" ").filter((w) => w.length > 2))];
 
   // Score one candidate string against the product category path.
   const scoreTarget = (raw: string): number => {
@@ -346,7 +355,12 @@ export function findBestTemplate<T extends { id: string; name: string; category?
     const targetWords = target.split(" ").filter((w) => w.length > 2);
     let sc = 0;
     if (target === normDept || bareName === normDept) sc += 20;
-    else if (normDept.startsWith(target) || target.startsWith(normDept)) sc += 12;
+    // Give +12 prefix bonus only when the department is multi-word or long (≥ 9 chars).
+    // A single short word like "office" or "audio" (6 chars) would match the
+    // beginning of any template whose name starts with that word — e.g. "Office
+    // Supplies File Cabinets" for "Office > Office Furniture > Ergonomic Office Chairs"
+    // — which is a false match. Require more specificity before giving +12.
+    else if (normDept.startsWith(target) || (target.startsWith(normDept) && (normDept.includes(" ") || normDept.length >= 9))) sc += 12;
     else if (
       (target.length >= 5 && normDept.startsWith(target.slice(0, 5))) ||
       (normDept.length >= 5 && target.startsWith(normDept.slice(0, 5)))
@@ -375,6 +389,9 @@ export function findBestTemplate<T extends { id: string; name: string; category?
     if (score > bestScore) { bestScore = score; best = t; }
   }
 
+  // If nothing scored above the caller's minimum, the "best" is still too weak
+  // to be trusted — return the fallback so column-based matching can take over.
+  if (bestScore < minScore) return fallback;
   return best;
 }
 
