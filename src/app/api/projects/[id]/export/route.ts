@@ -90,12 +90,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const jobId = `${id}_${Date.now()}`;
   createJob(jobId);
 
-  // Mark exporting — this is fast (no data load)
-  await prisma.project.update({ where: { id }, data: { status: "exporting" } });
-
   // All heavy work (loading products JSON, loading template fileData BYTEA) runs here in background.
   // The HTTP response returns the jobId above; client polls GET until done.
   void (async () => {
+    // Mark exporting inside the background job so the POST can return the jobId
+    // immediately without a DB round-trip. Previously this was awaited in the
+    // request handler — if the DB was slow or the connection pool was exhausted
+    // the await could hang for 30s and Render's proxy would 502 the request.
+    await prisma.project.update({ where: { id }, data: { status: "exporting" } }).catch(() => {});
     // Heartbeat: bump updatedAt every 20s for the whole job so long single
     // operations (the product load, one giant model batch) never look dead to
     // the client's stall detector even when the phase string is unchanged.
