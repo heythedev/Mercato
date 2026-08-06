@@ -1983,11 +1983,17 @@ function getProductField(p: Product, key: string): unknown {
     product_image_9_url: fromVendor("product_image_9_url", "image_url_9", "image url 9", "image_url9", "image9", "alternate_image8") ?? "",
     product_image_10_url: fromVendor("product_image_10_url", "image_url_10", "image url 10", "image_url10", "image10", "alternate_image9") ?? "",
 
-    // Walmart new-listing "Spec Product Type" — assigned from Walmart's PT
-    // taxonomy during categorization. Field code on the template is
-    // "specProductType" (→ "specproducttype" normalized).
-    specproducttype: (p as { specProductType?: string | null }).specProductType ?? "",
-    spec_product_type: (p as { specProductType?: string | null }).specProductType ?? "",
+    // Walmart "Spec Product Type" — from the PT taxonomy (new listings) or
+    // derived from the category leaf (existing listings / item match).
+    // Falls back to marketplaceCategory so the column is never blank.
+    specproducttype: (p as { specProductType?: string | null }).specProductType
+      || p.marketplaceCategory?.split(" > ").at(-1)
+      || p.marketplaceCategory
+      || "",
+    spec_product_type: (p as { specProductType?: string | null }).specProductType
+      || p.marketplaceCategory?.split(" > ").at(-1)
+      || p.marketplaceCategory
+      || "",
 
     // ── Walmart new-listing template field codes (row 5) ──────────────────────
     // These are the exact camelCase codes the "New listing" template uses; they

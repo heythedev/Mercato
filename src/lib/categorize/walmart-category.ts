@@ -90,7 +90,10 @@ export function parseWalmartCategoryPath(
     .split("/")
     .map((s) => s.trim())
     .filter((s) => s && s.toLowerCase() !== "home page");
-  if (!segments.length) return null;
+  // Require at least 2 segments (e.g. "Furniture > End Tables"). A single
+  // segment like "Furniture" is too broad to be useful for template matching
+  // or export — fall through to AI categorization for a specific product type.
+  if (segments.length < 2) return null;
   return {
     category: segments[segments.length - 1],
     path: segments.join(" > "),

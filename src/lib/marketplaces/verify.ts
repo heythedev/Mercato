@@ -1413,10 +1413,11 @@ function compareToLive(
     //    carrying a barcode that disagreed with the listing (e.g. catalog
     //    11-303 / 8.4 cu ft matched to Walmart 11-304 / 4.5 cu ft).
     const upcConflict = !!liveUpc && !upcMatch;
-    // A barcode that matches while the title describes a different product means
-    // one of the two sources is wrong — almost always the marketplace listing.
-    // Reporting that as a plain "ok" hides the contradiction, so flag it.
-    const upcContradicted = upcMatch && titleSeverity === "mismatch";
+    // Only contradict a UPC match when model CODES differ (e.g. catalog 11-482
+    // vs listing 11-385 — same barcode on a different product is a catalogue
+    // error). A pack-quantity difference is NOT evidence the barcode is wrong —
+    // it is the same product in a different pack size, so UPC stays "ok".
+    const upcContradicted = upcMatch && !!codeConflict;
     fields.push({
       field: "upc", label: "UPC",
       stored: vendorUpc, live: liveUpc || "N/A",
