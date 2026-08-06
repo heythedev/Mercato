@@ -431,41 +431,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         </button>
       </div>
 
-      {/* Walmart listing type toggle */}
-      {isWalmart && (
-        <div className="mb-6">
-          <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Listing type</p>
-          <div className="inline-flex rounded-xl border border-border overflow-hidden">
-            <button
-              onClick={() => setWalmartMode("new")}
-              className={cn(
-                "px-4 py-2 text-sm font-medium transition",
-                walmartMode === "new"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-background text-muted-foreground hover:bg-muted/50"
-              )}
-            >
-              New listings
-            </button>
-            <button
-              onClick={() => setWalmartMode("existing")}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-l border-border transition",
-                walmartMode === "existing"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-background text-muted-foreground hover:bg-muted/50"
-              )}
-            >
-              Existing listings (Item Match)
-            </button>
-          </div>
-          {walmartMode === "existing" && (
-            <p className="text-xs text-muted-foreground mt-2">
-              All products exported into one file using Walmart&apos;s Item Match template. Upload your <strong>item_match</strong> template in Templates, then select it below.
-            </p>
-          )}
-        </div>
-      )}
+      {/* No listing-type toggle — mode is set by the "New listing" checkbox at project creation */}
 
       {/* Walmart existing-listings: template picker (same as single-template marketplaces) */}
       {isWalmart && walmartMode === "existing" && (
