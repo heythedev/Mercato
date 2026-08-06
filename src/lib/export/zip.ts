@@ -1751,7 +1751,17 @@ function getProductField(p: Product, key: string): unknown {
   };
   const skuId = [p.vendorSku, anyVendorId].find(
     (v) => v != null && String(v).trim() !== "" && !isGlobalId(v) && !isPlaceholder(v),
-  ) ?? derivedSku();
+  )
+  // isGlobalId rejects barcode-format values (8-14 digit numbers) to avoid
+  // using a UPC as a SKU when a real alphanumeric SKU exists elsewhere.
+  // But if the vendor sheet only has a barcode in the SKU column, the
+  // fallback was a fabricated "BRAND-123456" code that Walmart rejects.
+  // Use the raw vendorSku as a last resort — it is the seller's own
+  // identifier even if it happens to be numeric.
+  ?? (p.vendorSku != null && String(p.vendorSku).trim() !== "" && !isPlaceholder(p.vendorSku)
+    ? String(p.vendorSku).trim()
+    : null)
+  ?? derivedSku();
 
   // Vendor sheets often store HTML in description/features (<p>…</p>, <li>…</li>).
   // Walmart wants plain text, so strip tags and collapse whitespace. Bullet-style

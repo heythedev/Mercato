@@ -1564,7 +1564,9 @@ function compareToLive(
     // No catalog image at all — a gap in our own data, not a pass.
     !hasVendorImage ? "warning"
     : upcConfirmed && hasLiveImages ? "ok"
-    : imagesUnchecked ? "ok"
+    // Both sides have images but no UPC confirmation — images were NEVER compared.
+    // Reporting "ok" here meant "we didn't look" was indistinguishable from a pass.
+    : imagesUnchecked ? "warning"
     // Our catalog has an image and the marketplace listing has none.
     : "warning";
   // For the report `live` value: prefer a product page URL over raw image URL —
@@ -1590,14 +1592,14 @@ function compareToLive(
     note: imgSeverity === "warning"
       ? (!hasVendorImage
           ? "No catalog image — nothing to compare. Add an image to the vendor sheet."
-          : "Catalog has an image but the marketplace listing has none — review manually.")
+          : imagesUnchecked
+            ? "Images not compared — verify manually or run AI deep check."
+            : "Catalog has an image but the marketplace listing has none — review manually.")
       : hasVendorImage && upcConfirmed && hasLiveImages
         // Say why this passed without a visual comparison — otherwise a silent
         // "ok" looks like the images were checked when they were not.
         ? "Product identity confirmed by exact UPC match — images not compared."
-        : imagesUnchecked
-          ? "Images not compared — run AI deep check to compare them visually."
-          : undefined,
+        : undefined,
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });
