@@ -10,7 +10,7 @@ type F = { field: string; note?: string };
 const isTarget = (r: { status: string; fields: F[] }) =>
   r.status === "warning" ||
   r.status === "mismatch" ||
-  r.fields.some((f) => f.field === "images" && f.note?.startsWith("Images not compared"));
+  r.fields.some((f) => f.field === "images" && f.note?.includes("not compared"));
 
 const uncheckedImages: F = {
   field: "images",
@@ -39,13 +39,16 @@ describe("AI deep-check targeting", () => {
     ).toBe(false);
   });
 
-  it("excludes an ok product confirmed by UPC with no image comparison needed", () => {
+  it("includes a UPC-confirmed product whose images were never AI-compared", () => {
+    // UPC match is strong identity evidence, but the Walmart listing may carry
+    // the wrong image (e.g. different colour variant, wrong hero shot). The AI
+    // vision check can catch this even when the barcode is right.
     expect(
       isTarget({
         status: "ok",
         fields: [{ field: "images", note: "Product identity confirmed by exact UPC match — images not compared." }],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("excludes an ok product with no images row at all", () => {

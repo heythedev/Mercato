@@ -56,7 +56,9 @@ function needsImageCheck(r: { fields: unknown }): boolean {
     !!img.stored?.startsWith("http") &&
     !!img.liveImage?.startsWith("http") &&
     // The note the comparison-less path sets; an AI verdict replaces it.
-    !!img.note?.startsWith("Images not compared")
+    // Two variants: UPC-confirmed ("Product identity confirmed … images not compared.")
+    // and non-confirmed ("Images not compared — verify manually…"). Both contain "not compared".
+    !!img.note?.includes("not compared")
   );
 }
 

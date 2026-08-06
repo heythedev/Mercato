@@ -132,7 +132,7 @@ export async function applyAiVerificationPasses(
         r.status === "warning" ||
         r.status === "mismatch" ||
         r.fields.some(
-          (f) => f.field === "images" && f.note?.startsWith("Images not compared"),
+          (f) => f.field === "images" && f.note?.includes("not compared"),
         ),
     );
     if (!targets.length) return;
