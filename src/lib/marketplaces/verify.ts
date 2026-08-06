@@ -1555,20 +1555,17 @@ function compareToLive(
   // identical images still surfaced as a Warning — and since the AI visual check
   // is opt-in, nothing ever cleared it. That made Warning the default state for
   // correctly-matched products rather than a signal worth acting on.
-  // Both sides have an image but nothing has actually compared them: the AI
-  // visual check is opt-in, so on a normal run this is simply "not checked".
-  // Reporting that as a warning made images the single largest source of noise
-  // (a client run surfaced ~6.9k warnings on 7k products), which buries the rows
-  // that do need attention. A warning must mean "something looks wrong", not
-  // "we didn't look" — so this is reported as ok with an explicit note, and the
-  // AI pass upgrades or downgrades it when the user runs a deep check.
+  //
+  // Equally, "ok" must not mean "we didn't look". A missing catalog image is a
+  // real data gap the reviewer needs to see: with no image there is nothing to
+  // compare, so calling it ok reported a pass for a check that never ran.
   const imagesUnchecked = hasVendorImage && hasLiveImages && !upcConfirmed;
   const imgSeverity: "ok" | "warning" =
-    !hasVendorImage ? "ok"
+    // No catalog image at all — a gap in our own data, not a pass.
+    !hasVendorImage ? "warning"
     : upcConfirmed && hasLiveImages ? "ok"
     : imagesUnchecked ? "ok"
-    // Only genuine evidence of a problem stays a warning: our catalog has an
-    // image and the marketplace listing has none.
+    // Our catalog has an image and the marketplace listing has none.
     : "warning";
   // For the report `live` value: prefer a product page URL over raw image URL —
   // more useful in the exported report. The UI uses the dedicated liveImage /
@@ -1591,7 +1588,9 @@ function compareToLive(
     // with its verdict when it runs; if it's skipped (opt-in / no API key) or
     // errors, this stays so the row never shows a bare, unexplained state.
     note: imgSeverity === "warning"
-      ? "Catalog has an image but the marketplace listing has none — review manually."
+      ? (!hasVendorImage
+          ? "No catalog image — nothing to compare. Add an image to the vendor sheet."
+          : "Catalog has an image but the marketplace listing has none — review manually.")
       : hasVendorImage && upcConfirmed && hasLiveImages
         // Say why this passed without a visual comparison — otherwise a silent
         // "ok" looks like the images were checked when they were not.

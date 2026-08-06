@@ -20,8 +20,46 @@ const HEADER_SCAN_ROWS = 25;
 
 const BARCODE_RE = /^\d{8,14}$/;
 
+/**
+ * True when a value is a global product barcode (UPC/EAN/GTIN).
+ *
+ * Only digit strings qualify. `toDisplayBarcode` normalises by STRIPPING
+ * non-digits, so feeding it an alphanumeric part number invents a barcode that
+ * was never there: "E1TL05001809" (a 3D MAXpider part no.) became "000105001809"
+ * and passed as a 12-digit UPC. That misfire disqualified every SKU column in a
+ * 4,996-product vendor sheet — the sheet imported with vendorSku = null on every
+ * row, and the verification report shipped with an empty SKU column.
+ *
+ * Separators are tolerated (some sheets write "0-12345-67890-5"), but a value
+ * containing letters is a part number, not a barcode.
+ */
 function isBarcode(v: string): boolean {
-  return BARCODE_RE.test(v) || BARCODE_RE.test(toDisplayBarcode(v) ?? "");
+  if (BARCODE_RE.test(v)) return true;
+  if (/[a-z]/i.test(v)) return false;
+  return BARCODE_RE.test(toDisplayBarcode(v) ?? "");
+}
+
+/**
+ * Convert an HTML description cell to plain text.
+ *
+ * Vendor sheets commonly paste marketplace copy straight out of a CMS, so the
+ * cell arrives as `<p>ROLL-TOP DRY BAG BACKPACK< p>`. Left as-is the markup
+ * shows up verbatim in the verification report and skews the word-overlap
+ * description comparison. Note the malformed closing tags (`< p>`) seen in real
+ * files — the tag pattern tolerates the stray space.
+ */
+function stripHtml(v: string | undefined): string {
+  if (!v) return "";
+  return v
+    .replace(/<\s*\/?\s*[a-z][^>]*>/gi, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function columnShare(rows: string[][], col: number, test: (v: string) => boolean): number {
@@ -176,12 +214,22 @@ function detectColumns(headers: string[], sample: string[][]): ColMap {
   })();
   claim(productCol);
 
-  // Long description — claimed AFTER productCol
-  const descriptionCol = claim(findHeaderLoose(
-    headers,
-    /\b(?:description|desc|details?|notes?|specifications?|specs?|long)\b/i,
-    taken,
-  ));
+  // Long description — claimed AFTER productCol.
+  //
+  // Tried most-specific first rather than first-match-left-to-right. A single
+  // combined pattern picks whichever candidate happens to sit leftmost, and on
+  // a real 4,996-product sheet that was a "Note" column at index 6 (holding the
+  // product title) beating the actual "Description" column at index 36. Every
+  // exported description was then a copy of the title.
+  const descriptionCol = claim(
+    // 1. An explicit description/details column.
+    findHeaderLoose(headers, /\b(?:long[\s_-]*)?descriptions?\b|\bdetails?\b|\bspecifications?\b/i, taken)
+    // 2. Abbreviations and spec columns.
+    ?? findHeaderLoose(headers, /\b(?:desc|specs?)\b/i, taken)
+    // 3. Last resort: note-style columns, which are as often internal remarks as
+    //    real copy — hence only when nothing better exists.
+    ?? findHeaderLoose(headers, /\bnotes?\b/i, taken),
+  );
 
   // Dimensions — explicit combined column only (NOT length/width/height — those are separate)
   const dimensionsCol = claim(findHeaderLoose(
@@ -413,7 +461,11 @@ function gridToRows(grid: string[][], diag?: GridDiag): VendorRow[] {
       upc: toDisplayBarcode(get(cols.codeCol)) || get(cols.codeCol) || undefined,
       asin: get(cols.asinCol) || undefined,
       brand: get(cols.brandCol) || undefined,
-      description: get(cols.descriptionCol) || get(cols.productCol) || undefined,
+      // No fallback to the product/title column: copying the title into the
+      // description makes the verification report show "Catalog description"
+      // rows that are really the product name, and makes the description
+      // comparison meaningless. An absent description is reported as absent.
+      description: stripHtml(get(cols.descriptionCol)) || undefined,
       dimensions: (() => {
         // Prefer an explicit combined "Dimensions" column if it contains multiple numbers (e.g. "18 x 14 x 6")
         const explicit = get(cols.dimensionsCol);
