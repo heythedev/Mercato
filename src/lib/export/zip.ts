@@ -815,13 +815,20 @@ async function fillTemplateXlsx(
     return a.letter.localeCompare(b.letter);
   });
 
+  // Detect the new-listing template BEFORE any injection. The item_match template
+  // does NOT carry "specProductType" as a field code, so this stays false for it,
+  // keeping exportEntries narrowed to required columns only for item_match.
+  const isNewListingTemplate = colEntries.some((e) => {
+    const n = normalizeKey(String(e.col.key ?? ""));
+    return n === "specproducttype";
+  });
+
   // Walmart item_match: "Spec Product Type" (column A) appears in a banner header
   // row rather than the main field-code row, so the column-matching loop above
   // doesn't find it. Scan every row up to the main header row and inject it so it
-  // is written per-product. This also sets isNewListingTemplate=true via the
-  // specproducttype key, which causes exportEntries to use ALL colEntries (correct
-  // for item_match — we want every data column, not just the required band).
-  if (marketplace.toLowerCase() === "walmart" && !colEntries.some(e => normalizeKey(String(e.col.key ?? "")) === "specproducttype")) {
+  // is written per-product. alwaysExport keeps it in exportEntries even when the
+  // required-band filter is active, so only mandatory fields are exported.
+  if (marketplace.toLowerCase() === "walmart" && !isNewListingTemplate) {
     outer: for (const rm of rowMatches) {
       const rn = parseInt(rm[1]);
       if (rn > headerRowNum) break;
@@ -893,17 +900,6 @@ async function fillTemplateXlsx(
   };
   const alwaysExport = (e: ColEntry): boolean =>
     isCategoryCol(e) || normalizeKey(String(e.col.key ?? "")) === "specproducttype";
-
-  // New-listing template detection: it carries a "specProductType" field code
-  // (the MP-item template does not). For the new-listing template we fill EVERY
-  // column the vendor has data for — required and optional alike — so a rich
-  // vendor sheet's description, images, colour, model, etc. all land in the
-  // output. Columns with no resolvable value still come out blank (the row
-  // builder writes an empty styled cell), so "optional and empty" stays empty.
-  const isNewListingTemplate = colEntries.some((e) => {
-    const n = normalizeKey(String(e.col.key ?? ""));
-    return n === "specproducttype";
-  });
 
   // Only narrow the export when the banner was found AND this isn't the
   // new-listing template. The new-listing template keeps every mapped column.
@@ -1302,7 +1298,12 @@ async function fillTemplateXlsx(
     // not in the list must never survive to the sheet — no matter which stage above
     // produced it or failed (AI unavailable, key missing, request error, stale match).
     // Anything unrecognised is dropped and logged rather than written as invalid data.
+    //
+    // Exception: "Spec Product Type" is written directly even when not in the
+    // dropdown — the correct Walmart subcategory must appear in the cell regardless
+    // of whether the template's validation list includes it.
     if (value && !options.some((o) => o === value)) {
+      if (normalizeKey(String(col.key ?? "")) === "specproducttype") return raw;
       const header = colLetterToHeader.get(letter) ?? col.label ?? col.key;
       console.warn(
         `[export] dropped invalid dropdown value for "${header}": ${JSON.stringify(value)} ` +
