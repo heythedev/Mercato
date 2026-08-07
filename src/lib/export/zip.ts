@@ -849,38 +849,54 @@ async function fillTemplateXlsx(
   }
 
   // ── Required-column detection ──────────────────────────────────────────────
-  // Marketplace templates band their columns under a merged banner that reads
-  // "Required" / "Optional" (Walmart: E2:H2 = Required, I2:R2 = Optional).
-  // Only the required band is exported: optional columns are left blank so the
-  // sheet carries exactly what the marketplace demands and nothing that could
-  // trip validation. Derived from the merge ranges rather than hardcoded
-  // letters so a revised template keeps working.
+  // Scan every banner row (any row above the header) for cells whose text
+  // contains "required" or "optional". This works whether the template uses
+  // actual <mergeCell> elements or just styling — we look at the cell values
+  // directly, not at the merge map.
+  //
+  // Each "anchor" cell marks the START of a section; the section ends just
+  // before the next anchor. Required sections contribute their columns to
+  // requiredLetters; optional sections are left blank.
   const colNum = (letter: string): number =>
     [...letter.toUpperCase()].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
 
   const requiredLetters = new Set<string>();
   let sawRequiredBanner = false;
-  for (const mm of sheetXml.matchAll(/<mergeCell\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/gi)) {
-    const [, c1, r1, c2, r2] = mm;
-    // Banner rows sit above the header row we resolved earlier.
-    if (parseInt(r1, 10) > headerRowNum || parseInt(r2, 10) > headerRowNum) continue;
-    const text = colLetterToHeader.get(c1) ?? "";
-    const banner = (readRowLabels(rowMatches.find(rm => rm[1] === r1)?.[0] ?? "").get(c1) ?? text).trim();
-    // Matches "Required", "Required to sell on Walmart website" (new-listing),
-    // and "Item and Offer Details (Required/Conditionally Required)" (MP item match).
-    // Excludes "Optional" banners and standalone "Required?" help cells.
-    if (!/\brequired\b/i.test(banner) || /\boptional\b/i.test(banner)) continue;
-    sawRequiredBanner = true;
-    const from = colNum(c1), to = colNum(c2);
-    for (const { letter } of colEntries) {
-      const n = colNum(letter);
-      if (n >= from && n <= to) requiredLetters.add(letter);
+
+  type BannerSection = { colN: number; isRequired: boolean };
+  const bannerSections: BannerSection[] = [];
+
+  for (const rm of rowMatches) {
+    const rn = parseInt(rm[1]);
+    if (rn >= headerRowNum) break; // only rows above the header
+    for (const [letter, label] of readRowLabels(rm[0])) {
+      const hasRequired = /\brequired\b/i.test(label);
+      const hasOptional = /\boptional\b/i.test(label);
+      if (!hasRequired && !hasOptional) continue;
+      bannerSections.push({ colN: colNum(letter), isRequired: hasRequired && !hasOptional });
     }
   }
 
-  // A column outside every banner but left of the required band is an identity
-  // column the template keeps separate (Walmart merges SKU down D2:D5). Treat
-  // anything before the first required column as required too.
+  // Deduplicate (same column may appear in multiple banner rows) and sort left→right.
+  const seenBannerCols = new Set<number>();
+  const uniqueBanners = bannerSections
+    .filter(s => { if (seenBannerCols.has(s.colN)) return false; seenBannerCols.add(s.colN); return true; })
+    .sort((a, b) => a.colN - b.colN);
+
+  for (let i = 0; i < uniqueBanners.length; i++) {
+    const section = uniqueBanners[i];
+    const nextSection = uniqueBanners[i + 1];
+    const sectionEnd = nextSection ? nextSection.colN - 1 : Infinity;
+    if (!section.isRequired) continue;
+    sawRequiredBanner = true;
+    for (const { letter } of colEntries) {
+      const n = colNum(letter);
+      if (n >= section.colN && n <= sectionEnd) requiredLetters.add(letter);
+    }
+  }
+
+  // Anything to the LEFT of the first required section (e.g. Spec Product Type
+  // in column A/D, or an SKU column that predates the banner) is also required.
   if (sawRequiredBanner && requiredLetters.size) {
     const firstRequired = Math.min(...[...requiredLetters].map(colNum));
     for (const { letter } of colEntries) {
