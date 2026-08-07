@@ -2020,11 +2020,15 @@ function getProductField(p: Product, key: string): unknown {
     // Walmart "Spec Product Type" — from the PT taxonomy (new listings) or
     // derived from the category leaf (existing listings / item match).
     // Falls back to marketplaceCategory so the column is never blank.
+    // Prefer Walmart-verified categoryPath leaf (from the Affiliate API) over
+    // AI-assigned marketplaceCategory — it matches the dropdown values exactly.
     specproducttype: (p as { specProductType?: string | null }).specProductType
+      || (p as { categoryPath?: string | null }).categoryPath?.split(" > ").at(-1)
       || p.marketplaceCategory?.split(" > ").at(-1)
       || p.marketplaceCategory
       || "",
     spec_product_type: (p as { specProductType?: string | null }).specProductType
+      || (p as { categoryPath?: string | null }).categoryPath?.split(" > ").at(-1)
       || p.marketplaceCategory?.split(" > ").at(-1)
       || p.marketplaceCategory
       || "",

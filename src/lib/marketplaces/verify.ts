@@ -197,8 +197,16 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
     } else if (v.verdict === "mismatch") {
       t.field.severity = "mismatch";
       t.field.match = false;
+    } else {
+      // "unsure" — if the catalog image URL couldn't be fetched the check never
+      // ran. Downgrade from "ok" (UPC-confirmed auto-pass) to "warning" so the
+      // reviewer knows there is a data gap, not a confirmed visual match.
+      const fetchFailed = /could not (download|fetch|load)|not (accessible|reachable)|download.*fail/i.test(v.reason ?? "");
+      if (fetchFailed && t.field.severity === "ok") {
+        t.field.severity = "warning";
+        t.field.match = false;
+      }
     }
-    // "unsure" → keep the existing "warning" (manual review)
     t.field.note = v.verdict === "match"
       ? `AI visual check: images match — ${v.reason}`
       : v.verdict === "mismatch"
@@ -232,7 +240,7 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
   for (const r of results) {
     if (r.status === "not_found" || r.status === "discontinued") continue;
     const field = r.fields.find((f) => f.field === "title");
-    if (!field || field.severity !== "warning") continue; // only re-evaluate borderline cases
+    if (!field || field.severity === "ok") continue; // re-evaluate both "warning" and "mismatch"
     const vendorTitle = nameById.get(r.productId) ?? field.stored;
     const liveTitle = field.live;
     if (!vendorTitle || !liveTitle) continue;
@@ -1617,13 +1625,16 @@ function compareToLive(
   // Placeholder detection: too short (<8 meaningful words) OR common filler phrases
   const isPlaceholderDesc = vendorDescWords.length < 8
     || /\b(restricted|confidential|proprietary|call for|n\/a|see image|coming soon|tbd|contact us)\b/i.test(vendorDesc);
+  const vendorDescMissing = !vendorDesc.trim();
   const descSim = !isPlaceholderDesc && vendorDesc && liveDescFull ? wordOverlap(vendorDesc, liveDescFull) : null;
   fields.push({
     field: "description", label: "Description",
     stored: vendorDesc || "N/A",
     live: liveDescFull ? liveDescFull.slice(0, 200) + (liveDescFull.length > 200 ? "…" : "") : "N/A",
-    match: descSim == null || descSim >= 0.1,
-    severity: descSim == null ? "ok" : descSim >= 0.1 ? "ok" : "warning",
+    // Missing catalog description when Walmart has one is a real data gap, not a pass.
+    match: vendorDescMissing && liveDescFull ? false : (descSim == null || descSim >= 0.1),
+    severity: vendorDescMissing && liveDescFull ? "warning" : descSim == null ? "ok" : descSim >= 0.1 ? "ok" : "warning",
+    ...(vendorDescMissing && liveDescFull ? { note: "Catalog description missing — cannot verify against marketplace." } : {}),
   });
 
   // Dimensions — try two sources; pick the one closer to the marketplace package dims.
