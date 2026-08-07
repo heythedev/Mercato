@@ -90,12 +90,18 @@ export function parseWalmartCategoryPath(
     .split("/")
     .map((s) => s.trim())
     .filter((s) => s && s.toLowerCase() !== "home page");
-  // Require at least 2 segments (e.g. "Furniture > End Tables"). A single
-  // segment like "Furniture" is too broad to be useful for template matching
-  // or export — fall through to AI categorization for a specific product type.
+  // Require at least 2 segments. A single segment is too broad to be useful.
   if (segments.length < 2) return null;
+  // Walmart returns 2–6 level paths. The client's taxonomy is always expressed
+  // as exactly 2 levels: top-level Category + Product Type (most specific leaf).
+  // Collapse deeper paths to [first segment] > [last segment] so "Party &
+  // Occasions > Halloween > Costumes > Boy's Career Costumes" becomes
+  // "Party & Occasions > Boy's Career Costumes".
+  const limited = segments.length > 2
+    ? [segments[0], segments[segments.length - 1]]
+    : segments;
   return {
-    category: segments[segments.length - 1],
-    path: segments.join(" > "),
+    category: limited[limited.length - 1],
+    path: limited.join(" > "),
   };
 }
