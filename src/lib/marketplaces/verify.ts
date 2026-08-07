@@ -1547,35 +1547,15 @@ function compareToLive(
     return null;
   })();
   const hasVendorImage = vendorImgUrl != null;
-  // Images are a soft, advisory field — a difference here never proves the
-  // listing is wrong (angles, packaging shots and lifestyle photos all differ
-  // legitimately). So only ask for manual review when the images are actually
-  // the best evidence available:
-  //
-  //  • nothing to compare (no vendor image)            → ok
-  //  • identity already proven by an exact UPC match   → ok
-  //  • catalog has an image, marketplace has none      → warning (worth seeing)
-  //  • otherwise                                        → warning (review)
-  //
-  // The UPC carve-out is the important one. Previously ANY product with a
-  // catalog image was flagged, so a barcode-confirmed product with visibly
-  // identical images still surfaced as a Warning — and since the AI visual check
-  // is opt-in, nothing ever cleared it. That made Warning the default state for
-  // correctly-matched products rather than a signal worth acting on.
-  //
-  // Equally, "ok" must not mean "we didn't look". A missing catalog image is a
-  // real data gap the reviewer needs to see: with no image there is nothing to
-  // compare, so calling it ok reported a pass for a check that never ran.
-  const imagesUnchecked = hasVendorImage && hasLiveImages && !upcConfirmed;
+  // Images are never auto-passed as "ok" — only the AI visual comparison
+  // (applyImageComparison, triggered by the AI deep check) can upgrade them
+  // from "warning" to "ok" after actually looking at both images.
+  // UPC confirmation proves product identity at the barcode level but does not
+  // verify what is displayed; a variant, wrong angle, or substitute image still
+  // needs a visual check. The "warning" stands until the AI pass runs.
   const imgSeverity: "ok" | "warning" =
-    // No catalog image at all — a gap in our own data, not a pass.
-    !hasVendorImage ? "warning"
-    : upcConfirmed && hasLiveImages ? "ok"
-    // Both sides have images but no UPC confirmation — images were NEVER compared.
-    // Reporting "ok" here meant "we didn't look" was indistinguishable from a pass.
-    : imagesUnchecked ? "warning"
-    // Our catalog has an image and the marketplace listing has none.
-    : "warning";
+    !hasVendorImage ? "warning"   // no catalog image — nothing to compare
+    : "warning";                  // has image — pending AI visual comparison
   // For the report `live` value: prefer a product page URL over raw image URL —
   // more useful in the exported report. The UI uses the dedicated liveImage /
   // liveUrl fields below to render a thumbnail plus a "View Product" link.
@@ -1591,22 +1571,20 @@ function compareToLive(
     field: "images", label: "Images",
     stored: vendorImgUrl ?? "N/A",
     live: liveImgOrUrl,
-    match: hasVendorImage ? hasLiveImages : true,
+    match: false, // always false until AI visual comparison confirms
     severity: imgSeverity,
     // Default note. The AI visual check (applyImageComparison) overwrites this
     // with its verdict when it runs; if it's skipped (opt-in / no API key) or
     // errors, this stays so the row never shows a bare, unexplained state.
-    note: imgSeverity === "warning"
-      ? (!hasVendorImage
-          ? "No catalog image — nothing to compare. Add an image to the vendor sheet."
-          : imagesUnchecked
-            ? "Images not compared — verify manually or run AI deep check."
-            : "Catalog has an image but the marketplace listing has none — review manually.")
-      : hasVendorImage && upcConfirmed && hasLiveImages
-        // Say why this passed without a visual comparison — otherwise a silent
-        // "ok" looks like the images were checked when they were not.
-        ? "Product identity confirmed by exact UPC match — images not compared."
-        : undefined,
+    // Note must include "not compared" so needsImageCheck() in the verify route
+    // targets these products for the AI post-pass.
+    note: !hasVendorImage
+      ? "No catalog image — nothing to compare. Add an image to the vendor sheet."
+      : !hasLiveImages
+        ? "Catalog has an image but the marketplace listing has none — review manually."
+        : upcConfirmed
+          ? "UPC identity confirmed — images not compared yet. Run AI deep check to verify visually."
+          : "Images not compared — run AI deep check or verify manually.",
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });
