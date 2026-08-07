@@ -866,10 +866,10 @@ async function fillTemplateXlsx(
     if (parseInt(r1, 10) > headerRowNum || parseInt(r2, 10) > headerRowNum) continue;
     const text = colLetterToHeader.get(c1) ?? "";
     const banner = (readRowLabels(rowMatches.find(rm => rm[1] === r1)?.[0] ?? "").get(c1) ?? text).trim();
-    // Matches both the MP-item template ("Required") and the new-listing
-    // template ("Required to sell on Walmart website"), but not "Required?"
-    // help columns or "Optional".
-    if (!/^required\b/i.test(banner)) continue;
+    // Matches "Required", "Required to sell on Walmart website" (new-listing),
+    // and "Item and Offer Details (Required/Conditionally Required)" (MP item match).
+    // Excludes "Optional" banners and standalone "Required?" help cells.
+    if (!/\brequired\b/i.test(banner) || /\boptional\b/i.test(banner)) continue;
     sawRequiredBanner = true;
     const from = colNum(c1), to = colNum(c2);
     for (const { letter } of colEntries) {
@@ -1114,6 +1114,8 @@ async function fillTemplateXlsx(
     for (const { col, letter } of exportEntries) {
       const options = dropdowns.get(letter);
       if (!options) continue;
+      // specproducttype is always written raw — no AI dropdown matching needed
+      if (normalizeKey(String(col.key ?? "")) === "specproducttype") continue;
       const raw = String(getProductField(p, col.key) ?? "");
       if (!raw.trim()) continue;
       const candidate = toDropdownRaw(raw);
@@ -1279,6 +1281,10 @@ async function fillTemplateXlsx(
       if (numericField) return raw.trim();
     }
 
+    // Spec Product Type is always written directly — bypass all dropdown logic so the
+    // Walmart subcategory appears in the cell regardless of the template's validation list.
+    if (isWalmart && normalizeKey(String(col.key ?? "")) === "specproducttype") return raw;
+
     if (!options) return raw;
     if (!raw.trim()) return "";
     const candidate = toDropdownRaw(raw);
@@ -1303,7 +1309,6 @@ async function fillTemplateXlsx(
     // dropdown — the correct Walmart subcategory must appear in the cell regardless
     // of whether the template's validation list includes it.
     if (value && !options.some((o) => o === value)) {
-      if (normalizeKey(String(col.key ?? "")) === "specproducttype") return raw;
       const header = colLetterToHeader.get(letter) ?? col.label ?? col.key;
       console.warn(
         `[export] dropped invalid dropdown value for "${header}": ${JSON.stringify(value)} ` +
