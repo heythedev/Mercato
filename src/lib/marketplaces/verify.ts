@@ -213,13 +213,11 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
         ? `AI visual check: images differ — ${v.reason}`
         : `Needs manual review — ${v.reason}`;
 
-    // Recompute overall status with HARD_FIELDS awareness.
-    // Only hard-field mismatches (title/brand/model) → "mismatch".
-    // Soft-field mismatches (images, description, dimensions) → "warning" at most.
+    // Recompute overall status — any field at warning or above prevents "ok".
     const hasHardMismatch = t.result.fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
-    const hasSoftMismatch = t.result.fields.some((f) => f.severity === "mismatch" && !HARD_FIELDS.has(f.field));
-    const hasHardWarning = t.result.fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
-    t.result.status = hasHardMismatch ? "mismatch" : (hasSoftMismatch || hasHardWarning) ? "warning" : "ok";
+    const hasMismatch = t.result.fields.some((f) => f.severity === "mismatch");
+    const hasAnyWarning = t.result.fields.some((f) => f.severity === "warning");
+    t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : hasAnyWarning ? "warning" : "ok";
   });
 }
 
@@ -282,11 +280,11 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
           t.field.match = false;
           t.field.note = `AI title check: different product — ${reason}`;
         }
-        // Recompute overall status (HARD_FIELDS is the shared set above)
+        // Recompute overall status — any field at warning or above prevents "ok".
         const hasHardMismatch = t.result.fields.some(f => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
-        const hasSoftMismatch = t.result.fields.some(f => f.severity === "mismatch" && !HARD_FIELDS.has(f.field));
-        const hasHardWarning = t.result.fields.some(f => f.severity === "warning" && HARD_FIELDS.has(f.field));
-        t.result.status = hasHardMismatch ? "mismatch" : (hasSoftMismatch || hasHardWarning) ? "warning" : "ok";
+        const hasMismatch = t.result.fields.some(f => f.severity === "mismatch");
+        const hasAnyWarning = t.result.fields.some(f => f.severity === "warning");
+        t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : hasAnyWarning ? "warning" : "ok";
       } catch { /* leave existing severity in place */ }
     }));
   }
@@ -1542,13 +1540,13 @@ function compareToLive(
   // or unsure, the "warning" stands and signals manual review.
   const liveImages = Array.isArray(liveData.images) ? liveData.images as string[] : [];
   const hasLiveImages = liveImages.length > 0;
-  const vendorImgUrl = p.imageUrl || (() => {
+  const vendorImgUrl = (p.imageUrl?.startsWith("http") ? p.imageUrl : null) || (() => {
     for (const [k, v] of Object.entries(vdRaw)) {
       if (/image|img|photo|picture|thumbnail/i.test(k) && typeof v === "string" && v.startsWith("http")) return v;
     }
     return null;
   })();
-  const hasVendorImage = !!vendorImgUrl;
+  const hasVendorImage = vendorImgUrl != null;
   // Images are a soft, advisory field — a difference here never proves the
   // listing is wrong (angles, packaging shots and lifestyle photos all differ
   // legitimately). So only ask for manual review when the images are actually
@@ -1701,20 +1699,18 @@ function compareToLive(
     severity: dimSeverity,
   });
 
-  // Status rollup — distinguish hard fields (identity-critical) from soft fields
-  // (informational). A warning on a soft field alone is surfaced in the report
-  // for manual review but does NOT change the overall status to "warning".
-  // Soft: images, description, dimensions  →  shown in report; a *mismatch* on
-  //       any field (including soft ones, e.g. the AI image verdict) still
-  //       escalates via hasMismatch below.
-  // Pack-qty title mismatches are always hard (never soft-downgraded).
+  // Status rollup — ALL fields must be satisfactory for a "Match" result.
+  // Any mismatch on any field → "mismatch" (hard fields) or "warning" (soft fields).
+  // Any warning on ANY field (hard or soft) → at minimum "warning", never "ok".
+  // This ensures that products with missing catalog images, unverified images,
+  // or missing descriptions are flagged for review rather than silently passing.
   const hasMismatch = fields.some((f) => f.severity === "mismatch");
-  const hasHardWarning = fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
-
+  const hasAnyWarning = fields.some((f) => f.severity === "warning");
+  const hasHardMismatch = fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
 
   return {
     productId: p.id,
-    status: hasMismatch ? "mismatch" : hasHardWarning ? "warning" : "ok",
+    status: hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : hasAnyWarning ? "warning" : "ok",
     fields,
     liveData,
   };
