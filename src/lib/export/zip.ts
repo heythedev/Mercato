@@ -864,12 +864,28 @@ async function fillTemplateXlsx(
   let sawRequiredBanner = false;
 
   type BannerSection = { colN: number; isRequired: boolean };
-  const bannerSections: BannerSection[] = [];
 
+  // Find the FIRST row above the header that has any "required" or "optional"
+  // banner text — that is the main section-divider row. Sub-section label rows
+  // that come below it (row 3, row 4) may also contain words like
+  // "Conditionally Required" but as part of individual field names; scanning
+  // those rows would create spurious required-section anchors at optional columns
+  // (e.g. "External Product ID Type" appears alongside "Conditionally Required"
+  // in row 3, which was mistakenly adding column R to requiredLetters).
+  let bannerRowXml: string | null = null;
   for (const rm of rowMatches) {
     const rn = parseInt(rm[1]);
-    if (rn >= headerRowNum) break; // only rows above the header
-    for (const [letter, label] of readRowLabels(rm[0])) {
+    if (rn >= headerRowNum) break;
+    const labels = readRowLabels(rm[0]);
+    if ([...labels.values()].some(l => /\b(required|optional)\b/i.test(l))) {
+      bannerRowXml = rm[0];
+      break; // use only the first matching row
+    }
+  }
+
+  const bannerSections: BannerSection[] = [];
+  if (bannerRowXml) {
+    for (const [letter, label] of readRowLabels(bannerRowXml)) {
       const hasRequired = /\brequired\b/i.test(label);
       const hasOptional = /\boptional\b/i.test(label);
       if (!hasRequired && !hasOptional) continue;
@@ -877,10 +893,8 @@ async function fillTemplateXlsx(
     }
   }
 
-  // Deduplicate (same column may appear in multiple banner rows) and sort left→right.
-  const seenBannerCols = new Set<number>();
+  // Sort left→right.
   const uniqueBanners = bannerSections
-    .filter(s => { if (seenBannerCols.has(s.colN)) return false; seenBannerCols.add(s.colN); return true; })
     .sort((a, b) => a.colN - b.colN);
 
   for (let i = 0; i < uniqueBanners.length; i++) {
