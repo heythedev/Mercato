@@ -1583,8 +1583,8 @@ function compareToLive(
       : !hasLiveImages
         ? "Catalog has an image but the marketplace listing has none — review manually."
         : upcConfirmed
-          ? "UPC identity confirmed — images not compared yet. Run AI deep check to verify visually."
-          : "Images not compared — run AI deep check or verify manually.",
+          ? "UPC identity confirmed — images not compared yet. Re-verify to run AI visual comparison."
+          : "Images not compared — re-verify to run AI visual comparison.",
     liveImage: liveImages[0] ?? "",
     liveUrl: liveProductUrl,
   });

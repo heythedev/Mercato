@@ -221,24 +221,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               Download Report
             </button>
           )}
-          {/* Also shown when nothing is flagged: products whose images were never
-              compared report as "ok", and those are exactly what a deep check
-              resolves. Gating on warnings alone hid the button from them. */}
-          {hasResults && (
-            <button
-              onClick={() => onRunVerify(true, true)}
-              disabled={loading}
-              title="Compare catalog and marketplace images with AI, ignoring differences in background, angle, lighting and cropping. Also re-checks flagged titles. Slower — it examines flagged products plus any whose images have not been compared."
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
-            >
-              <Sparkles className="w-4 h-4" />
-              AI deep check
-            </button>
-          )}
+          {/* AI image comparison runs automatically on every verify pass, so there
+              is no separate "AI deep check" button. Re-verify re-fetches all
+              marketplace data AND re-runs the image/title AI pass. */}
           {hasResults && (
             <button
               onClick={() => onRunVerify(true)}
               disabled={loading}
+              title="Re-fetch marketplace data and re-run AI image comparison for all products"
               className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
             >
               <ShieldCheck className="w-4 h-4" />

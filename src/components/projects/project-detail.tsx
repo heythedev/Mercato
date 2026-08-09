@@ -134,11 +134,10 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   // four or five times, we drive the resume loop here: keep POSTing while the
   // server reports work remaining, reporting cumulative progress as we go.
   /**
-   * `ai` enables the AI image/title adjudication pass. It costs a model call per
-   * flagged product, so it is off for a normal run and offered as an explicit
-   * "Deep check" action instead.
+   * AI image/title adjudication runs on every verification pass by default.
+   * `ai = false` can disable it explicitly (e.g. a quick re-fetch without model calls).
    */
-  async function runVerify(force = false, ai = false) {
+  async function runVerify(force = false, ai = true) {
     setLoading(true);
     setLoadingStep(1);
     // Move to the Verify step up front so its loader shows there — not the

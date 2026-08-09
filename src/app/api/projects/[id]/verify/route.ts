@@ -298,11 +298,11 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // a run cut short by the duration ceiling can be continued by calling again.
   // `?force=1` re-checks everything (the explicit "Re-verify" action).
   const force = _req.nextUrl.searchParams.get("force") === "1";
-  // AI image/title adjudication costs a model call per product and dominates the
-  // run at catalog scale, so it is opt-in via `?ai=1`. When enabled it only
-  // examines flagged (warning/mismatch) results — a clean barcode-confirmed
-  // match gains nothing from a vision check.
-  const useAi = _req.nextUrl.searchParams.get("ai") === "1";
+  // AI image/title adjudication runs by default on every verify pass. It only
+  // examines flagged (warning/mismatch) results and products whose images have
+  // not been compared — a clean barcode-confirmed match gains nothing from a
+  // vision check so it is skipped. Pass `?ai=0` to disable it explicitly.
+  const useAi = _req.nextUrl.searchParams.get("ai") !== "0";
 
   // A forced re-verify starts this run's progress from ZERO: clear the previous
   // run's verdicts server-side (the client already clears them visually). Without
