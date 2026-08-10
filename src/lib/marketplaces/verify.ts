@@ -1518,10 +1518,15 @@ function compareToLive(
     stored: vendorColour ?? "Not stated",
     live: liveColour ?? "Not stated",
     match: colourMatch,
-    // Soft: a colour difference is worth surfacing, but marketplaces and vendors
-    // name shades differently often enough that it should not condemn a product
-    // on its own. It escalates only when the AI/other hard fields also disagree.
-    severity: colourMatch ? "ok" : "warning",
+    // Colour mismatch → severity "mismatch" so the product rolls up to "warning"
+    // overall (hasMismatch = true in the rollup). Colour is NOT in HARD_FIELDS so
+    // the product can never reach "mismatch" status from colour alone — the cap is
+    // "warning", which is the right behaviour: a colour variant is a concern worth
+    // reviewing, not necessarily a definitively wrong listing.
+    // Previously "warning" was used here, but soft warnings (non-HARD_FIELDS) are
+    // intentionally invisible at the product level — the card would show "Match"
+    // even when catalog said "silver" and marketplace said "white".
+    severity: colourMatch ? "ok" : "mismatch",
     ...(colourComparable && !colourMatch
       ? { note: `Colour differs: catalog "${vendorColour}" vs ${marketplace} "${liveColour}"` }
       : !colourComparable
@@ -1711,14 +1716,32 @@ function compareToLive(
  * Handles: string containment, shared keyword (>3 chars), and acronym matching.
  * "BB" ↔ "Barefoot Bungalow", "GHF" ↔ "Greenland Home Fashions", "Ashley" ↔ "Signature Design by Ashley"
  */
+/**
+ * Industry words that appear in many brand names but don't identify any specific brand.
+ * Matching two brands solely on one of these creates false positives like
+ * "Elegant Lighting Inc." ↔ "Elitco Lighting" (both contain "lighting").
+ */
+const GENERIC_BRAND_WORDS = new Set([
+  "lighting", "furniture", "home", "homes", "design", "designs", "designer",
+  "international", "collection", "collections", "group", "company", "style",
+  "studio", "studios", "craft", "crafts", "works", "products", "industries",
+  "solutions", "trading", "manufacturing", "manufacturer", "brand", "brands",
+  "supply", "supplies", "store", "shops", "shop", "market", "distribution",
+  "wholesale", "retail", "decor", "decoration", "decorating",
+]);
+
 function brandsMatch(a: string, b: string): boolean {
   const al = a.toLowerCase().trim();
   const bl = b.toLowerCase().trim();
   if (!al || !bl) return true;
   if (bl.includes(al) || al.includes(bl)) return true;
 
-  // Shared keyword (>3 chars): "Ashley Furniture" ↔ "Signature Design by Ashley"
-  const words = (s: string) => s.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 3);
+  // Shared meaningful keyword (>3 chars, not a generic industry word):
+  // "Ashley Furniture" ↔ "Signature Design by Ashley" → shared "ashley" → match
+  // "Elegant Lighting Inc." ↔ "Elitco Lighting" → only shared word is "lighting"
+  //   (generic, skipped) → no match ✓
+  const words = (s: string) => s.replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+    .filter(w => w.length > 3 && !GENERIC_BRAND_WORDS.has(w));
   const wb = new Set(words(bl));
   if (words(al).some(w => wb.has(w))) return true;
 
