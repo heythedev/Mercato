@@ -1454,28 +1454,32 @@ function compareToLive(
   // we know it's the same product family.
   const liveBrandInVendorTitle = !!(liveBrand && p.name.toLowerCase().includes(liveBrand.toLowerCase()));
   const vendorBrandInLiveTitle = !!(p.brand && liveTitle.toLowerCase().includes(p.brand.toLowerCase()));
-  // A confirmed barcode match settles the question: the same GTIN is the same
-  // physical product, so differing brand strings are a naming difference
-  // (sub-brand, product line, parent company) rather than a wrong listing.
-  // "Bon Pro Plus" vs "Bon Tool" is the canonical case — brandsMatch() misses it
-  // because its shared-keyword rule only considers words longer than 3 chars,
-  // which discards the very token they share ("Bon").
-  const brandMatch = !p.brand || !liveBrand
-    || upcConfirmed
+  // Do the brand NAMES actually agree by string / cross-title? Used for severity.
+  const brandNamesAgree = !p.brand || !liveBrand
     || brandsMatch(p.brand, liveBrand)
     || liveBrandInVendorTitle
     || vendorBrandInLiveTitle;
+  // A confirmed barcode match settles PRODUCT IDENTITY — the same GTIN is the
+  // same physical product, so differing brand strings are a naming difference
+  // (sub-brand, product line, parent company) rather than a wrong listing.
+  // "Bon Pro Plus" vs "Bon Tool" is the canonical case — brandsMatch() misses it
+  // because its shared-keyword rule only considers words longer than 3 chars.
+  // Used for match:true/false on the row (product-identity check).
+  const brandMatch = brandNamesAgree || upcConfirmed;
   fields.push({
     field: "brand", label: "Brand",
     stored: p.brand ?? "N/A", live: liveBrand ?? "N/A",
     match: brandMatch,
-    severity: brandMatch ? "ok" : "warning",
-    // Only annotate the non-obvious pass: brands that read as different but are
-    // reconciled by the barcode. A plain string match needs no explanation.
-    ...(brandMatch && upcConfirmed && p.brand && liveBrand
-      && !brandsMatch(p.brand, liveBrand)
-      && !liveBrandInVendorTitle && !vendorBrandInLiveTitle
-      ? { note: "Brand differs, but the exact UPC match confirms it is the same product." }
+    // Always warn when brand names don't actually agree — even when UPC confirms
+    // identity. A brand discrepancy (e.g. "W Unlimited" vs "Bed Bath & Beyond")
+    // is worth reviewing regardless, and the note explains the UPC reconciliation.
+    severity: brandNamesAgree ? "ok" : "warning",
+    ...(p.brand && liveBrand && !brandNamesAgree
+      ? {
+          note: upcConfirmed
+            ? "Brand differs — may be a reseller, sub-brand, or labelling difference. The exact UPC match confirms it is the same physical product."
+            : "Brand name does not match the marketplace listing.",
+        }
       : {}),
   });
 
