@@ -43,10 +43,9 @@ function isAmazonMarketplace(marketplace: string): boolean {
  * True when a result has two images that nothing has actually compared.
  *
  * Selecting AI targets by product status alone is not enough: an unchecked
- * images row is reported as "ok" (a warning must mean something looks wrong,
- * not that we didn't look), so these products are "ok" overall and would be
- * filtered out before the AI pass ever saw them — which is precisely the case
- * the deep check exists to resolve.
+ * images row shows as "warning" but the product can still be "ok" overall
+ * (images are a soft field pre-AI). Filtering on status alone would miss these
+ * products; the note text "not compared" is the reliable marker.
  */
 function needsImageCheck(r: { fields: unknown }): boolean {
   const fields = (r.fields ?? []) as Array<{ field: string; note?: string; liveImage?: string; stored?: string }>;

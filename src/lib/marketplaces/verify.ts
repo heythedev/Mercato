@@ -214,10 +214,15 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
         : `Needs manual review — ${v.reason}`;
 
     // Recompute overall status after AI image verdict.
+    // Pre-AI, image warnings are "pending check" and are soft (don't escalate).
+    // Post-AI, if the image is still "warning" the AI ran but couldn't confirm
+    // (e.g. catalog image URL inaccessible) — that requires manual review, so
+    // it escalates to "warning" just like a hard-field warning.
     const hasHardMismatch = t.result.fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
     const hasMismatch = t.result.fields.some((f) => f.severity === "mismatch");
     const hasHardWarning = t.result.fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
-    t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : hasHardWarning ? "warning" : "ok";
+    const hasUnverifiedImage = t.result.fields.some((f) => f.field === "images" && f.severity === "warning");
+    t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : (hasHardWarning || hasUnverifiedImage) ? "warning" : "ok";
   });
 }
 
@@ -281,10 +286,12 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
           t.field.note = `AI title check: different product — ${reason}`;
         }
         // Recompute overall status after AI title verdict.
+        // Same rule as the image rollup: post-AI image warnings escalate.
         const hasHardMismatch = t.result.fields.some(f => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
         const hasMismatch = t.result.fields.some(f => f.severity === "mismatch");
         const hasHardWarning = t.result.fields.some(f => f.severity === "warning" && HARD_FIELDS.has(f.field));
-        t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : hasHardWarning ? "warning" : "ok";
+        const hasUnverifiedImage = t.result.fields.some(f => f.field === "images" && f.severity === "warning");
+        t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : (hasHardWarning || hasUnverifiedImage) ? "warning" : "ok";
       } catch { /* leave existing severity in place */ }
     }));
   }
