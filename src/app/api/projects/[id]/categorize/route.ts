@@ -518,11 +518,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       for (const r of results) existingCatById.set(r.productId, r.category);
     }
 
-    // Walmart new-listing: the listing template requires a "Spec Product Type"
-    // (from Walmart's PT taxonomy) that categorization doesn't produce. Assign it
-    // here so col E can be filled at export. Degrades to a no-op when the Seller
-    // API / taxonomy is unavailable — the field is simply left blank.
-    if (mpLower === "walmart" && project.isNewListing && productInputs.length > 0) {
+    // Walmart: assign a "Spec Product Type" (from Walmart's PT taxonomy) for all
+    // Walmart projects — both new-listing and item-match templates need column D
+    // filled with an exact taxonomy value. Degrades to a no-op when the Seller
+    // API / Moonshot is unavailable — the field is simply left blank.
+    if (mpLower === "walmart" && productInputs.length > 0) {
       try {
         setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
         const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");

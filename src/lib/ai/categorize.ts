@@ -809,7 +809,20 @@ If nothing fits, use "Uncategorized".`;
     : isSears
     ? "You are a product categorization expert for the Sears Marketplace. You are given the EXACT Sears category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. Sears sells tools, appliances, clothing, electronics, lawn care, automotive, and home goods. Do not invent paths. Always output the full 3-level path."
     : isWalmart
-    ? "You are a product categorization expert for the Walmart Marketplace seller portal. You are given the exact category list Walmart's item-setup accepts. Match each product to the single closest category from that list — using ONLY the entries provided. The result feeds directly into a Walmart listing, so it must be one of the listed values verbatim. Do not invent categories."
+    ? `You are a product categorization expert for the Walmart Marketplace seller portal. You are given the EXACT category list that Walmart's MP Item Setup template accepts (75 values). Match each product to the single closest category from that list — using ONLY the entries provided verbatim. Important mapping rules for Walmart's non-obvious category names:
+- "Sports & Recreation Other" covers ALL sports, fitness, cycling, outdoor recreation, camping, hunting, fishing
+- "Garden & Patio" covers outdoor furniture, planters, garden decor, patio accessories
+- "Home Decor, Kitchen, & Other" covers kitchen gadgets, cookware, bakeware, home accessories, candles, frames, rugs
+- "Household Cleaning Products & Supplies" covers cleaning chemicals, mops, vacuums, trash bags
+- "Electronics Accessories" covers cables (NON-HDMI), chargers, cases, screen protectors, mounts
+- "Electronics Cables" covers HDMI, DisplayPort, audio, networking, USB cables
+- "Tools" covers hand tools and power tools (drills, saws, wrenches, screwdrivers)
+- "Hardware" covers nuts, bolts, screws, brackets, fasteners, hinges, anchors
+- "Building Supply" covers lumber, drywall, insulation, flooring, paint, masonry
+- "Medical Aids & Equipment" covers mobility aids, medical devices, first aid
+- "Beauty, Personal Care, & Hygiene" covers makeup, skincare, haircare, razors, oral care
+- "Baby Transport" covers strollers, car seats, carriers, bouncers
+Do not invent categories. Output only values that appear verbatim in the list.`
     : "You are a product categorization expert for a major retail marketplace.";
 
   const reasoningInstruction = isMathis
@@ -836,6 +849,12 @@ STEP 4 — Pick the single leaf that most closely matches the product's specific
 STEP 1 — Identify what department the product belongs to on Sears (Appliances, Tools & Hardware, Clothing, Electronics, Lawn & Garden, etc.).
 STEP 2 — Find the matching section in the Sears taxonomy, then narrow to the right subcategory and leaf.
 STEP 3 — Copy the full 3-level path character-for-character.`
+    : isWalmart
+    ? `For EACH product, follow these steps:
+STEP 1 — Identify what the product physically IS (its core noun and function): e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
+STEP 2 — Use the category descriptions in your instructions to find the BEST matching Walmart template category. Remember: "Sports & Recreation Other" covers ALL cycling/fitness/sports gear; "Tools" covers hand/power tools; "Hardware" covers fasteners/brackets.
+STEP 3 — When two categories seem equally valid, pick the MORE SPECIFIC one (e.g. "Bedding" over "Home Decor, Kitchen, & Other" for a comforter; "Baby Transport" over "Baby Diapering, Care, & Other" for a stroller).
+STEP 4 — Copy the chosen category character-for-character from the list.`
     : `For each product, first think: "What is this product? What does it do / who uses it?" — then pick the best category. Use your knowledge of real-world products.`;
 
   const mathisSizeRule = isMathis ? `
