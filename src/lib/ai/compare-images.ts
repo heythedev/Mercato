@@ -99,8 +99,12 @@ export async function compareProductImages(
                 `Rules:\n` +
                 `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
                 `lifestyle staging, and image quality.\n` +
-                `- Different color/finish variants of the same model count as MATCH only if the ` +
-                `shape/design is clearly identical.\n` +
+                `- SAME product, SAME color/finish → MATCH.\n` +
+                `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
+                `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
+                `listings with different item IDs; a color difference means wrong product matched.\n` +
+                `- Minor shade differences that look like photography/lighting variation (same ` +
+                `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
                 `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
                 `a multi-pack shot) is a MISMATCH.\n` +
                 `- If either image is too unclear to judge, answer UNSURE.\n\n` +
@@ -181,12 +185,16 @@ export async function compareVendorAgainstAllImages(
                 `as the catalog image.\n\n` +
                 `Rules:\n` +
                 `- The listing photos may show different angles, or accessories and alternate ` +
-                `views of the same item. If ANY of them clearly shows the catalog product, ` +
-                `answer MATCH.\n` +
+                `views of the same item. If ANY of them clearly shows the catalog product ` +
+                `(same design AND same color/finish), answer MATCH.\n` +
                 `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
                 `lifestyle staging, and image quality.\n` +
-                `- Different color/finish variants of the same model count as MATCH only if the ` +
-                `shape/design is clearly identical.\n` +
+                `- SAME product, SAME color/finish → MATCH.\n` +
+                `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
+                `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
+                `listings; a color difference means the wrong product was matched.\n` +
+                `- Minor shade differences that look like photography/lighting variation (same ` +
+                `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
                 `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
                 `a multi-pack shot) is a MISMATCH.\n` +
                 `- If the images are too unclear to judge, answer UNSURE.\n\n` +

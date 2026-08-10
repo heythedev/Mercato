@@ -51,7 +51,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     "Catalog Image URL", `${mpLabel} Image URL`, "Image Result", "Image Note",
     ...FIELD_ORDER.filter(f => f !== "images").flatMap(f => {
       const label = FIELD_LABELS[f] ?? capitalize(f);
-      return [`${label} (Catalog)`, `${label} (${mpLabel})`, `${label} Result`];
+      return [`${label} (Catalog)`, `${label} (${mpLabel})`, `${label} Result`, `${label} Note`];
     }),
   ].map(h => `"${h}"`).join(",");
 
@@ -75,7 +75,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       imgField?.note ?? "",
       ...FIELD_ORDER.filter(f => f !== "images").flatMap(f => {
         const fr = byField[f];
-        return fr ? [fr.stored, fr.live, fr.severity] : ["N/A", "N/A", "N/A"];
+        return fr ? [fr.stored, fr.live, fr.severity, fr.note ?? ""] : ["N/A", "N/A", "N/A", ""];
       }),
     ].map(c => `"${String(c ?? "").replace(/"/g, '""')}"`);
 
