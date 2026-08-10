@@ -883,16 +883,6 @@ async function fillTemplateXlsx(
   // (e.g. "External Product ID Type" appears alongside "Conditionally Required"
   // in row 3, which was mistakenly adding column R to requiredLetters).
   let bannerRowXml: string | null = null;
-  if (marketplace.toLowerCase() === "walmart") {
-    // Diagnostic: dump every pre-header row's cell values so we can see
-    // what the banner rows actually contain in this template version.
-    for (const rm of rowMatches) {
-      const rn = parseInt(rm[1]);
-      if (rn >= headerRowNum) break;
-      const labels = readRowLabels(rm[0]);
-      console.log(`[banner-debug] row ${rn} labels:`, [...labels.entries()].map(([k,v]) => `${k}=${JSON.stringify(v.slice(0,60))}`).join(" | ") || "(empty)");
-    }
-  }
   for (const rm of rowMatches) {
     const rn = parseInt(rm[1]);
     if (rn >= headerRowNum) break;
@@ -902,14 +892,6 @@ async function fillTemplateXlsx(
       break; // use only the first matching row
     }
   }
-  if (marketplace.toLowerCase() === "walmart") {
-    console.log(`[banner-debug] headerRowNum=${headerRowNum} bannerRowFound=${bannerRowXml !== null}`);
-    if (bannerRowXml) {
-      const bl = readRowLabels(bannerRowXml);
-      console.log("[banner-debug] banner row cells:", [...bl.entries()].map(([k,v]) => `${k}=${JSON.stringify(v.slice(0,60))}`).join(" | "));
-    }
-  }
-
   const bannerSections: BannerSection[] = [];
   if (bannerRowXml) {
     for (const [letter, label] of readRowLabels(bannerRowXml)) {
@@ -958,23 +940,15 @@ async function fillTemplateXlsx(
   const alwaysExport = (e: ColEntry): boolean =>
     isCategoryCol(e) || normalizeKey(String(e.col.key ?? "")) === "specproducttype";
 
-  // Only narrow the export when the banner was found AND this isn't the
-  // new-listing template. The new-listing template keeps every mapped column.
-  const exportEntries = sawRequiredBanner && requiredLetters.size && !isNewListingTemplate
+  // Narrow the export to required-band columns when the banner was found.
+  // sawRequiredBanner is true only for templates (e.g. item_match) that carry
+  // "Required" / "Optional" section markers; new-listing templates have no such
+  // banners so sawRequiredBanner stays false and all mapped columns are exported.
+  // (Do NOT guard on isNewListingTemplate — "Spec Product Type" in the display-
+  //  label row normalises to the same key and would incorrectly set it to true.)
+  const exportEntries = sawRequiredBanner && requiredLetters.size
     ? colEntries.filter((e) => requiredLetters.has(e.letter) || alwaysExport(e))
     : colEntries;
-
-  if (marketplace.toLowerCase() === "walmart") {
-    console.log(`[banner-debug] sawRequiredBanner=${sawRequiredBanner} requiredLetters=[${[...requiredLetters].join(",")}] exportLetters=[${exportEntries.map(e=>e.letter).join(",")}]`);
-  }
-  if (sawRequiredBanner) {
-    console.log(
-      `[export] required columns: [${exportEntries.map(e => e.letter).join(", ")}] ; ` +
-      `optional left blank: [${colEntries.filter(e => !exportEntries.includes(e)).map(e => e.letter).join(", ") || "none"}]`,
-    );
-  } else if (marketplace.toLowerCase() === "walmart") {
-    console.log(`[banner-debug] sawRequiredBanner=false — exporting ALL ${colEntries.length} mapped columns (optional suppression disabled)`);
-  }
 
   // ── Dropdown options from dataValidations ──────────────────────────────────
   // Parse ALL dataValidation blocks first, then filter to type="list".
