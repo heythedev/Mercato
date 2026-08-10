@@ -325,15 +325,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // implausible ones fall through to the AI instead of being accepted
     // silently. `implausibleWalmartCategory` holds that judgement.
     const walmartCategoryById = new Map<string, { category: string; path: string }>();
+    // Spec Product Type from the Seller API live data. When the verification step
+    // matched via the Seller API the response includes productType — the exact
+    // value Walmart uses for that listing. This is more reliable than AI assignment
+    // so we persist it directly and skip those products in the AI pass below.
+    const walmartSpecTypeById = new Map<string, string>();
     let walmartRejected = 0;
     if (mpLower === "walmart") {
       for (const p of project.products) {
-        const parsed = parseWalmartCategoryPath(
-          (p.liveData as Record<string, unknown> | null)?.categoryPath,
-        );
+        const ld = p.liveData as Record<string, unknown> | null;
+        const parsed = parseWalmartCategoryPath(ld?.categoryPath);
         if (!parsed) continue;
         if (implausibleWalmartCategory(p.name, parsed.path)) { walmartRejected++; continue; }
         walmartCategoryById.set(p.id, parsed);
+        // productType is present when the Seller API was the match source.
+        const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
+        if (pt) walmartSpecTypeById.set(p.id, pt);
       }
       if (walmartRejected) {
         console.log(
@@ -372,6 +379,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       console.log(
         `[categorize] ${fromWalmart.length} products took Walmart's own category; ` +
           `${productInputs.length} left for the AI`,
+      );
+    }
+
+    // Save Spec Product Types sourced directly from the Seller API live data.
+    // These are exact values Walmart already has on file — no AI needed.
+    if (walmartSpecTypeById.size > 0) {
+      await inChunks([...walmartSpecTypeById], ([productId, specProductType]) =>
+        prisma.product.update({ where: { id: productId }, data: { specProductType } }),
+      );
+      console.log(
+        `[categorize] ${walmartSpecTypeById.size} products got Spec Product Type from live Seller API data`,
       );
     }
 
@@ -518,29 +536,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       for (const r of results) existingCatById.set(r.productId, r.category);
     }
 
-    // Walmart: assign a "Spec Product Type" (from Walmart's PT taxonomy) for all
-    // Walmart projects — both new-listing and item-match templates need column D
-    // filled with an exact taxonomy value. Degrades to a no-op when the Seller
-    // API / Moonshot is unavailable — the field is simply left blank.
-    if (mpLower === "walmart" && productInputs.length > 0) {
-      try {
-        setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
-        const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");
-        const specInputs = productInputs.map((p) => ({
-          id: p.id,
-          name: p.name,
-          brand: p.brand,
-          description: p.description,
-          category: existingCatById.get(p.id) ?? null,
-        }));
-        const specMap = await assignSpecProductTypes(specInputs);
-        if (specMap.size > 0) {
-          await inChunks([...specMap], ([productId, specProductType]) =>
-            prisma.product.update({ where: { id: productId }, data: { specProductType } }),
-          );
+    // Walmart: for products that didn't get a Spec Product Type from live Seller API
+    // data, use AI to assign one from Walmart's PT taxonomy. Skip products already
+    // covered above — live data is more accurate than AI inference.
+    if (mpLower === "walmart") {
+      // All products (including those that went through the Walmart category path)
+      // need a spec type. Use all project products minus those already assigned from
+      // live data.
+      const allProductsForSpec = project.products.filter(
+        (p) => !walmartSpecTypeById.has(p.id),
+      );
+      if (allProductsForSpec.length > 0) {
+        try {
+          setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
+          const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");
+          const specInputs = allProductsForSpec.map((p) => ({
+            id: p.id,
+            name: p.name,
+            brand: p.brand,
+            description: p.description,
+            category: existingCatById.get(p.id) ?? null,
+          }));
+          const specMap = await assignSpecProductTypes(specInputs);
+          if (specMap.size > 0) {
+            await inChunks([...specMap], ([productId, specProductType]) =>
+              prisma.product.update({ where: { id: productId }, data: { specProductType } }),
+            );
+          }
+        } catch (err) {
+          console.warn("[categorize] spec product-type assignment failed:", err);
         }
-      } catch (err) {
-        console.warn("[categorize] spec product-type assignment failed:", err);
       }
     }
 
