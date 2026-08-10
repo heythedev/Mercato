@@ -93,39 +93,50 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     const stateKey = `${productId}:${fieldKey}`;
     setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true }));
     try {
-      // Fetch images in the browser — user's residential IP bypasses CDN restrictions
-      // that block our server's data-center IP from downloading marketplace images.
+      // Hybrid fetch strategy:
+      // - Vendor/catalog image → sent as a URL to our server, which downloads it
+      //   server-side. Vendor CDNs don't block data-centre IPs; only Walmart CDN does.
+      //   We can't fetch vendor images via browser fetch() because vendor CDNs often
+      //   lack CORS headers (the <img> tag works fine but fetch() is blocked by CORS).
+      // - Live/Walmart images → browser fetches using the user's residential IP,
+      //   which is not blocked by Walmart's CDN. Walmart images are cross-origin
+      //   but Walmart's CDN does send Access-Control-Allow-Origin: * so fetch() works.
       const toB64 = async (url: string): Promise<{ b64: string; mime: string } | null> => {
         try {
-          const res = await fetch(url);
+          const res = await fetch(url, { mode: "cors" });
           if (!res.ok) return null;
           const mime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
           const buf = await res.arrayBuffer();
           const bytes = new Uint8Array(buf);
+          // Convert to base64 in chunks to avoid stack overflow on large images
           let bin = "";
-          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          const CHUNK = 8192;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+          }
           return { b64: btoa(bin), mime };
         } catch { return null; }
       };
-      const [vendorResult, ...liveResults] = await Promise.all([
-        toB64(vendorUrl),
-        ...liveUrls.slice(0, 3).map(toB64),
-      ]);
-      if (!vendorResult) {
-        setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Could not load catalog image in browser." }));
-        return;
-      }
+
+      // Fetch live/Walmart images in the browser (bypass Walmart CDN IP blocking)
+      const liveResults = await Promise.all(liveUrls.slice(0, 3).map(toB64));
       const usableLive = liveResults.filter((r): r is { b64: string; mime: string } => !!r);
+
       if (!usableLive.length) {
-        setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Marketplace images could not be loaded. Try viewing the product page directly." }));
+        setImgCheckState(prev => new Map(prev).set(stateKey, {
+          loading: false, verdict: "unsure",
+          note: "Marketplace images could not be fetched. Try opening the product page and re-verifying.",
+        }));
         return;
       }
+
+      // Send vendorUrl to the server for download (no CORS issue server-side),
+      // plus the live image bytes the browser already fetched.
       const res = await fetch("/api/compare-images", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          vendorB64: vendorResult.b64,
-          vendorMime: vendorResult.mime,
+          vendorUrl,
           liveB64: usableLive.map(r => r.b64),
           liveMime: usableLive.map(r => r.mime),
           productName,
@@ -136,12 +147,15 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       setImgCheckState(prev => new Map(prev).set(stateKey, {
         loading: false,
         verdict,
-        note: verdict === "match" ? `AI visual check: images match — ${reason}`
+        note: verdict === "match"    ? `AI visual check: images match — ${reason}`
             : verdict === "mismatch" ? `AI visual check: images differ — ${reason}`
-            : `Needs manual review — ${reason}`,
+            :                          `Needs manual review — ${reason}`,
       }));
     } catch {
-      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Image check failed — please verify manually." }));
+      setImgCheckState(prev => new Map(prev).set(stateKey, {
+        loading: false, verdict: "unsure",
+        note: "Image check failed — please verify manually.",
+      }));
     }
   };
   // A product can carry verifyStatus="discontinued" straight from import (the
@@ -585,11 +599,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
                             // Show the "Run AI Image Check" button when:
                             // - this is the images field
-                            // - the note indicates the server-side comparison failed
-                            // - a browser check hasn't already run/is loading
+                            // - the server-side comparison failed (CDN blocking)
+                            // - either no browser check has run yet, or it also failed (allow retry)
                             const isImageField = f.field === "images";
                             const serverFailed = isImageField && /image comparison failed|could not download marketplace image/i.test(f.note ?? "");
-                            const canRunBrowserCheck = serverFailed && !browserState;
+                            const browserAlsoFailed = browserState && !browserState.loading && browserState.verdict === "unsure";
+                            const canRunBrowserCheck = serverFailed && (!browserState || browserAlsoFailed);
                             const vendorUrl = f.stored?.startsWith("http") ? f.stored : "";
                             const liveImgUrl = f.liveImage || (isUrl(f.live) ? f.live : "");
 
@@ -615,17 +630,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                       {noteText}
                                     </p>
                                   )}
-                                  {canRunBrowserCheck && vendorUrl && liveImgUrl && (
+                                  {canRunBrowserCheck && vendorUrl && liveImgUrl && !browserState?.loading && (
                                     <button
                                       type="button"
                                       onClick={() => runBrowserImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name)}
                                       className="self-start rounded bg-yellow-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-yellow-700 transition"
                                     >
-                                      Run AI Image Check
+                                      {browserAlsoFailed ? "Retry AI Image Check" : "Run AI Image Check"}
                                     </button>
                                   )}
                                   {browserState?.loading && (
-                                    <p className="text-[10px] opacity-70">Fetching images and running AI comparison…</p>
+                                    <p className="text-[10px] opacity-70">Fetching Walmart image via browser and running AI check…</p>
                                   )}
                                 </div>
                               </div>
