@@ -85,115 +85,140 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const [reverifying, setReverifying] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  // Browser-side image comparison: keyed by "productId:field".
-  // Avoids CDN blocking that prevents server-side download of marketplace images.
-  const [imgCheckState, setImgCheckState] = useState<Map<string, { loading: boolean; verdict?: string; note?: string }>>(new Map());
+  // Image check state keyed by "productId:field".
+  // Stores current loading/verdict/attempt state for the AI visual check overlay.
+  const [imgCheckState, setImgCheckState] = useState<Map<string, {
+    loading: boolean; verdict?: string; note?: string; attempt?: number;
+  }>>(new Map());
   // Tracks which products have already had an auto-check triggered so we don't
   // fire again on every expand/collapse cycle.
   const autoCheckedRef = useRef<Set<string>>(new Set());
-  // Keep a stable ref to runBrowserImageCheck so the effect below doesn't need
-  // it in its dependency array (the function is recreated each render but is
-  // functionally stable — it only closes over the stable setImgCheckState setter).
-  const browserCheckFnRef = useRef<typeof runBrowserImageCheck | null>(null);
+  // Stable ref so the useEffect can call runImageCheck without a dep-array issue.
+  const imgCheckFnRef = useRef<typeof runImageCheck | null>(null);
 
-  const runBrowserImageCheck = async (productId: string, fieldKey: string, vendorUrl: string, liveUrls: string[], productName: string) => {
+  /**
+   * Run an AI image comparison for one product's images field.
+   *
+   * The server (compare-images API) fetches ALL images server-side using a tiered
+   * proxy strategy:
+   *   1. Direct fetch (works for vendor CDNs)
+   *   2. corsproxy.io — Cloudflare-hosted; Walmart CDN (also Cloudflare) won't
+   *      block Cloudflare IPs, so this reliably fetches Walmart images.
+   *   3. allorigins.win — independent fallback.
+   *
+   * No base64 transfer from the browser; just send the URLs.
+   *
+   * Retry logic:
+   *   - "unsure" (timeout / AI uncertainty) → auto-retry up to MAX_ATTEMPTS
+   *   - "mismatch" on first attempt → retry once to confirm before showing result
+   *   - network/server error → auto-retry up to MAX_ATTEMPTS
+   *   - "match" → done immediately (no retry needed)
+   */
+  async function runImageCheck(
+    productId: string,
+    fieldKey: string,
+    vendorUrl: string,
+    liveUrls: string[],
+    productName: string,
+    attempt = 1,
+  ) {
+    const MAX_ATTEMPTS = 3;
     const stateKey = `${productId}:${fieldKey}`;
-    setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true }));
+
+    setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt }));
+
+    const scheduleRetry = (delay: number) => {
+      setTimeout(() => runImageCheck(productId, fieldKey, vendorUrl, liveUrls, productName, attempt + 1), delay);
+    };
+
     try {
-      /**
-       * Fetch an image URL as base64. Two strategies attempted in order:
-       *
-       * 1. Direct fetch — works when the CDN sends CORS headers.
-       * 2. CORS proxy (corsproxy.io, Cloudflare-hosted) — Cloudflare IPs are not
-       *    blocked by Walmart CDN (Walmart itself runs on Cloudflare). This also
-       *    handles vendor CDNs that don't emit CORS headers, since the proxy adds
-       *    Access-Control-Allow-Origin: * to its response.
-       *
-       * Both attempts have a 15-second timeout so a slow CDN can't stall the UI.
-       */
-      const toB64 = async (url: string): Promise<{ b64: string; mime: string } | null> => {
-        const candidates = [
-          url,
-          `https://corsproxy.io/?${encodeURIComponent(url)}`,
-        ];
-        for (const fetchUrl of candidates) {
-          try {
-            const ctrl = new AbortController();
-            const tid = setTimeout(() => ctrl.abort(), 15_000);
-            const res = await fetch(fetchUrl, { mode: "cors", signal: ctrl.signal });
-            clearTimeout(tid);
-            if (!res.ok) continue;
-            const rawMime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
-            const mime = rawMime === "image/jpg" ? "image/jpeg" : rawMime;
-            const buf = await res.arrayBuffer();
-            if (!buf.byteLength) continue;
-            const bytes = new Uint8Array(buf);
-            let bin = "";
-            const CHUNK = 8192;
-            for (let i = 0; i < bytes.length; i += CHUNK) {
-              bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-            }
-            return { b64: btoa(bin), mime };
-          } catch { /* try next candidate */ }
+      const res = await fetch("/api/compare-images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vendorUrl, liveUrls, productName }),
+      });
+
+      if (!res.ok) {
+        // HTTP error (5xx, etc.) — retry with backoff
+        if (attempt < MAX_ATTEMPTS) {
+          setImgCheckState(prev => new Map(prev).set(stateKey, {
+            loading: true, attempt,
+            note: `Server error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
+          }));
+          scheduleRetry(attempt * 4_000);
+          return;
         }
-        return null;
-      };
-
-      // Fetch live/Walmart images in the browser.
-      // Primary: direct fetch (no IP block from user's residential IP).
-      // Fallback: CORS proxy (in case Walmart CDN lacks CORS headers).
-      const liveResults = await Promise.all(liveUrls.slice(0, 3).map(toB64));
-      const usableLive = liveResults.filter((r): r is { b64: string; mime: string } => !!r);
-
-      if (!usableLive.length) {
         setImgCheckState(prev => new Map(prev).set(stateKey, {
           loading: false, verdict: "unsure",
-          note: "Could not fetch marketplace image (tried direct + CORS proxy). View Product to verify manually.",
+          note: `Image check failed after ${MAX_ATTEMPTS} attempts — please verify manually.`,
         }));
         return;
       }
 
-      // The server downloads the vendor/catalog image (server-side, no CORS issue
-      // for vendor CDNs). Live image bytes are sent from the browser.
-      const res = await fetch("/api/compare-images", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          vendorUrl,
-          liveB64: usableLive.map(r => r.b64),
-          liveMime: usableLive.map(r => r.mime),
-          productName,
-        }),
-      });
       const data = await res.json() as { verdict: string; reason: string };
       const { verdict, reason } = data;
+
+      // "unsure" means the server couldn't load images or the AI was uncertain.
+      // Retry automatically — the proxy chain may succeed on a second attempt.
+      if (verdict === "unsure" && attempt < MAX_ATTEMPTS) {
+        setImgCheckState(prev => new Map(prev).set(stateKey, {
+          loading: true, attempt,
+          note: `Image check uncertain — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
+        }));
+        scheduleRetry(attempt * 4_000);
+        return;
+      }
+
+      // "mismatch" on first attempt: retry once to confirm before showing.
+      // A single proxy failure or compression artefact can cause a false mismatch.
+      if (verdict === "mismatch" && attempt === 1) {
+        setImgCheckState(prev => new Map(prev).set(stateKey, {
+          loading: true, attempt,
+          note: "Possible image mismatch — confirming with second check…",
+        }));
+        scheduleRetry(3_000);
+        return;
+      }
+
+      // Definitive result — display it.
       setImgCheckState(prev => new Map(prev).set(stateKey, {
         loading: false,
         verdict,
-        note: verdict === "match"    ? `AI visual check: images match — ${reason}`
-            : verdict === "mismatch" ? `AI visual check: images differ — ${reason}`
-            :                          `Needs manual review — ${reason}`,
+        note: verdict === "match"
+          ? `AI visual check: images match — ${reason}`
+          : verdict === "mismatch"
+          ? `AI visual check: images differ — ${reason}`
+          : `Needs manual review — ${reason}`,
       }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
-      console.error("[browser-img-check] failed:", msg);
+      console.error(`[img-check] attempt ${attempt} failed:`, msg);
+
+      if (attempt < MAX_ATTEMPTS) {
+        setImgCheckState(prev => new Map(prev).set(stateKey, {
+          loading: true, attempt,
+          note: `Connection error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
+        }));
+        scheduleRetry(attempt * 4_000);
+        return;
+      }
+
       setImgCheckState(prev => new Map(prev).set(stateKey, {
         loading: false, verdict: "unsure",
         note: "Image check failed — please verify manually.",
       }));
     }
-  };
+  }
 
   // Always keep the ref pointing at the latest version of the function.
-  browserCheckFnRef.current = runBrowserImageCheck;
+  imgCheckFnRef.current = runImageCheck;
 
-  // Auto-trigger the browser-side image check whenever a product is expanded
-  // and its server-side image comparison previously failed due to CDN blocking.
-  // This way the user never has to manually click anything — opening the row
-  // is enough to kick off the comparison automatically.
+  // Auto-trigger the image check whenever a product is expanded and its
+  // server-side image comparison previously failed due to CDN blocking.
+  // The user never has to manually click anything — expanding the row is enough.
   useEffect(() => {
     if (!expanded) return;
-    if (autoCheckedRef.current.has(expanded)) return; // already tried for this product
+    if (autoCheckedRef.current.has(expanded)) return; // already triggered for this product
 
     const product = products.find(p => p.id === expanded);
     if (!product?.verifyFields) return;
@@ -203,16 +228,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     const imgField = fields.find(f => f.field === "images");
     if (!imgField) return;
 
+    // Only auto-trigger when the server-side check previously failed
     const serverFailed = /image comparison failed|could not download marketplace image/i.test(imgField.note ?? "");
     if (!serverFailed) return;
 
-    const vendorUrl = imgField.stored?.startsWith("http") ? imgField.stored : "";
+    const vendorUrl  = imgField.stored?.startsWith("http") ? imgField.stored : "";
     const liveImgUrl = imgField.liveImage || (imgField.live?.startsWith("http") ? imgField.live : "");
     if (!vendorUrl || !liveImgUrl) return;
 
-    // Mark as triggered BEFORE calling so a fast state update can't re-enter.
+    // Mark before calling to prevent re-entry on rapid expand/collapse
     autoCheckedRef.current.add(expanded);
-    browserCheckFnRef.current?.(expanded, "images", vendorUrl, [liveImgUrl], product.name);
+    imgCheckFnRef.current?.(expanded, "images", vendorUrl, [liveImgUrl], product.name);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, products]);
 
@@ -656,15 +682,19 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                               : f.severity;
 
                             // The auto-check fires on expand (see useEffect above).
-                            // The retry button shows only when the browser check itself failed.
+                            // Show Retry button only once the check finishes as "unsure".
                             const isImageField = f.field === "images";
                             const serverFailed = isImageField && /image comparison failed|could not download marketplace image/i.test(f.note ?? "");
-                            const browserAlsoFailed = browserState && !browserState.loading && browserState.verdict === "unsure";
-                            // Only show "Retry" after an actual browser-check attempt that came back unsure.
-                            // The initial "Run" is no longer needed — the auto-trigger handles it.
-                            const canRetry = serverFailed && browserAlsoFailed;
-                            const vendorUrl = f.stored?.startsWith("http") ? f.stored : "";
+                            const checkDoneUnsure = browserState && !browserState.loading && browserState.verdict === "unsure";
+                            const canRetry = (serverFailed || isImageField) && checkDoneUnsure;
+                            const vendorUrl  = f.stored?.startsWith("http") ? f.stored : "";
                             const liveImgUrl = f.liveImage || (isUrl(f.live) ? f.live : "");
+
+                            // Loading message includes attempt counter when retrying
+                            const attemptNum = browserState?.attempt ?? 1;
+                            const loadingMsg = attemptNum > 1
+                              ? `Retrying AI image check… (attempt ${attemptNum}/3)`
+                              : "Running AI image check…";
 
                             if (!displayNote && !browserState?.loading) return null;
                             const style = AI_NOTE_STYLE[displaySeverity] ?? AI_NOTE_STYLE.warning;
@@ -681,7 +711,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                 </span>
                                 <div className={cn("flex flex-col gap-1.5 text-[11px] leading-relaxed", style.text)}>
                                   {browserState?.loading ? (
-                                    <p className="opacity-75">Running AI image check via browser…</p>
+                                    <p className="opacity-75">{browserState.note ?? loadingMsg}</p>
                                   ) : displayNote ? (
                                     <p>
                                       <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
@@ -695,15 +725,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                       type="button"
                                       onClick={() => {
                                         autoCheckedRef.current.delete(p.id);
-                                        runBrowserImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name);
+                                        runImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name);
                                       }}
                                       className="self-start rounded bg-yellow-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-yellow-700 transition"
                                     >
                                       Retry AI Image Check
                                     </button>
-                                  )}
-                                  {browserState?.loading && (
-                                    <p className="text-[10px] opacity-70">Fetching Walmart image via browser and running AI check…</p>
                                   )}
                                 </div>
                               </div>
