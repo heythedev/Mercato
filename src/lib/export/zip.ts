@@ -883,6 +883,16 @@ async function fillTemplateXlsx(
   // (e.g. "External Product ID Type" appears alongside "Conditionally Required"
   // in row 3, which was mistakenly adding column R to requiredLetters).
   let bannerRowXml: string | null = null;
+  if (marketplace.toLowerCase() === "walmart") {
+    // Diagnostic: dump every pre-header row's cell values so we can see
+    // what the banner rows actually contain in this template version.
+    for (const rm of rowMatches) {
+      const rn = parseInt(rm[1]);
+      if (rn >= headerRowNum) break;
+      const labels = readRowLabels(rm[0]);
+      console.log(`[banner-debug] row ${rn} labels:`, [...labels.entries()].map(([k,v]) => `${k}=${JSON.stringify(v.slice(0,60))}`).join(" | ") || "(empty)");
+    }
+  }
   for (const rm of rowMatches) {
     const rn = parseInt(rm[1]);
     if (rn >= headerRowNum) break;
@@ -890,6 +900,13 @@ async function fillTemplateXlsx(
     if ([...labels.values()].some(l => /\b(required|optional)\b/i.test(l))) {
       bannerRowXml = rm[0];
       break; // use only the first matching row
+    }
+  }
+  if (marketplace.toLowerCase() === "walmart") {
+    console.log(`[banner-debug] headerRowNum=${headerRowNum} bannerRowFound=${bannerRowXml !== null}`);
+    if (bannerRowXml) {
+      const bl = readRowLabels(bannerRowXml);
+      console.log("[banner-debug] banner row cells:", [...bl.entries()].map(([k,v]) => `${k}=${JSON.stringify(v.slice(0,60))}`).join(" | "));
     }
   }
 
@@ -947,11 +964,16 @@ async function fillTemplateXlsx(
     ? colEntries.filter((e) => requiredLetters.has(e.letter) || alwaysExport(e))
     : colEntries;
 
+  if (marketplace.toLowerCase() === "walmart") {
+    console.log(`[banner-debug] sawRequiredBanner=${sawRequiredBanner} requiredLetters=[${[...requiredLetters].join(",")}] exportLetters=[${exportEntries.map(e=>e.letter).join(",")}]`);
+  }
   if (sawRequiredBanner) {
     console.log(
       `[export] required columns: [${exportEntries.map(e => e.letter).join(", ")}] ; ` +
       `optional left blank: [${colEntries.filter(e => !exportEntries.includes(e)).map(e => e.letter).join(", ") || "none"}]`,
     );
+  } else if (marketplace.toLowerCase() === "walmart") {
+    console.log(`[banner-debug] sawRequiredBanner=false — exporting ALL ${colEntries.length} mapped columns (optional suppression disabled)`);
   }
 
   // ── Dropdown options from dataValidations ──────────────────────────────────
