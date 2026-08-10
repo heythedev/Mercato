@@ -85,6 +85,65 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const [reverifying, setReverifying] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // Browser-side image comparison: keyed by "productId:fieldIdx".
+  // Avoids CDN blocking that prevents server-side download of marketplace images.
+  const [imgCheckState, setImgCheckState] = useState<Map<string, { loading: boolean; verdict?: string; note?: string }>>(new Map());
+
+  const runBrowserImageCheck = async (productId: string, fieldKey: string, vendorUrl: string, liveUrls: string[], productName: string) => {
+    const stateKey = `${productId}:${fieldKey}`;
+    setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true }));
+    try {
+      // Fetch images in the browser — user's residential IP bypasses CDN restrictions
+      // that block our server's data-center IP from downloading marketplace images.
+      const toB64 = async (url: string): Promise<{ b64: string; mime: string } | null> => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const mime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
+          const buf = await res.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          return { b64: btoa(bin), mime };
+        } catch { return null; }
+      };
+      const [vendorResult, ...liveResults] = await Promise.all([
+        toB64(vendorUrl),
+        ...liveUrls.slice(0, 3).map(toB64),
+      ]);
+      if (!vendorResult) {
+        setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Could not load catalog image in browser." }));
+        return;
+      }
+      const usableLive = liveResults.filter((r): r is { b64: string; mime: string } => !!r);
+      if (!usableLive.length) {
+        setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Marketplace images could not be loaded. Try viewing the product page directly." }));
+        return;
+      }
+      const res = await fetch("/api/compare-images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vendorB64: vendorResult.b64,
+          vendorMime: vendorResult.mime,
+          liveB64: usableLive.map(r => r.b64),
+          liveMime: usableLive.map(r => r.mime),
+          productName,
+        }),
+      });
+      const data = await res.json() as { verdict: string; reason: string };
+      const { verdict, reason } = data;
+      setImgCheckState(prev => new Map(prev).set(stateKey, {
+        loading: false,
+        verdict,
+        note: verdict === "match" ? `AI visual check: images match — ${reason}`
+            : verdict === "mismatch" ? `AI visual check: images differ — ${reason}`
+            : `Needs manual review — ${reason}`,
+      }));
+    } catch {
+      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: "unsure", note: "Image check failed — please verify manually." }));
+    }
+  };
   // A product can carry verifyStatus="discontinued" straight from import (the
   // vendor sheet's status column), so its mere presence does NOT mean
   // verification has run. Treat the report as available only once the project
@@ -512,25 +571,63 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                               <p className="font-medium line-clamp-2">{f.live}</p>
                             )}
                           </div>
-                          {f.note && (() => {
-                            const style = AI_NOTE_STYLE[f.severity];
-                            // AI-generated verdicts are prefixed ("AI visual check:" /
-                            // "AI title check:" / "Needs manual review —"). A note without
-                            // that prefix is a static reviewer hint (e.g. the image check
-                            // was skipped), so label it "Review", not "AI Visual Check".
-                            const isAiNote = /^\s*(ai (visual|title) check|needs manual review)/i.test(f.note);
-                            const noteText = f.note.replace(/^\s*ai (visual|title) check:?\s*/i, "");
+                          {(() => {
+                            // For the images field, check if there's a browser-side result
+                            // that overrides the server-side note (used when the server
+                            // couldn't download the marketplace image due to CDN blocking).
+                            const stateKey = `${p.id}:${f.field}`;
+                            const browserState = imgCheckState.get(stateKey);
+                            const displayNote = browserState?.note ?? f.note;
+                            const displaySeverity: "ok" | "warning" | "mismatch" =
+                              browserState?.verdict === "match" ? "ok"
+                              : browserState?.verdict === "mismatch" ? "mismatch"
+                              : f.severity;
+
+                            // Show the "Run AI Image Check" button when:
+                            // - this is the images field
+                            // - the note indicates the server-side comparison failed
+                            // - a browser check hasn't already run/is loading
+                            const isImageField = f.field === "images";
+                            const serverFailed = isImageField && /image comparison failed|could not download marketplace image/i.test(f.note ?? "");
+                            const canRunBrowserCheck = serverFailed && !browserState;
+                            const vendorUrl = f.stored?.startsWith("http") ? f.stored : "";
+                            const liveImgUrl = f.liveImage || (isUrl(f.live) ? f.live : "");
+
+                            if (!displayNote && !canRunBrowserCheck) return null;
+                            const style = AI_NOTE_STYLE[displaySeverity] ?? AI_NOTE_STYLE.warning;
+                            const isAiNote = /^\s*(ai (visual|title) check|needs manual review)/i.test(displayNote ?? "");
+                            const noteText = (displayNote ?? "").replace(/^\s*ai (visual|title) check:?\s*/i, "");
                             return (
                               <div className={cn("col-span-3 flex items-start gap-2 rounded-lg px-3 py-2", style.wrap)}>
                                 <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-sm", style.badge)}>
-                                  <Sparkles className="h-3 w-3 text-white" />
+                                  {browserState?.loading ? (
+                                    <Loader2 className="h-3 w-3 text-white animate-spin" />
+                                  ) : (
+                                    <Sparkles className="h-3 w-3 text-white" />
+                                  )}
                                 </span>
-                                <p className={cn("text-[11px] leading-relaxed", style.text)}>
-                                  <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
-                                    {isAiNote ? "AI Visual Check" : "Review"}
-                                  </span>
-                                  {noteText}
-                                </p>
+                                <div className={cn("flex flex-col gap-1.5 text-[11px] leading-relaxed", style.text)}>
+                                  {displayNote && (
+                                    <p>
+                                      <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
+                                        {isAiNote ? "AI Visual Check" : "Review"}
+                                      </span>
+                                      {noteText}
+                                    </p>
+                                  )}
+                                  {canRunBrowserCheck && vendorUrl && liveImgUrl && (
+                                    <button
+                                      type="button"
+                                      onClick={() => runBrowserImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name)}
+                                      className="self-start rounded bg-yellow-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-yellow-700 transition"
+                                    >
+                                      Run AI Image Check
+                                    </button>
+                                  )}
+                                  {browserState?.loading && (
+                                    <p className="text-[10px] opacity-70">Fetching images and running AI comparison…</p>
+                                  )}
+                                </div>
                               </div>
                             );
                           })()}
