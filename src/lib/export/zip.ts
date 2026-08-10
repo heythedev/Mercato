@@ -718,13 +718,23 @@ async function fillTemplateXlsx(
   const rowMatches = [...sdMatch[1].matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)];
 
   // Read a row's cells as letter→label, resolving shared-string refs.
+  //
+  // IMPORTANT: XML attribute order is not guaranteed. The original regex captured
+  // only the attributes that appear AFTER r="..." which missed t="s" when it
+  // preceded r= (e.g. <c t="s" r="Q2" s="12">). In that case the shared-string
+  // lookup was skipped and the cell returned its raw index number ("42") instead
+  // of the resolved text ("Additional Information (Optional)"), causing banner
+  // detection to silently fail. Capture the full attribute string instead.
   const readRowLabels = (rowXml: string): Map<string, string> => {
     const out = new Map<string, string>();
-    for (const cm of rowXml.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"([^>]*)>([\s\S]*?)<\/c>/g)) {
-      const [, letter, attrs, content] = cm;
+    for (const cm of rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const [, allAttrs, content] = cm;
+      const letter = allAttrs.match(/\br="([A-Z]+)\d+"/)?.[1];
+      if (!letter) continue;
       const vVal = content.match(/<v>(\d+)<\/v>/)?.[1] ?? "";
       const tVal = content.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? "";
-      const label = /\bt="s"/.test(attrs) && vVal ? (ssArr[parseInt(vVal)] ?? "") : xmlUnescape(tVal || vVal);
+      // Check t="s" in the FULL attribute string — not just what follows r=
+      const label = /\bt="s"/.test(allAttrs) && vVal ? (ssArr[parseInt(vVal)] ?? "") : xmlUnescape(tVal || vVal);
       if (label) out.set(letter, label);
     }
     return out;
