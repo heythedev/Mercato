@@ -85,9 +85,16 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const [reverifying, setReverifying] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
-  // Browser-side image comparison: keyed by "productId:fieldIdx".
+  // Browser-side image comparison: keyed by "productId:field".
   // Avoids CDN blocking that prevents server-side download of marketplace images.
   const [imgCheckState, setImgCheckState] = useState<Map<string, { loading: boolean; verdict?: string; note?: string }>>(new Map());
+  // Tracks which products have already had an auto-check triggered so we don't
+  // fire again on every expand/collapse cycle.
+  const autoCheckedRef = useRef<Set<string>>(new Set());
+  // Keep a stable ref to runBrowserImageCheck so the effect below doesn't need
+  // it in its dependency array (the function is recreated each render but is
+  // functionally stable — it only closes over the stable setImgCheckState setter).
+  const browserCheckFnRef = useRef<typeof runBrowserImageCheck | null>(null);
 
   const runBrowserImageCheck = async (productId: string, fieldKey: string, vendorUrl: string, liveUrls: string[], productName: string) => {
     const stateKey = `${productId}:${fieldKey}`;
@@ -176,6 +183,39 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       }));
     }
   };
+
+  // Always keep the ref pointing at the latest version of the function.
+  browserCheckFnRef.current = runBrowserImageCheck;
+
+  // Auto-trigger the browser-side image check whenever a product is expanded
+  // and its server-side image comparison previously failed due to CDN blocking.
+  // This way the user never has to manually click anything — opening the row
+  // is enough to kick off the comparison automatically.
+  useEffect(() => {
+    if (!expanded) return;
+    if (autoCheckedRef.current.has(expanded)) return; // already tried for this product
+
+    const product = products.find(p => p.id === expanded);
+    if (!product?.verifyFields) return;
+
+    type FR = { field: string; stored?: string; live?: string; liveImage?: string; note?: string };
+    const fields = product.verifyFields as FR[];
+    const imgField = fields.find(f => f.field === "images");
+    if (!imgField) return;
+
+    const serverFailed = /image comparison failed|could not download marketplace image/i.test(imgField.note ?? "");
+    if (!serverFailed) return;
+
+    const vendorUrl = imgField.stored?.startsWith("http") ? imgField.stored : "";
+    const liveImgUrl = imgField.liveImage || (imgField.live?.startsWith("http") ? imgField.live : "");
+    if (!vendorUrl || !liveImgUrl) return;
+
+    // Mark as triggered BEFORE calling so a fast state update can't re-enter.
+    autoCheckedRef.current.add(expanded);
+    browserCheckFnRef.current?.(expanded, "images", vendorUrl, [liveImgUrl], product.name);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, products]);
+
   // A product can carry verifyStatus="discontinued" straight from import (the
   // vendor sheet's status column), so its mere presence does NOT mean
   // verification has run. Treat the report as available only once the project
@@ -615,18 +655,18 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                               : browserState?.verdict === "mismatch" ? "mismatch"
                               : f.severity;
 
-                            // Show the "Run AI Image Check" button when:
-                            // - this is the images field
-                            // - the server-side comparison failed (CDN blocking)
-                            // - either no browser check has run yet, or it also failed (allow retry)
+                            // The auto-check fires on expand (see useEffect above).
+                            // The retry button shows only when the browser check itself failed.
                             const isImageField = f.field === "images";
                             const serverFailed = isImageField && /image comparison failed|could not download marketplace image/i.test(f.note ?? "");
                             const browserAlsoFailed = browserState && !browserState.loading && browserState.verdict === "unsure";
-                            const canRunBrowserCheck = serverFailed && (!browserState || browserAlsoFailed);
+                            // Only show "Retry" after an actual browser-check attempt that came back unsure.
+                            // The initial "Run" is no longer needed — the auto-trigger handles it.
+                            const canRetry = serverFailed && browserAlsoFailed;
                             const vendorUrl = f.stored?.startsWith("http") ? f.stored : "";
                             const liveImgUrl = f.liveImage || (isUrl(f.live) ? f.live : "");
 
-                            if (!displayNote && !canRunBrowserCheck) return null;
+                            if (!displayNote && !browserState?.loading) return null;
                             const style = AI_NOTE_STYLE[displaySeverity] ?? AI_NOTE_STYLE.warning;
                             const isAiNote = /^\s*(ai (visual|title) check|needs manual review)/i.test(displayNote ?? "");
                             const noteText = (displayNote ?? "").replace(/^\s*ai (visual|title) check:?\s*/i, "");
@@ -640,21 +680,26 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                   )}
                                 </span>
                                 <div className={cn("flex flex-col gap-1.5 text-[11px] leading-relaxed", style.text)}>
-                                  {displayNote && (
+                                  {browserState?.loading ? (
+                                    <p className="opacity-75">Running AI image check via browser…</p>
+                                  ) : displayNote ? (
                                     <p>
                                       <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
                                         {isAiNote ? "AI Visual Check" : "Review"}
                                       </span>
                                       {noteText}
                                     </p>
-                                  )}
-                                  {canRunBrowserCheck && vendorUrl && liveImgUrl && !browserState?.loading && (
+                                  ) : null}
+                                  {canRetry && vendorUrl && liveImgUrl && (
                                     <button
                                       type="button"
-                                      onClick={() => runBrowserImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name)}
+                                      onClick={() => {
+                                        autoCheckedRef.current.delete(p.id);
+                                        runBrowserImageCheck(p.id, f.field, vendorUrl, [liveImgUrl], p.name);
+                                      }}
                                       className="self-start rounded bg-yellow-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-yellow-700 transition"
                                     >
-                                      {browserAlsoFailed ? "Retry AI Image Check" : "Run AI Image Check"}
+                                      Retry AI Image Check
                                     </button>
                                   )}
                                   {browserState?.loading && (
