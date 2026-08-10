@@ -100,6 +100,53 @@ export function withImageCache<T>(fn: () => Promise<T>): Promise<T> {
   return cacheStore.run(new Map(), fn);
 }
 
+// ── Image content builder ──────────────────────────────────────────────────────
+// When a binary download succeeded, pass the raw bytes (most reliable).
+// When the server download was blocked (CDN IP-block, 403, timeout) fall back
+// to a URL object — the AI SDK translates this to an `image_url` in the API
+// call, so Moonshot's own servers fetch the image rather than ours, bypassing
+// CDN restrictions on Render's IP range.
+type ImageContent =
+  | { type: "image"; image: Uint8Array; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" }
+  | { type: "image"; image: URL };
+
+function imageContent(downloaded: FetchedImage | null, url: string): ImageContent {
+  if (downloaded) {
+    return {
+      type: "image",
+      image: downloaded.data,
+      mediaType: downloaded.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+    };
+  }
+  // URL fallback — model fetches directly (no server-side download needed).
+  return { type: "image", image: new URL(url) };
+}
+
+const VISION_PROMPT_SINGLE =
+  `Rules:\n` +
+  `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
+  `lifestyle staging, and image quality.\n` +
+  `- SAME product, SAME color/finish → MATCH.\n` +
+  `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
+  `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
+  `listings with different item IDs; a color difference means wrong product matched.\n` +
+  `- Minor shade differences that look like photography/lighting variation (same ` +
+  `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
+  `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
+  `a multi-pack shot) is a MISMATCH.\n` +
+  `- If either image is too unclear to judge, answer UNSURE.\n\n` +
+  `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE. ` +
+  `On the second line give a one-sentence reason.`;
+
+function parseVisionResponse(text: string): ImageCompareResult {
+  const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  const first = (lines[0] ?? "").toUpperCase();
+  const reason = lines.slice(1).join(" ") || "No reason given";
+  if (first.startsWith("MATCH")) return { verdict: "match", reason };
+  if (first.startsWith("MISMATCH")) return { verdict: "mismatch", reason };
+  return { verdict: "unsure", reason };
+}
+
 // ── Single pair comparison ─────────────────────────────────────────────────────
 
 export async function compareProductImages(
@@ -115,8 +162,6 @@ export async function compareProductImages(
     fetchImageCached(vendorImageUrl),
     fetchImageCached(liveImageUrl),
   ]);
-  if (!vendorImg) return { verdict: "unsure", reason: "Could not download catalog image" };
-  if (!liveImg) return { verdict: "unsure", reason: "Could not download marketplace image" };
 
   try {
     const { text } = await generateText({
@@ -131,35 +176,16 @@ export async function compareProductImages(
                 `Product: "${productName}"\n\n` +
                 `Image 1 is from our product catalog. Image 2 is from a marketplace listing ` +
                 `we matched to this product. Decide whether both images show the SAME product.\n\n` +
-                `Rules:\n` +
-                `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
-                `lifestyle staging, and image quality.\n` +
-                `- SAME product, SAME color/finish → MATCH.\n` +
-                `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
-                `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
-                `listings with different item IDs; a color difference means wrong product matched.\n` +
-                `- Minor shade differences that look like photography/lighting variation (same ` +
-                `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
-                `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
-                `a multi-pack shot) is a MISMATCH.\n` +
-                `- If either image is too unclear to judge, answer UNSURE.\n\n` +
-                `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE. ` +
-                `On the second line give a one-sentence reason.`,
+                VISION_PROMPT_SINGLE,
             },
-            { type: "image", image: vendorImg.data, mediaType: vendorImg.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp" },
-            { type: "image", image: liveImg.data, mediaType: liveImg.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp" },
+            imageContent(vendorImg, vendorImageUrl),
+            imageContent(liveImg, liveImageUrl),
           ],
         },
       ],
       maxOutputTokens: 150,
     });
-
-    const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-    const first = (lines[0] ?? "").toUpperCase();
-    const reason = lines.slice(1).join(" ") || "No reason given";
-    if (first.startsWith("MATCH")) return { verdict: "match", reason };
-    if (first.startsWith("MISMATCH")) return { verdict: "mismatch", reason };
-    return { verdict: "unsure", reason };
+    return parseVisionResponse(text);
   } catch {
     return { verdict: "unsure", reason: "Image comparison failed" };
   }
@@ -196,13 +222,25 @@ export async function compareVendorAgainstAllImages(
     fetchImageCached(vendorImageUrl),
     ...urls.map((u) => fetchImageCached(u)),
   ]);
-  if (!vendorImg) return { verdict: "unsure", reason: "Could not download catalog image" };
-  const usableLive = liveImgs.filter((i): i is FetchedImage => !!i);
-  if (!usableLive.length) return { verdict: "unsure", reason: "Could not download marketplace image" };
 
-  const listingLabel = usableLive.length === 1
+  // Build image content — binary when the download succeeded, URL-based when it
+  // didn't.  URL-based tells the AI SDK to embed an image_url reference instead
+  // of base64 bytes, so Moonshot's own servers fetch the image.  This bypasses
+  // IP-level CDN blocking (Render's data-centre IPs are sometimes blocked by
+  // Walmart CDN even with correct browser headers).
+  const vendorContent = imageContent(vendorImg, vendorImageUrl);
+
+  const usableLive = liveImgs.filter((i): i is FetchedImage => !!i);
+  // Use binary for whichever live images downloaded; fall back to URL for the
+  // rest.  If NONE downloaded, use all URLs — never bail out here.
+  const liveContents: ImageContent[] = usableLive.length > 0
+    ? usableLive.map((img) => imageContent(img, ""))  // binary only — img always present
+    : urls.map((u) => imageContent(null, u));          // all-URL fallback
+
+  const liveCount = liveContents.length;
+  const listingLabel = liveCount === 1
     ? `Image 2 is from a marketplace listing`
-    : `Images 2-${usableLive.length + 1} are different photos from a single marketplace listing`;
+    : `Images 2-${liveCount + 1} are different photos from a single marketplace listing`;
 
   try {
     const { text } = await generateText({
@@ -236,28 +274,14 @@ export async function compareVendorAgainstAllImages(
                 `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE. ` +
                 `On the second line give a one-sentence reason.`,
             },
-            {
-              type: "image" as const,
-              image: vendorImg.data,
-              mediaType: vendorImg.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-            },
-            ...usableLive.map((img) => ({
-              type: "image" as const,
-              image: img.data,
-              mediaType: img.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-            })),
+            vendorContent,
+            ...liveContents,
           ],
         },
       ],
       maxOutputTokens: 150,
     });
-
-    const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-    const first = (lines[0] ?? "").toUpperCase();
-    const reason = lines.slice(1).join(" ") || "No reason given";
-    if (first.startsWith("MATCH")) return { verdict: "match", reason };
-    if (first.startsWith("MISMATCH")) return { verdict: "mismatch", reason };
-    return { verdict: "unsure", reason };
+    return parseVisionResponse(text);
   } catch {
     return { verdict: "unsure", reason: "Image comparison failed" };
   }
