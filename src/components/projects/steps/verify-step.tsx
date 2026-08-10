@@ -93,45 +93,61 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     const stateKey = `${productId}:${fieldKey}`;
     setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true }));
     try {
-      // Hybrid fetch strategy:
-      // - Vendor/catalog image → sent as a URL to our server, which downloads it
-      //   server-side. Vendor CDNs don't block data-centre IPs; only Walmart CDN does.
-      //   We can't fetch vendor images via browser fetch() because vendor CDNs often
-      //   lack CORS headers (the <img> tag works fine but fetch() is blocked by CORS).
-      // - Live/Walmart images → browser fetches using the user's residential IP,
-      //   which is not blocked by Walmart's CDN. Walmart images are cross-origin
-      //   but Walmart's CDN does send Access-Control-Allow-Origin: * so fetch() works.
+      /**
+       * Fetch an image URL as base64. Two strategies attempted in order:
+       *
+       * 1. Direct fetch — works when the CDN sends CORS headers.
+       * 2. CORS proxy (corsproxy.io, Cloudflare-hosted) — Cloudflare IPs are not
+       *    blocked by Walmart CDN (Walmart itself runs on Cloudflare). This also
+       *    handles vendor CDNs that don't emit CORS headers, since the proxy adds
+       *    Access-Control-Allow-Origin: * to its response.
+       *
+       * Both attempts have a 15-second timeout so a slow CDN can't stall the UI.
+       */
       const toB64 = async (url: string): Promise<{ b64: string; mime: string } | null> => {
-        try {
-          const res = await fetch(url, { mode: "cors" });
-          if (!res.ok) return null;
-          const mime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
-          const buf = await res.arrayBuffer();
-          const bytes = new Uint8Array(buf);
-          // Convert to base64 in chunks to avoid stack overflow on large images
-          let bin = "";
-          const CHUNK = 8192;
-          for (let i = 0; i < bytes.length; i += CHUNK) {
-            bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-          }
-          return { b64: btoa(bin), mime };
-        } catch { return null; }
+        const candidates = [
+          url,
+          `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        ];
+        for (const fetchUrl of candidates) {
+          try {
+            const ctrl = new AbortController();
+            const tid = setTimeout(() => ctrl.abort(), 15_000);
+            const res = await fetch(fetchUrl, { mode: "cors", signal: ctrl.signal });
+            clearTimeout(tid);
+            if (!res.ok) continue;
+            const rawMime = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
+            const mime = rawMime === "image/jpg" ? "image/jpeg" : rawMime;
+            const buf = await res.arrayBuffer();
+            if (!buf.byteLength) continue;
+            const bytes = new Uint8Array(buf);
+            let bin = "";
+            const CHUNK = 8192;
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+              bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+            }
+            return { b64: btoa(bin), mime };
+          } catch { /* try next candidate */ }
+        }
+        return null;
       };
 
-      // Fetch live/Walmart images in the browser (bypass Walmart CDN IP blocking)
+      // Fetch live/Walmart images in the browser.
+      // Primary: direct fetch (no IP block from user's residential IP).
+      // Fallback: CORS proxy (in case Walmart CDN lacks CORS headers).
       const liveResults = await Promise.all(liveUrls.slice(0, 3).map(toB64));
       const usableLive = liveResults.filter((r): r is { b64: string; mime: string } => !!r);
 
       if (!usableLive.length) {
         setImgCheckState(prev => new Map(prev).set(stateKey, {
           loading: false, verdict: "unsure",
-          note: "Marketplace images could not be fetched. Try opening the product page and re-verifying.",
+          note: "Could not fetch marketplace image (tried direct + CORS proxy). View Product to verify manually.",
         }));
         return;
       }
 
-      // Send vendorUrl to the server for download (no CORS issue server-side),
-      // plus the live image bytes the browser already fetched.
+      // The server downloads the vendor/catalog image (server-side, no CORS issue
+      // for vendor CDNs). Live image bytes are sent from the browser.
       const res = await fetch("/api/compare-images", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -151,7 +167,9 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             : verdict === "mismatch" ? `AI visual check: images differ — ${reason}`
             :                          `Needs manual review — ${reason}`,
       }));
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown error";
+      console.error("[browser-img-check] failed:", msg);
       setImgCheckState(prev => new Map(prev).set(stateKey, {
         loading: false, verdict: "unsure",
         note: "Image check failed — please verify manually.",

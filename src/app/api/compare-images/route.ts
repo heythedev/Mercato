@@ -104,13 +104,8 @@ export async function POST(req: NextRequest) {
   }
 
   // Fetch the vendor/catalog image server-side.
-  // Our server can reach vendor CDNs (elc.com, vendor.com, etc.) without issue.
-  // Only Walmart's CDN (i5.walmartimages.com) blocks server-side access.
-  const vendorBlock = await fetchImageAsBlock(vendorUrl);
-  if (!vendorBlock) {
-    return NextResponse.json({ verdict: "unsure", reason: "Could not load catalog image for comparison." });
-  }
-
+  // Our server can reach vendor CDNs (elc.com, vendor CDNs, etc.) without issue.
+  // Only Walmart's own CDN (i5.walmartimages.com) blocks data-centre IPs.
   // Decode the live images the browser already fetched.
   const liveBlocks: ImgBlock[] = liveB64
     .slice(0, 3)
@@ -120,6 +115,16 @@ export async function POST(req: NextRequest) {
   if (!liveBlocks.length) {
     return NextResponse.json({ verdict: "unsure", reason: "No usable marketplace images provided." });
   }
+
+  // Fetch the vendor/catalog image server-side.
+  // Our server can reach vendor CDNs (elc.com, vendor CDNs, etc.) without issue.
+  // Only Walmart's own CDN (i5.walmartimages.com) blocks data-centre IPs.
+  const vendorBlock = await fetchImageAsBlock(vendorUrl);
+  if (!vendorBlock) {
+    console.error(`[compare-images] Could not fetch vendor image server-side: ${vendorUrl}`);
+    return NextResponse.json({ verdict: "unsure", reason: "Could not load catalog image from vendor server — try re-verifying." });
+  }
+  console.log(`[compare-images] vendor OK (${vendorBlock.image.length} bytes), live: ${liveBlocks.length} images`);
 
   const liveCount = liveBlocks.length;
   const listingLabel = liveCount === 1
