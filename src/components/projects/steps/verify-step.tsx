@@ -95,24 +95,76 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const autoCheckedRef = useRef<Set<string>>(new Set());
   // Stable ref so the useEffect can call runImageCheck without a dep-array issue.
   const imgCheckFnRef = useRef<typeof runImageCheck | null>(null);
+  // Pending retry timers keyed by stateKey — used to cancel retries when a
+  // definitive result arrives or the product is collapsed.
+  const retryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Ref-copy of `expanded` so retry closures can check whether the product is
+  // still open without capturing a stale value.
+  const expandedRef = useRef<string | null>(null);
+
+  // Fields that affect the hard "Mismatch" escalation path.
+  // Must stay in sync with HARD_FIELDS in src/lib/marketplaces/verify.ts.
+  const HARD_FIELDS_SET = new Set(["title", "brand", "model", "upc"]);
+
+  /**
+   * Compute the product's effective displayed status, factoring in the browser
+   * AI image check result.  When the browser check has a definitive verdict,
+   * replace the images field's server-side severity and re-run the rollup:
+   *   hasMismatch (any "mismatch") → "warning"
+   *   hasHardMismatch (hard field "mismatch") → "mismatch"
+   *   hasHardWarning (hard field "warning") → "warning"
+   *   otherwise → "ok"
+   * This lets the collapsed card badge update immediately without waiting for a
+   * full re-verify round-trip.
+   */
+  const getEffectiveStatus = (product: { id: string; verifyStatus?: string | null; verifyFields?: unknown }) => {
+    const browserKey = `${product.id}:images`;
+    const browserCheck = imgCheckState.get(browserKey);
+    const dbStatus = product.verifyStatus ?? "not_found";
+
+    // No override: loading, no result, or still uncertain
+    if (!browserCheck || browserCheck.loading || !browserCheck.verdict || browserCheck.verdict === "unsure") {
+      return dbStatus;
+    }
+
+    const allFields = (product.verifyFields ?? []) as Array<{ field: string; severity?: string }>;
+    const nonImgFields = allFields.filter(f => f.field !== "images");
+
+    const hasHardMismatch  = nonImgFields.some(f => f.severity === "mismatch" && HARD_FIELDS_SET.has(f.field));
+    const hasMismatch      = nonImgFields.some(f => f.severity === "mismatch");
+    const hasHardWarning   = nonImgFields.some(f => f.severity === "warning"  && HARD_FIELDS_SET.has(f.field));
+
+    if (browserCheck.verdict === "mismatch") {
+      // Images differ — treat image as "mismatch" in rollup
+      if (hasHardMismatch) return "mismatch";
+      return "warning";
+    }
+
+    // verdict === "match" — image issue resolved, recalculate without it
+    if (hasHardMismatch) return "mismatch";
+    if (hasMismatch || hasHardWarning) return "warning";
+    return "ok";
+  };
 
   /**
    * Run an AI image comparison for one product's images field.
    *
-   * The server (compare-images API) fetches ALL images server-side using a tiered
-   * proxy strategy:
-   *   1. Direct fetch (works for vendor CDNs)
-   *   2. corsproxy.io — Cloudflare-hosted; Walmart CDN (also Cloudflare) won't
-   *      block Cloudflare IPs, so this reliably fetches Walmart images.
-   *   3. allorigins.win — independent fallback.
+   * The server (compare-images API) fetches ALL images server-side via a tiered
+   * proxy chain (direct → corsproxy.io → allorigins.win). No base64 transfer from
+   * the browser — just send the URLs.
    *
-   * No base64 transfer from the browser; just send the URLs.
+   * Retry logic (MAX_ATTEMPTS = 3):
+   *   - "unsure" or HTTP/network error → auto-retry with 4s/8s backoff
+   *   - "mismatch" on attempt 1 → retry once to confirm (avoids false diffs
+   *     from proxy compression artefacts)
+   *   - "match" → done immediately; also triggers onReverifyProduct to persist
+   *     the updated status to the database
    *
-   * Retry logic:
-   *   - "unsure" (timeout / AI uncertainty) → auto-retry up to MAX_ATTEMPTS
-   *   - "mismatch" on first attempt → retry once to confirm before showing result
-   *   - network/server error → auto-retry up to MAX_ATTEMPTS
-   *   - "match" → done immediately (no retry needed)
+   * Cancellation:
+   *   - Each retry stores its timer in retryTimersRef; a fresh call for the same
+   *     stateKey cancels any pending retry before starting.
+   *   - Retries check expandedRef at fire-time; if the product was collapsed
+   *     before the delay expires the retry is silently skipped.
    */
   async function runImageCheck(
     productId: string,
@@ -125,10 +177,28 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     const MAX_ATTEMPTS = 3;
     const stateKey = `${productId}:${fieldKey}`;
 
+    // Cancel any pending retry for this key before starting a fresh attempt.
+    const existing = retryTimersRef.current.get(stateKey);
+    if (existing) { clearTimeout(existing); retryTimersRef.current.delete(stateKey); }
+
     setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt }));
 
-    const scheduleRetry = (delay: number) => {
-      setTimeout(() => runImageCheck(productId, fieldKey, vendorUrl, liveUrls, productName, attempt + 1), delay);
+    const scheduleRetry = (delay: number, interimNote: string) => {
+      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt, note: interimNote }));
+      const timer = setTimeout(() => {
+        retryTimersRef.current.delete(stateKey);
+        // Skip if the product was collapsed while we were waiting.
+        if (expandedRef.current !== productId) return;
+        runImageCheck(productId, fieldKey, vendorUrl, liveUrls, productName, attempt + 1);
+      }, delay);
+      retryTimersRef.current.set(stateKey, timer);
+    };
+
+    const setFinal = (verdict: string, note: string) => {
+      // Clear any stale retry timer for this key.
+      const t = retryTimersRef.current.get(stateKey);
+      if (t) { clearTimeout(t); retryTimersRef.current.delete(stateKey); }
+      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict, note }));
     };
 
     try {
@@ -139,79 +209,58 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       });
 
       if (!res.ok) {
-        // HTTP error (5xx, etc.) — retry with backoff
         if (attempt < MAX_ATTEMPTS) {
-          setImgCheckState(prev => new Map(prev).set(stateKey, {
-            loading: true, attempt,
-            note: `Server error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
-          }));
-          scheduleRetry(attempt * 4_000);
+          scheduleRetry(attempt * 4_000, `Server error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
           return;
         }
-        setImgCheckState(prev => new Map(prev).set(stateKey, {
-          loading: false, verdict: "unsure",
-          note: `Image check failed after ${MAX_ATTEMPTS} attempts — please verify manually.`,
-        }));
+        setFinal("unsure", `Image check failed after ${MAX_ATTEMPTS} attempts — please verify manually.`);
         return;
       }
 
       const data = await res.json() as { verdict: string; reason: string };
       const { verdict, reason } = data;
 
-      // "unsure" means the server couldn't load images or the AI was uncertain.
-      // Retry automatically — the proxy chain may succeed on a second attempt.
+      // "unsure": proxy chain may have had a transient failure — retry.
       if (verdict === "unsure" && attempt < MAX_ATTEMPTS) {
-        setImgCheckState(prev => new Map(prev).set(stateKey, {
-          loading: true, attempt,
-          note: `Image check uncertain — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
-        }));
-        scheduleRetry(attempt * 4_000);
+        scheduleRetry(attempt * 4_000, `Image check uncertain — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
         return;
       }
 
       // "mismatch" on first attempt: retry once to confirm before showing.
-      // A single proxy failure or compression artefact can cause a false mismatch.
       if (verdict === "mismatch" && attempt === 1) {
-        setImgCheckState(prev => new Map(prev).set(stateKey, {
-          loading: true, attempt,
-          note: "Possible image mismatch — confirming with second check…",
-        }));
-        scheduleRetry(3_000);
+        scheduleRetry(3_000, "Possible image mismatch — confirming with second check…");
         return;
       }
 
       // Definitive result — display it.
-      setImgCheckState(prev => new Map(prev).set(stateKey, {
-        loading: false,
-        verdict,
-        note: verdict === "match"
-          ? `AI visual check: images match — ${reason}`
-          : verdict === "mismatch"
-          ? `AI visual check: images differ — ${reason}`
-          : `Needs manual review — ${reason}`,
-      }));
+      const note =
+        verdict === "match"    ? `AI visual check: images match — ${reason}` :
+        verdict === "mismatch" ? `AI visual check: images differ — ${reason}` :
+                                 `Needs manual review — ${reason}`;
+      setFinal(verdict, note);
+
+      // When images are confirmed as matching, trigger a lightweight re-verify
+      // so the database status updates and the product moves to the correct
+      // section without the user having to click Re-verify manually.
+      if (verdict === "match" && expandedRef.current === productId) {
+        setReverifying(productId);
+        onReverifyProduct(productId).finally(() => setReverifying(null));
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
       console.error(`[img-check] attempt ${attempt} failed:`, msg);
-
       if (attempt < MAX_ATTEMPTS) {
-        setImgCheckState(prev => new Map(prev).set(stateKey, {
-          loading: true, attempt,
-          note: `Connection error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`,
-        }));
-        scheduleRetry(attempt * 4_000);
+        scheduleRetry(attempt * 4_000, `Connection error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
         return;
       }
-
-      setImgCheckState(prev => new Map(prev).set(stateKey, {
-        loading: false, verdict: "unsure",
-        note: "Image check failed — please verify manually.",
-      }));
+      setFinal("unsure", "Image check failed — please verify manually.");
     }
   }
 
   // Always keep the ref pointing at the latest version of the function.
   imgCheckFnRef.current = runImageCheck;
+  // Keep expandedRef in sync so retry closures see the current value.
+  expandedRef.current = expanded;
 
   // Auto-trigger the image check whenever a product is expanded and its
   // server-side image comparison previously failed due to CDN blocking.
@@ -505,7 +554,8 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       {(hasResults || hasStreamedResults) && (
         <div className="space-y-2">
           {visibleProducts.map((p) => {
-            const cfg = STATUS_CONFIG[p.verifyStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
+            const effectiveStatus = getEffectiveStatus(p);
+            const cfg = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
             const Icon = cfg.icon;
             const fields = (p.verifyFields ?? []) as FieldResult[];
             const isOpen = expanded === p.id;
@@ -529,7 +579,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                     {cfg.label}
                   </span>
                   <span className="flex-1 text-sm font-medium truncate">{p.name}</span>
-                  {p.verifyStatus === "warning" && (
+                  {(p.verifyStatus === "warning" || effectiveStatus === "warning") && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -575,9 +625,44 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                   {isOpen ? <ChevronUp className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />}
                 </div>
 
-                {isOpen && (
-                  <div className="border-t bg-muted/20 divide-y">
-                    {/* SKU, UPC, ASIN always shown */}
+                {isOpen && (() => {
+                  const imgKey = `${p.id}:images`;
+                  const imgBrowser = imgCheckState.get(imgKey);
+                  // Show the AI image check banner at the TOP of the expanded panel
+                  // so the user can see the check status without scrolling down.
+                  const showBanner = imgBrowser && (imgBrowser.loading || imgBrowser.verdict);
+                  return (
+                    <>
+                      {showBanner && (
+                        <div className={cn(
+                          "border-t flex items-start gap-2.5 px-4 py-2.5 text-[11px] leading-relaxed",
+                          imgBrowser.loading
+                            ? "bg-yellow-50 dark:bg-yellow-950/30 text-yellow-800 dark:text-yellow-300"
+                            : imgBrowser.verdict === "match"
+                            ? "bg-green-50 dark:bg-green-950/30 text-green-800 dark:text-green-300"
+                            : imgBrowser.verdict === "mismatch"
+                            ? "bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-300"
+                            : "bg-yellow-50 dark:bg-yellow-950/30 text-yellow-800 dark:text-yellow-300"
+                        )}>
+                          <span className={cn(
+                            "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white shadow-sm",
+                            imgBrowser.loading ? "bg-yellow-500" :
+                            imgBrowser.verdict === "match" ? "bg-green-500" :
+                            imgBrowser.verdict === "mismatch" ? "bg-red-500" : "bg-yellow-500"
+                          )}>
+                            {imgBrowser.loading
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Sparkles className="h-3 w-3" />
+                            }
+                          </span>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="font-semibold uppercase tracking-wide text-[9px] opacity-70">AI Visual Check</span>
+                            <span>{imgBrowser.note ?? (imgBrowser.loading ? "Running AI image comparison…" : "")}</span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="border-t bg-muted/20 divide-y">
+                        {/* SKU, UPC, ASIN always shown */}
                     <div className="grid grid-cols-[90px_1fr_1fr] sm:grid-cols-[120px_1fr_1fr] gap-2 sm:gap-4 px-3 sm:px-4 py-2.5 text-xs">
                       <span className="font-medium text-muted-foreground">SKU</span>
                       <p className="font-medium">{p.vendorSku ?? "—"}</p>
@@ -743,7 +828,9 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                       <div className="px-4 py-2.5 text-xs text-muted-foreground">No comparison data available for this product.</div>
                     )}
                   </div>
-                )}
+                    </>
+                  );
+                })()}
               </div>
             );
           })}

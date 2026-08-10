@@ -33,36 +33,36 @@ const BROWSER_HEADERS = {
 type FetchedImage = { data: Uint8Array; mimeType: string };
 
 async function fetchImage(url: string): Promise<FetchedImage | null> {
-  // Attempt the download up to 2 times — CDNs occasionally return transient
-  // errors (429 / 5xx) on the first hit from a cold IP.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  if (!url?.startsWith("http")) return null;
+  // Tiered proxy strategy — same as the /api/compare-images endpoint:
+  //   1. Direct fetch (fast; works for vendor CDNs and sometimes Walmart)
+  //   2. corsproxy.io  — Cloudflare-hosted; Walmart CDN (also Cloudflare) won't
+  //      block Cloudflare IPs, so this reliably fetches Walmart images from Render
+  //   3. allorigins.win — independent fallback
+  const candidates = [
+    url,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  ];
+
+  for (const candidate of candidates) {
     try {
-      const res = await fetch(url, {
+      const res = await fetch(candidate, {
         signal: AbortSignal.timeout(20_000),
         headers: BROWSER_HEADERS,
         redirect: "follow",
       });
-      if (!res.ok) {
-        // On a 429 / 503 wait briefly then retry; any other error is final.
-        if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
-        }
-        return null;
-      }
+      if (!res.ok) continue;
       const mimeType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
       // Normalise image/jpg → image/jpeg so the AI SDK always sees a known type.
       const normMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
-      if (!SUPPORTED_MIME.test(mimeType)) return null;
+      // Skip HTML error pages that proxies sometimes return for blocked requests.
+      if (!SUPPORTED_MIME.test(normMime)) continue;
       const buf = new Uint8Array(await res.arrayBuffer());
-      if (!buf.length || buf.length > MAX_IMAGE_BYTES) return null;
+      if (buf.length < 512 || buf.length > MAX_IMAGE_BYTES) continue;
       return { data: buf, mimeType: normMime };
     } catch {
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      return null;
+      // timeout, network error — try next candidate
     }
   }
   return null;
