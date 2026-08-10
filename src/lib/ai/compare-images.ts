@@ -12,25 +12,60 @@ export type ImageCompareResult = {
 // ── Image download ────────────────────────────────────────────────────────────
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const SUPPORTED_MIME = /^image\/(jpeg|png|gif|webp)$/i;
+// image/jpg is non-standard but Walmart's CDN uses it; allow it alongside jpeg.
+const SUPPORTED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
+
+// Headers that look like a real Chrome browser on Windows.
+// Walmart's CDN (i5.walmartimages.com) blocks requests with minimal or
+// bot-identifying User-Agent strings — the browser can load the image fine
+// but a server with a fake UA gets a 403. This header set passes CDN checks.
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Referer": "https://www.walmart.com/",
+  "Sec-Fetch-Dest": "image",
+  "Sec-Fetch-Mode": "no-cors",
+  "Sec-Fetch-Site": "cross-site",
+};
 
 type FetchedImage = { data: Uint8Array; mimeType: string };
 
 async function fetchImage(url: string): Promise<FetchedImage | null> {
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10_000),
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; product-verify/1.0)" },
-    });
-    if (!res.ok) return null;
-    const mimeType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
-    if (!SUPPORTED_MIME.test(mimeType)) return null;
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (!buf.length || buf.length > MAX_IMAGE_BYTES) return null;
-    return { data: buf, mimeType };
-  } catch {
-    return null;
+  // Attempt the download up to 2 times — CDNs occasionally return transient
+  // errors (429 / 5xx) on the first hit from a cold IP.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(20_000),
+        headers: BROWSER_HEADERS,
+        redirect: "follow",
+      });
+      if (!res.ok) {
+        // On a 429 / 503 wait briefly then retry; any other error is final.
+        if (attempt === 0 && (res.status === 429 || res.status >= 500)) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        return null;
+      }
+      const mimeType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+      // Normalise image/jpg → image/jpeg so the AI SDK always sees a known type.
+      const normMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
+      if (!SUPPORTED_MIME.test(mimeType)) return null;
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (!buf.length || buf.length > MAX_IMAGE_BYTES) return null;
+      return { data: buf, mimeType: normMime };
+    } catch {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      return null;
+    }
   }
+  return null;
 }
 
 /**
