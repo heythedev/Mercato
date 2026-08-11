@@ -800,6 +800,11 @@ If nothing fits, use "Uncategorized".`;
     categorySection = taxonomies[mpLower] ?? `${marketplace} product categories`;
   }
 
+  // Walmart runs in two modes: RICH (walmart_taxonomy_raw.json present → real
+  // "Category > Product Type Group" paths from Walmart's item taxonomy) and
+  // FLAT (fallback → the 75 template dropdown values). The prompt text differs.
+  const walmartRichMode = isWalmart && (availableCategories ?? []).some((c) => c.includes(" > "));
+
   const storeContext = isMathis
     ? "You are a product categorization expert for Mathis Brothers / Mathis Home. You are given the official Mirakl taxonomy sheet (Department > Category > Subcategory > Product Type). Your job is to match each product to the leaf path whose NAME best matches the product type — using ONLY the taxonomy list. Do not invent paths. Do not relocate a product to a different department based on assumptions about adult vs kids, room type, or how a retailer 'usually' organizes furniture."
     : isTemu
@@ -808,6 +813,14 @@ If nothing fits, use "Uncategorized".`;
     ? "You are a product categorization expert for the Best Buy marketplace. Best Buy sells ONLY electronics, computers, home appliances, home theater, gaming, cameras, mobile devices, and health/fitness tech. You are given the EXACT Best Buy category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. If a product clearly does not belong on Best Buy (construction tools, masonry materials, hardware supplies, industrial parts, raw materials, etc.), use 'Uncategorized'. Do not invent paths. Always output the full 3-level path for products that DO belong on Best Buy."
     : isSears
     ? "You are a product categorization expert for the Sears Marketplace. You are given the EXACT Sears category taxonomy (Category > Subcategory > Sub-Subcategory). Match each product to the single most specific leaf path from that taxonomy — using ONLY the paths listed. Sears sells tools, appliances, clothing, electronics, lawn care, automotive, and home goods. Do not invent paths. Always output the full 3-level path."
+    : walmartRichMode
+    ? `You are a product categorization expert for the Walmart Marketplace seller portal. You are given Walmart's OFFICIAL item taxonomy (Category > Product Type Group), sourced directly from Walmart's Marketplace taxonomy API. Match each product to the single most specific 2-level path from that taxonomy — using ONLY the paths listed, copied character-for-character. Do not invent paths. Do not shorten a path to just the category. The output must be a real Walmart taxonomy entry usable for listing without manual remapping.
+Disambiguation rules:
+- Match by what the product physically IS (its core noun/function), not who it's for or what it attaches to
+- Sport/activity gear → "Sports & Outdoors > …" (cycling, fishing, camping, fitness, hunting)
+- Hand/power tools and building materials → "Home Improvement > …"
+- Kitchenware, decor, bedding, storage → "Home > …"
+- A product for a child is still its object type (a kids' bike → Sports & Outdoors cycling group, not Toys) unless it is inherently a toy or baby gear`
     : isWalmart
     ? `You are a product categorization expert for the Walmart Marketplace seller portal. You are given the EXACT category list that Walmart's MP Item Setup template accepts (75 values). Match each product to the single closest category from that list — using ONLY the entries provided verbatim. Important mapping rules for Walmart's non-obvious category names:
 - "Sports & Recreation Other" covers ALL sports, fitness, cycling, outdoor recreation, camping, hunting, fishing
@@ -849,6 +862,12 @@ STEP 4 — Pick the single leaf that most closely matches the product's specific
 STEP 1 — Identify what department the product belongs to on Sears (Appliances, Tools & Hardware, Clothing, Electronics, Lawn & Garden, etc.).
 STEP 2 — Find the matching section in the Sears taxonomy, then narrow to the right subcategory and leaf.
 STEP 3 — Copy the full 3-level path character-for-character.`
+    : walmartRichMode
+    ? `For EACH product, follow these steps:
+STEP 1 — Identify what the product physically IS (its core noun and function): e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
+STEP 2 — Find the taxonomy CATEGORY that covers that object type (e.g. bicycle lock → Sports & Outdoors; kitchen knife → Home; table lamp → Home).
+STEP 3 — Within that category, pick the Product Type Group whose name most closely matches the product (e.g. "Sports & Outdoors > Cycling", "Home > Kitchen Cutting Utensils & Tools", "Home > Lamps and Light Bulbs Lighting & Light Fixtures").
+STEP 4 — Copy the full 2-level path character-for-character from the list.`
     : isWalmart
     ? `For EACH product, follow these steps:
 STEP 1 — Identify what the product physically IS (its core noun and function): e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
@@ -916,6 +935,8 @@ ${noInventRule}
     ? `[{"index":1,"category":"Tools & Hardware > Power Tools > Drills & Drivers","path":"Tools & Hardware > Power Tools > Drills & Drivers","confidence":0.95},{"index":2,"category":"Appliances > Major Appliances > Refrigerators","path":"Appliances > Major Appliances > Refrigerators","confidence":0.90},...]`
     : isMathis
     ? `[{"index":1,"category":"Baby & Kids > Kids Furniture > Daybeds","path":"Baby & Kids > Kids Furniture > Daybeds","confidence":0.95},...]`
+    : walmartRichMode
+    ? `[{"index":1,"category":"Sports & Outdoors > Cycling","path":"Sports & Outdoors > Cycling","confidence":0.95},{"index":2,"category":"Home > Kitchen Cutting Utensils & Tools","path":"Home > Kitchen Cutting Utensils & Tools","confidence":0.9},...]`
     : isWalmart
     ? `[{"index":1,"category":"Furniture","path":"Furniture","confidence":0.95},{"index":2,"category":"Home Decor, Kitchen, & Other","path":"Home Decor, Kitchen, & Other","confidence":0.9},...]`
     : `[{"index":1,"category":"Category Name","path":"Category Name","confidence":0.95},...]`;

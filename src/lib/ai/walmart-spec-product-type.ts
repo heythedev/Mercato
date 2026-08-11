@@ -1,25 +1,33 @@
 import { generateText } from "ai";
 import { moonshot, moonshotConfigured, moonshotTemperature } from "@/lib/ai/moonshot";
+import { loadWalmartProductTypes, productTypesForCategoryPath } from "@/lib/ai/walmart-taxonomy";
 
 // Walmart's "Spec Product Type" is a required field on the new-listing template
 // (e.g. "Bicycle Tires", "Dream Catcher"). The valid list is Walmart's Product
-// Type taxonomy, fetched live from the Seller API — it is not embedded in the
-// template. This module caches that list and assigns each product a product
-// type from it via the AI model.
+// Type taxonomy — it is not embedded in the template. This module resolves that
+// list (local walmart_taxonomy_raw.json first, live Seller API as fallback) and
+// assigns each product a product type from it via the AI model.
 
-// In-process cache of the product-type NAMES. The taxonomy is large and
-// changes rarely, so one fetch serves a whole categorize run (and beyond, until
-// TTL). null = not yet loaded; [] = loaded but empty (API unavailable).
+// In-process cache of the product-type NAMES from the live API fallback. The
+// taxonomy is large and changes rarely, so one fetch serves a whole categorize
+// run (and beyond, until TTL). null = not yet loaded; [] = loaded but empty
+// (API unavailable). The local-JSON path has its own mtime cache and skips this.
 let cachedTypes: string[] | null = null;
 let cachedAt = 0;
 const TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
 /**
- * The valid Spec Product Type names, from the Walmart taxonomy API.
- * Returns [] (never throws) when the API/creds are unavailable, so the caller
- * degrades to leaving the field blank rather than failing the whole run.
+ * The valid Spec Product Type names. Preferred source is the local raw taxonomy
+ * JSON (walmart_taxonomy_raw.json — ~7K types, no credentials or network
+ * needed); the live Seller API taxonomy is the fallback when the file is absent.
+ * Returns [] (never throws) when neither is available, so the caller degrades
+ * to leaving the field blank rather than failing the whole run.
  */
 export async function loadSpecProductTypes(): Promise<string[]> {
+  // Local file first — deterministic, credential-free, hot-swappable.
+  const local = loadWalmartProductTypes();
+  if (local?.length) return local;
+
   if (cachedTypes && Date.now() - cachedAt < TTL_MS) return cachedTypes;
   try {
     const { getItemTaxonomy, sellerApiConfigured } = await import("@/lib/walmart/seller-client");
@@ -60,20 +68,40 @@ export async function assignSpecProductTypes(
   if (!types.length) return result; // taxonomy unavailable → leave blank
 
   const allowed = new Set(types);
-  // The full taxonomy list goes into every batch prompt, so the auto-tier model
-  // (up to 128k) keeps large taxonomies from overflowing context.
+  // The taxonomy list can be very large, so the auto-tier model (up to 128k)
+  // keeps big prompts from overflowing context.
   const model = process.env.CATEGORIZE_MODEL ?? "moonshot-v1-auto";
 
-  // The full taxonomy can be very large. Send it once per batch; keep batches
-  // small so the list + products fit comfortably in context.
-  const typeList = types.map((t) => `- ${t}`).join("\n");
   const BATCH = 15;
   const CONCURRENCY = 3;
 
-  const batches: SpecTypeInput[][] = [];
-  for (let i = 0; i < products.length; i += BATCH) batches.push(products.slice(i, i + BATCH));
+  // Scope the prompt's type list per product where possible: a product whose
+  // assigned category resolves in the raw taxonomy ("Home > Table Lamps") only
+  // needs its category's slice of the ~7K-entry list — a far smaller prompt and
+  // a far harder-to-miss target. Products without a resolvable category are
+  // batched separately against the full list (the pre-JSON behaviour).
+  const fullTypeList = types.map((t) => `- ${t}`).join("\n");
+  const byScope = new Map<string, { list: string; items: SpecTypeInput[] }>();
+  for (const p of products) {
+    const scoped = p.category ? productTypesForCategoryPath(p.category) : null;
+    const key = scoped ? p.category!.trim() : "";
+    if (!byScope.has(key)) {
+      byScope.set(key, {
+        list: scoped ? scoped.map((t) => `- ${t}`).join("\n") : fullTypeList,
+        items: [],
+      });
+    }
+    byScope.get(key)!.items.push(p);
+  }
 
-  const runBatch = async (batch: SpecTypeInput[]): Promise<void> => {
+  const batches: { typeList: string; batch: SpecTypeInput[] }[] = [];
+  for (const { list, items } of byScope.values()) {
+    for (let i = 0; i < items.length; i += BATCH) {
+      batches.push({ typeList: list, batch: items.slice(i, i + BATCH) });
+    }
+  }
+
+  const runBatch = async ({ typeList, batch }: { typeList: string; batch: SpecTypeInput[] }): Promise<void> => {
     const list = batch.map((p, idx) => {
       let line = `${idx + 1}. "${p.name}"`;
       if (p.brand) line += ` by ${p.brand}`;
