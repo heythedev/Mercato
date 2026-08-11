@@ -1289,16 +1289,23 @@ async function fillTemplateXlsx(
       return Number.isFinite(n) && n > 0 ? String(n) : WEIGHT_FALLBACK;
     }
 
-    // Walmart Product Category: the stored value is whatever categorization
-    // assigned (a rich path when the taxonomy CSV is present, otherwise already
-    // a template value). Collapse it to one of the 75 dropdown values before
-    // dropdown matching runs, so it lands on a value the template accepts.
+    // Walmart Product Category: prefer the live categoryPath (Walmart's own category
+    // from the Affiliate API, stored during verification) over the AI-assigned broad
+    // bucket from marketplaceCategory. For unverified products the AI bucket is used
+    // as the fallback. Either way, mapToTemplateCategory below converts to one of the
+    // 75 dropdown values the Walmart template accepts.
     if (isWalmart) {
       const nk = normalizeKey(col.key);
       const headerNk = normalizeKey(colLetterToHeader.get(letter) ?? "");
-      if (raw.trim() && (nk === "productcategory" || nk === "category" ||
-          headerNk === "productcategory" || headerNk === "category")) {
-        raw = mapToTemplateCategory(raw) ?? "";
+      if (nk === "productcategory" || nk === "category" ||
+          headerNk === "productcategory" || headerNk === "category") {
+        // categoryPath is Walmart's own live category ("Home > Table Lamps") — more
+        // accurate than our AI guess. Use it when present.
+        const livePath = (p as { categoryPath?: string | null }).categoryPath?.trim();
+        if (livePath) raw = livePath;
+        // If raw is still empty after the live path check, leave it blank rather
+        // than writing an invalid value — mapToTemplateCategory handles the rest.
+        if (raw.trim()) raw = mapToTemplateCategory(raw) ?? "";
       }
     }
 
