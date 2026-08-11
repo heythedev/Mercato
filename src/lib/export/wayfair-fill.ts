@@ -1,4 +1,5 @@
 import type { Product } from "@prisma/client";
+import { toDisplayBarcode } from "../barcode";
 
 /**
  * Wayfair template-fill scaffold (Option B — dedicated filler).
@@ -95,7 +96,9 @@ export function resolveWayfairPrice(p: Product, margin = WAYFAIR_MARGIN): Wayfai
 export const WAYFAIR_CORE_FIELD_KEYS: Record<string, (p: Product) => string> = {
   "core::supplierPartNumber": (p) => p.vendorSku ?? "",
   "core::brand": (p) => p.brand ?? "",
-  "core::upc": (p) => p.upc ?? "",
+  // Re-normalized so an 11-digit UPC (leading zero stripped by Excel) goes out
+  // left-padded to the 12 digits marketplaces require.
+  "core::upc": (p) => (p.upc ? toDisplayBarcode(p.upc) ?? p.upc : ""),
   "core::productName": (p) => p.name ?? "",
   // Pricing → Base Cost carries the wholesale cost. Whether the *submitted* price
   // (cost × 1.25) belongs in Base Cost or a separate price field depends on the real

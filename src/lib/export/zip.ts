@@ -32,7 +32,7 @@ import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { matchDropdownValues, dropdownKey, type DropdownQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
 import { applyWayfairEligibility } from "./wayfair-eligibility";
-import { ASIN_RE } from "../barcode";
+import { ASIN_RE, toDisplayBarcode } from "../barcode";
 import { readXlsxGrid } from "../vendor/xlsx-lite";
 
 type Column = { key: string; label: string; required?: boolean };
@@ -1802,9 +1802,24 @@ function getProductField(p: Product, key: string): unknown {
     "collection_code", "collection_id",
   );
 
+  // Walmart's importer flags 11-digit values in UPC-typed fields ("a UPC should
+  // be 12 digits — add a leading 0"). Excel strips leading zeros from vendor
+  // sheets, and rows imported before barcode normalization existed carry the
+  // stripped form in the DB. So every barcode is re-normalized at the export
+  // boundary: pure digit strings (or Excel scientific notation) are padded to
+  // at least 12 digits; anything else (ASIN, alphanumeric part number) passes
+  // through untouched so a barcode is never invented from a non-barcode.
+  const normBarcode = (v: unknown): string | null => {
+    const s = String(v ?? "").trim();
+    if (!s) return null;
+    if (!/^\d{8,14}$/.test(s) && !/^\d[\d.]*[eE][+-]?\d+$/.test(s)) return s;
+    return toDisplayBarcode(s) ?? s;
+  };
+  const upcNorm = normBarcode(p.upc);
+
   // Guaranteed unique ID: prefer meaningful identifiers, fall back to DB id (always non-empty)
-  const goodsId   = p.upc ?? p.vendorSku ?? anyVendorId ?? p.id;
-  const productId = p.upc ?? p.vendorSku ?? anyVendorId ?? p.asin ?? verifiedAsin ?? p.id;
+  const goodsId   = upcNorm ?? p.vendorSku ?? anyVendorId ?? p.id;
+  const productId = upcNorm ?? p.vendorSku ?? anyVendorId ?? p.asin ?? verifiedAsin ?? p.id;
 
   // SKU columns must carry the SELLER'S OWN item code — never a GLOBAL product identifier.
   // A UPC/EAN/GTIN (barcode) and an ASIN (Amazon's id) both identify the product across
@@ -1886,15 +1901,15 @@ function getProductField(p: Product, key: string): unknown {
     shop_sku: skuId, shopsku: skuId, item_sku: skuId,
 
     // Variant grouping — UPC or vendor SKU used as the group identifier
-    variant_group_code: p.upc ?? fromVendor("variant_group_code", "group_code", "style_no", "style_number", "style") ?? p.vendorSku ?? anyVendorId ?? "",
-    variant_code: p.upc ?? p.vendorSku ?? anyVendorId ?? "",
-    group_code: p.upc ?? p.vendorSku ?? anyVendorId ?? "",
+    variant_group_code: upcNorm ?? fromVendor("variant_group_code", "group_code", "style_no", "style_number", "style") ?? p.vendorSku ?? anyVendorId ?? "",
+    variant_code: upcNorm ?? p.vendorSku ?? anyVendorId ?? "",
+    group_code: upcNorm ?? p.vendorSku ?? anyVendorId ?? "",
 
     // Barcode IDs
-    upc: p.upc ?? fromVendor("upc", "ean", "barcode", "gtin") ?? "",
-    ean: p.upc ?? fromVendor("ean", "upc", "barcode", "gtin") ?? "",
-    barcode: p.upc ?? fromVendor("barcode", "upc", "ean") ?? "",
-    gtin: p.upc ?? fromVendor("gtin", "upc", "ean") ?? "",
+    upc: upcNorm ?? normBarcode(fromVendor("upc", "ean", "barcode", "gtin")) ?? "",
+    ean: upcNorm ?? normBarcode(fromVendor("ean", "upc", "barcode", "gtin")) ?? "",
+    barcode: upcNorm ?? normBarcode(fromVendor("barcode", "upc", "ean")) ?? "",
+    gtin: upcNorm ?? normBarcode(fromVendor("gtin", "upc", "ean")) ?? "",
     asin: p.asin ?? verifiedAsin ?? "",
     merchant_suggested_asin: p.asin ?? verifiedAsin ?? "",
 
@@ -1903,15 +1918,15 @@ function getProductField(p: Product, key: string): unknown {
     product_id: productId,
 
     // Amazon flat-file external ID — detect type from digit count (UPC-12, EAN-13, GTIN-14, ASIN)
-    external_product_id: p.upc ?? fromVendor("upc", "ean", "barcode") ?? p.asin ?? verifiedAsin ?? "",
+    external_product_id: upcNorm ?? normBarcode(fromVendor("upc", "ean", "barcode")) ?? p.asin ?? verifiedAsin ?? "",
     external_product_id_type: (() => {
-      const barcodeVal = String(p.upc ?? fromVendor("upc", "ean", "barcode") ?? "");
+      const barcodeVal = String(upcNorm ?? normBarcode(fromVendor("upc", "ean", "barcode")) ?? "");
       if (barcodeVal) return detectUpcType(barcodeVal);
       if (p.asin || verifiedAsin) return "ASIN";
       return "";
     })(),
     product_id_type: (() => {
-      const barcodeVal = String(p.upc ?? fromVendor("upc", "ean", "barcode") ?? "");
+      const barcodeVal = String(upcNorm ?? normBarcode(fromVendor("upc", "ean", "barcode")) ?? "");
       if (barcodeVal) return detectUpcType(barcodeVal);
       if (p.asin || verifiedAsin) return "ASIN";
       return "";
@@ -2084,8 +2099,8 @@ function getProductField(p: Product, key: string): unknown {
     // don't normalize-match the snake_case coreMap keys, so map them explicitly
     // from this vendor sheet's columns (and common variants).
     productname: p.name || fromVendor("title", "product_name", "name") || "",
-    productidtype: p.upc ? (String(p.upc).replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
-    productid: p.upc || fromVendor("upc", "ean", "gtin", "barcode") || "",
+    productidtype: upcNorm ? (upcNorm.replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
+    productid: upcNorm || normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) || "",
     countryoforiginsubstantialtransformation:
       fromVendor("origin", "country_of_origin", "country", "made_in", "coo") ?? "",
     shortdescription: descriptionText || "",
@@ -2300,9 +2315,9 @@ function getProductField(p: Product, key: string): unknown {
 
     // ── Walmart template column aliases ─────────────────────────────────────
     // "ProductId1" / "Product Id 1" → external product ID value (UPC/GTIN)
-    product_id_1: p.upc ?? fromVendor("upc", "ean", "gtin", "barcode") ?? "",
+    product_id_1: upcNorm ?? normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) ?? "",
     product_id_type_1: (() => {
-      const b = String(p.upc ?? fromVendor("upc", "ean", "barcode") ?? "");
+      const b = String(upcNorm ?? normBarcode(fromVendor("upc", "ean", "barcode")) ?? "");
       return b ? detectUpcType(b) : "UPC";
     })(),
     // "ProductCategory" / "Product Category" → AI-assigned category
@@ -2334,7 +2349,7 @@ function getProductField(p: Product, key: string): unknown {
     // "Item ID" → seller's item SKU
     item_id: skuId,
     // "Permanent Product ID" → UPC/barcode
-    permanent_product_id: p.upc ?? fromVendor("upc", "ean", "gtin", "barcode") ?? "",
+    permanent_product_id: upcNorm ?? normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) ?? "",
     // "Item Class ID" → Sears category numeric ID (from vendor data if present)
     item_class_id: fromVendor("item_class_id", "class_id", "category_id", "itemclassid") ?? "",
     // "Item Class Display Path" → AI-assigned category path (the main category output)
@@ -2344,7 +2359,7 @@ function getProductField(p: Product, key: string): unknown {
     // "FBS Item" → Fulfilled By Sears — default N
     fbs_item: fromVendor("fbs_item", "fbsitem") ?? "N",
     // "Variation Group ID" → group variants by UPC or SKU
-    variation_group_id: p.upc ?? p.vendorSku ?? anyVendorId ?? "",
+    variation_group_id: upcNorm ?? p.vendorSku ?? anyVendorId ?? "",
     // "Seller Categories" → AI-assigned category
     seller_categories: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
     // "Packing Slip Description" → product name
@@ -2355,10 +2370,10 @@ function getProductField(p: Product, key: string): unknown {
     // are generic Mirakl offer keys, so they normalize to these names. Filled with the
     // seller SKU / IDs / price / a sensible new-in-stock offer so the row imports.
     offer_sku: skuId,
-    "product-id": p.upc ?? skuId,
-    product_id_value: p.upc ?? skuId,
-    "product-id-type": p.upc ? detectUpcType(String(p.upc)) : "SKU",
-    product_id_type_value: p.upc ? detectUpcType(String(p.upc)) : "SKU",
+    "product-id": upcNorm ?? skuId,
+    product_id_value: upcNorm ?? skuId,
+    "product-id-type": upcNorm ? detectUpcType(upcNorm) : "SKU",
+    product_id_type_value: upcNorm ? detectUpcType(upcNorm) : "SKU",
     offer_description: descriptionText || p.name || "",
     "offer-description": descriptionText || p.name || "",
     offer_internal_description: fromVendor("offer_internal_description", "internal_description", "internal_notes") ?? "",
