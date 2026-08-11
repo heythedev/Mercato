@@ -32,7 +32,15 @@ import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/mo
 // Moonshot (OpenAI-compatible) supports jpeg, png, gif, webp — NOT avif.
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
-const FETCH_TIMEOUT_MS = 20_000;
+
+// Per-candidate fetch timeout: 6 s per URL attempt (direct / corsproxy / allorigins).
+// 3 candidates × 6 s = 18 s worst-case per image — leaves room for the AI call.
+const FETCH_TIMEOUT_MS = 6_000;
+
+// Hard ceiling for the entire handler. Render's load balancer times out HTTP
+// responses at ~30 s and returns 502. We return a clean JSON "unsure" at 25 s
+// so the UI retry logic takes over instead of the user seeing a 502 error.
+const HANDLER_DEADLINE_MS = 25_000;
 
 type ImgBlock = {
   type: "image";
@@ -130,7 +138,7 @@ function b64ToBlock(b64: string, mime: string): ImgBlock | null {
   }
 }
 
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest): Promise<NextResponse> {
   if (!moonshotConfigured()) {
     return NextResponse.json({ verdict: "unsure", reason: "Vision AI not configured" });
   }
@@ -253,4 +261,25 @@ export async function POST(req: NextRequest) {
       reason:  "AI vision call failed — will retry automatically.",
     });
   }
+}
+
+/**
+ * Public handler — races handlePost() against a hard 25 s deadline.
+ *
+ * Render's load balancer times out HTTP responses at ~30 s and returns a 502
+ * Bad Gateway.  By resolving with a clean JSON "unsure" at 25 s we keep the
+ * response within Render's window; the UI retry logic then kicks in (up to 3
+ * attempts) instead of the user seeing a cryptic 502 error page.
+ */
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  const deadline = new Promise<NextResponse>(resolve =>
+    setTimeout(
+      () => resolve(NextResponse.json({
+        verdict: "unsure",
+        reason:  "Image check timed out — will retry automatically.",
+      })),
+      HANDLER_DEADLINE_MS,
+    )
+  );
+  return Promise.race([handlePost(req), deadline]);
 }

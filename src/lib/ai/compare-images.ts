@@ -12,6 +12,8 @@ export type ImageCompareResult = {
 // ── Image download ────────────────────────────────────────────────────────────
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// 6 s per candidate — 3 candidates × 6 s = 18 s worst-case, well within limits.
+const FETCH_TIMEOUT_MS = 6_000;
 // image/jpg is non-standard but Walmart's CDN uses it; allow it alongside jpeg.
 const SUPPORTED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 
@@ -62,7 +64,7 @@ async function fetchImage(url: string): Promise<FetchedImage | null> {
   for (const candidate of imageCandidates(url)) {
     try {
       const res = await fetch(candidate, {
-        signal:   AbortSignal.timeout(20_000),
+        signal:   AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers:  IMAGE_HEADERS,
         redirect: "follow",
       });
