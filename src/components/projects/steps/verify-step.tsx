@@ -102,6 +102,18 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   // still open without capturing a stale value.
   const expandedRef = useRef<string | null>(null);
 
+  // ── Background batch image check ─────────────────────────────────────────────
+  // Progress shown as a banner above the product list while the batch runs.
+  const [bgCheckStatus, setBgCheckStatus] = useState<{
+    total: number; done: number; current: string | null;
+  } | null>(null);
+  // Products already queued so the effect doesn't re-queue on re-renders.
+  const bgCheckStartedRef = useRef<Set<string>>(new Set());
+  // Prevents two concurrent batch runners if the effect fires twice.
+  const bgCheckRunningRef = useRef(false);
+  // Always-fresh product list for async callbacks that outlive a render cycle.
+  const productsRef = useRef(products);
+
   // Fields that affect the hard "Mismatch" escalation path.
   // Must stay in sync with HARD_FIELDS in src/lib/marketplaces/verify.ts.
   const HARD_FIELDS_SET = new Set(["title", "brand", "model", "upc"]);
@@ -290,6 +302,140 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     imgCheckFnRef.current?.(expanded, "images", vendorUrl, [liveImgUrl], product.name);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, products]);
+
+  // Keep productsRef always up-to-date so async batch closures see latest list.
+  useEffect(() => { productsRef.current = products; }, [products]);
+
+  /** Tiny sleep helper used between batch items to avoid rate-limiting. */
+  const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+  /**
+   * Background batch AI image checker.
+   *
+   * Processes warning products SEQUENTIALLY (one at a time) with ~1 s gap
+   * between requests.  Uses the same /api/compare-images endpoint and the same
+   * retry logic as the interactive runImageCheck, but does not depend on the
+   * user expanding the product row.
+   *
+   * After a definitive "match" result the function also checks non-image field
+   * severities.  If no hard mismatches remain, it calls onReverifyProduct so
+   * the database status is updated and the product moves from Warning → Match
+   * entirely automatically.
+   */
+  async function runBatchImageChecks(items: Array<{
+    productId: string; productName: string; vendorUrl: string; liveImgUrl: string;
+  }>) {
+    if (bgCheckRunningRef.current) return;
+    bgCheckRunningRef.current = true;
+
+    setBgCheckStatus({ total: items.length, done: 0, current: null });
+
+    for (let i = 0; i < items.length; i++) {
+      const { productId, productName, vendorUrl, liveImgUrl } = items[i];
+      const stateKey = `${productId}:images`;
+
+      // Show this product as "currently checking"
+      setBgCheckStatus({ total: items.length, done: i, current: productName });
+
+      // Cancel any in-flight retry timer from an earlier interactive check.
+      const existing = retryTimersRef.current.get(stateKey);
+      if (existing) { clearTimeout(existing); retryTimersRef.current.delete(stateKey); }
+
+      // Show the spinner in the product's image row
+      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt: 1 }));
+
+      // Attempt up to 3 times with backoff
+      let finalVerdict = "unsure", finalReason = "";
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          if (attempt > 1) await sleep(attempt * 4_000);
+          setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt }));
+
+          const res = await fetch("/api/compare-images", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ vendorUrl, liveUrls: [liveImgUrl], productName }),
+          });
+          if (!res.ok) continue; // transient server error — retry
+
+          const data = await res.json() as { verdict: string; reason: string };
+          finalVerdict = data.verdict;
+          finalReason  = data.reason ?? "";
+
+          if (finalVerdict === "unsure") continue; // unclear — retry
+          if (finalVerdict === "mismatch" && attempt === 1) continue; // confirm once
+          break; // definitive result
+        } catch {
+          // network / parse error — retry
+        }
+      }
+
+      const note =
+        finalVerdict === "match"    ? `AI visual check: images match — ${finalReason}` :
+        finalVerdict === "mismatch" ? `AI visual check: images differ — ${finalReason}` :
+                                      `Needs manual review — ${finalReason || "Image check inconclusive"}`;
+
+      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: finalVerdict, note }));
+
+      // Auto-move to Match when images are confirmed and no other hard issues remain.
+      if (finalVerdict === "match") {
+        const product = productsRef.current.find(p => p.id === productId);
+        if (product) {
+          const fields = (product.verifyFields ?? []) as Array<{ field: string; severity?: string }>;
+          const nonImg = fields.filter(f => f.field !== "images");
+          const hasHardMismatch = nonImg.some(f => f.severity === "mismatch" && HARD_FIELDS_SET.has(f.field));
+          const hasMismatch     = nonImg.some(f => f.severity === "mismatch");
+          const hasHardWarning  = nonImg.some(f => f.severity === "warning"  && HARD_FIELDS_SET.has(f.field));
+          if (!hasHardMismatch && !hasMismatch && !hasHardWarning) {
+            setReverifying(productId);
+            onReverifyProduct(productId).finally(() => setReverifying(null));
+          }
+        }
+      }
+
+      // Mark so expand-auto-check doesn't double-trigger for this product.
+      autoCheckedRef.current.add(productId);
+
+      setBgCheckStatus({ total: items.length, done: i + 1, current: null });
+
+      // Throttle: 1 s gap between products to avoid rate-limiting the API.
+      if (i < items.length - 1) await sleep(1_000);
+    }
+
+    // Leave the "all done" count visible for 3 s then clear the banner.
+    await sleep(3_000);
+    setBgCheckStatus(null);
+    bgCheckRunningRef.current = false;
+  }
+
+  // Trigger the batch runner once products are loaded and any warning products
+  // that haven't been queued yet are detected.
+  useEffect(() => {
+    if (loading) return; // wait until verification finishes
+    if (bgCheckRunningRef.current) return; // already running
+
+    type FR = { field: string; stored?: string; live?: string; liveImage?: string; severity?: string };
+
+    const toCheck = products
+      .filter(p => p.verifyStatus === "warning")
+      .filter(p => !bgCheckStartedRef.current.has(p.id))
+      .flatMap(p => {
+        const fields = (p.verifyFields ?? []) as FR[];
+        const imgField = fields.find(f => f.field === "images");
+        if (!imgField) return [];
+        const vendorUrl  = imgField.stored?.startsWith("http") ? imgField.stored : "";
+        const liveImgUrl = imgField.liveImage || (imgField.live?.startsWith("http") ? imgField.live : "");
+        if (!vendorUrl || !liveImgUrl) return [];
+        return [{ productId: p.id, productName: p.name, vendorUrl, liveImgUrl }];
+      });
+
+    if (!toCheck.length) return;
+
+    // Mark before starting so a re-render during the async run doesn't re-queue.
+    toCheck.forEach(({ productId }) => bgCheckStartedRef.current.add(productId));
+    runBatchImageChecks(toCheck);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, loading]);
 
   // A product can carry verifyStatus="discontinued" straight from import (the
   // vendor sheet's status column), so its mere presence does NOT mean
@@ -553,6 +699,41 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       {/* Product results */}
       {(hasResults || hasStreamedResults) && (
         <div className="space-y-2">
+
+          {/* ── Background batch image-check progress banner ───────────────────── */}
+          {bgCheckStatus && (
+            <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-2.5 text-[12px] text-blue-700 dark:text-blue-300">
+              {bgCheckStatus.done < bgCheckStatus.total ? (
+                <>
+                  {/* Spinner */}
+                  <svg className="h-4 w-4 shrink-0 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                  <span className="font-medium">
+                    Auto-checking images&nbsp;
+                    <span className="font-bold">{bgCheckStatus.done + 1} of {bgCheckStatus.total}</span>
+                    {bgCheckStatus.current && (
+                      <span className="font-normal text-blue-600/80 dark:text-blue-300/70">
+                        &nbsp;— {bgCheckStatus.current}
+                      </span>
+                    )}
+                  </span>
+                </>
+              ) : (
+                <>
+                  {/* Checkmark */}
+                  <svg className="h-4 w-4 shrink-0 text-green-500" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                  <span className="font-medium text-green-700 dark:text-green-300">
+                    Image auto-check complete — {bgCheckStatus.total} product{bgCheckStatus.total !== 1 ? "s" : ""} checked
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+
           {visibleProducts.map((p) => {
             const effectiveStatus = getEffectiveStatus(p);
             const cfg = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
