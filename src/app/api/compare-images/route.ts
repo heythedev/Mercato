@@ -198,11 +198,6 @@ export async function POST(req: NextRequest) {
   console.log(`[compare-images] vendor OK (${vendorBlock.image.length}b), live: ${liveBlocks.length} image(s)`);
 
   // ── AI comparison ─────────────────────────────────────────────────────────
-  const liveCount    = liveBlocks.length;
-  const listingLabel = liveCount === 1
-    ? "Image 2 is from a marketplace listing"
-    : `Images 2–${liveCount + 1} are different photos from a single marketplace listing`;
-
   try {
     const { text } = await generateText({
       model: moonshot(MOONSHOT_VISION_MODEL),
@@ -213,21 +208,25 @@ export async function POST(req: NextRequest) {
             type: "text",
             text:
               `Product: "${productName ?? ""}"\n\n` +
-              `Image 1 is from our product catalog. ${listingLabel} ` +
-              `we matched to this product. Decide whether the listing shows the SAME product ` +
-              `as the catalog image.\n\n` +
-              `Rules:\n` +
-              `- If ANY listing photo clearly shows the catalog product (same design AND ` +
-              `same color/finish), answer MATCH.\n` +
-              `- Ignore background, angle, lighting, watermarks, cropping, staging.\n` +
-              `- SAME product, SAME color/finish → MATCH.\n` +
-              `- Clearly different color or finish (natural/beige vs black, red vs blue, ` +
-              `chrome vs matte black) → MISMATCH. Color variants are separate listings.\n` +
-              `- Minor shade variation that looks like lighting/photography → MATCH.\n` +
-              `- Clearly different item, design, or pack quantity → MISMATCH.\n` +
-              `- Too unclear to judge → UNSURE.\n\n` +
+              `Image 1 is from our product catalog. ` +
+              `Image 2 is the primary photo from the marketplace listing for this product.\n\n` +
+              `Decide whether the marketplace listing is selling the SAME product as the catalog item.\n\n` +
+              `MATCH when:\n` +
+              `- Same product TYPE, category, and general form (shape, style, construction).\n` +
+              `- Minor photography differences: angle, background, lighting, watermarks, staging.\n` +
+              `- Slight shade or hue differences that look like different photography lighting.\n` +
+              `- Surface pattern / decorative design variations within the same product family\n` +
+              `  (e.g. different mosaic motif, different wood grain, different print) — these\n` +
+              `  are style variants of the same item, not different products.\n` +
+              `- Lifestyle / room-setting photo vs isolated product shot.\n\n` +
+              `MISMATCH when:\n` +
+              `- Clearly a DIFFERENT product (different furniture category, completely different\n` +
+              `  design, obviously a different item — e.g. a rocking chair vs a side table).\n` +
+              `- Clearly a DIFFERENT structural color or finish (e.g. black frame vs white frame,\n` +
+              `  chrome vs matte black, natural wood vs painted).\n\n` +
+              `UNSURE when the image quality is too poor or the product is not clearly visible.\n\n` +
               `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE.\n` +
-              `Second line: one-sentence reason.`,
+              `Second line: one-sentence reason (be specific about what matches or differs).`,
           },
           vendorBlock,
           ...liveBlocks,

@@ -136,21 +136,41 @@ function imageContent(downloaded: FetchedImage | null, url: string): ImageConten
   return { type: "image", image: new URL(url) };
 }
 
-const VISION_PROMPT_SINGLE =
-  `Rules:\n` +
-  `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
-  `lifestyle staging, and image quality.\n` +
-  `- SAME product, SAME color/finish → MATCH.\n` +
-  `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
-  `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
-  `listings with different item IDs; a color difference means wrong product matched.\n` +
-  `- Minor shade differences that look like photography/lighting variation (same ` +
-  `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
-  `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
-  `a multi-pack shot) is a MISMATCH.\n` +
-  `- If either image is too unclear to judge, answer UNSURE.\n\n` +
-  `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE. ` +
-  `On the second line give a one-sentence reason.`;
+/**
+ * Vision comparison prompt shared by both the single-pair and multi-image paths.
+ *
+ * Design intent: confirm the SAME product is listed, NOT pixel-perfect equality.
+ *
+ * Deliberately lenient about:
+ *   - Decorative surface patterns within the same product type (mosaic designs,
+ *     grain patterns, print variants) — these are styling choices, not different
+ *     products.
+ *   - Photography differences: angle, lighting, background, watermarks, staging.
+ *   - Minor hue/shade differences caused by different camera white-balance.
+ *
+ * Only strict about:
+ *   - Completely different product category (chair vs table, lamp vs fan).
+ *   - Major structural color / finish difference (black vs white, metal vs wood)
+ *     that indicates a genuinely different variant was matched.
+ */
+const VISION_PROMPT =
+  `Decide whether the marketplace listing is selling the SAME product as the catalog item.\n\n` +
+  `MATCH when:\n` +
+  `- Same product TYPE, category, and general form (shape, style, construction).\n` +
+  `- Minor photography differences: angle, background, lighting, watermarks, staging.\n` +
+  `- Slight shade or hue differences that look like different photography lighting.\n` +
+  `- Surface pattern / decorative design variations within the same product family\n` +
+  `  (e.g. different mosaic motif, different wood grain, different print) — these\n` +
+  `  are style variants of the same item, not different products.\n` +
+  `- Lifestyle / room-setting photo vs isolated product shot.\n\n` +
+  `MISMATCH when:\n` +
+  `- Clearly a DIFFERENT product (different furniture category, completely different\n` +
+  `  design, obviously a different item — e.g. a rocking chair vs a side table).\n` +
+  `- Clearly a DIFFERENT structural color or finish that makes it a different variant\n` +
+  `  (e.g. black frame vs white frame, chrome vs matte black, natural wood vs painted).\n\n` +
+  `UNSURE when the image quality is too poor or the product is not clearly visible.\n\n` +
+  `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE.\n` +
+  `Second line: one-sentence reason (be specific about what matches or differs).`;
 
 function parseVisionResponse(text: string): ImageCompareResult {
   const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
@@ -188,9 +208,9 @@ export async function compareProductImages(
               type: "text",
               text:
                 `Product: "${productName}"\n\n` +
-                `Image 1 is from our product catalog. Image 2 is from a marketplace listing ` +
-                `we matched to this product. Decide whether both images show the SAME product.\n\n` +
-                VISION_PROMPT_SINGLE,
+                `Image 1 is from our product catalog. ` +
+                `Image 2 is the primary photo from the marketplace listing for this product.\n\n` +
+                VISION_PROMPT,
             },
             imageContent(vendorImg, vendorImageUrl),
             imageContent(liveImg, liveImageUrl),
@@ -206,25 +226,26 @@ export async function compareProductImages(
 }
 
 /**
- * Compare the vendor image against ALL available marketplace angles (up to
- * maxAngles) in a SINGLE vision call — the model sees every angle at once and
- * decides whether any of them shows the vendor's product.
+ * Compare the vendor/catalog image against the PRIMARY marketplace image.
  *
- * This replaces an earlier loop that issued one call per angle and stopped at
- * the first match. That shape cost 1 call for matching products but 3 for every
- * mismatch/unsure — exactly the products a verification run turns up — and it
- * dominated the runtime of large batches. Judging all angles together is a flat
- * 1 call per product and is also more accurate: the model can compare candidate
- * angles side by side instead of ruling on each in isolation.
+ * Previously used up to 3 marketplace gallery images. That caused systematic
+ * false-mismatches on multi-variant listings (e.g. "Mosaic Art Collection" where
+ * the gallery shows sunflower, leaf, and geometric pattern variants of the same
+ * table). The AI saw variants as "different designs" and reported MISMATCH even
+ * though the primary listing image matched the catalog exactly.
+ *
+ * Now uses only the FIRST / primary marketplace image. This is the canonical
+ * "this is what you're buying" photo and is the correct comparison target.
+ * The UNSURE retry path in the caller handles cases where the primary image
+ * is a lifestyle shot or otherwise unclear.
  */
 export async function compareVendorAgainstAllImages(
   vendorImageUrl: string,
   liveImageUrls: string[],
   productName: string,
-  // All angles go into one request now, so extra angles cost image tokens rather
-  // than whole round-trips. 3 stays well inside the model's per-request image
-  // budget while covering the primary shot plus alternates.
-  maxAngles = 3,
+  // Only compare the primary marketplace image — gallery images introduce
+  // multi-variant confusion and degrade accuracy more than they help.
+  maxAngles = 1,
 ): Promise<ImageCompareResult> {
   const urls = liveImageUrls.filter((u) => u && u.startsWith("http")).slice(0, maxAngles);
   if (!urls.length) return { verdict: "unsure", reason: "No marketplace images available" };
@@ -232,29 +253,13 @@ export async function compareVendorAgainstAllImages(
     return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
 
-  const [vendorImg, ...liveImgs] = await Promise.all([
+  const [vendorImg, liveImg] = await Promise.all([
     fetchImageCached(vendorImageUrl),
-    ...urls.map((u) => fetchImageCached(u)),
+    fetchImageCached(urls[0]),
   ]);
 
-  // Build image content — binary when the download succeeded, URL-based when it
-  // didn't.  URL-based tells the AI SDK to embed an image_url reference instead
-  // of base64 bytes, so Moonshot's own servers fetch the image.  This bypasses
-  // IP-level CDN blocking (Render's data-centre IPs are sometimes blocked by
-  // Walmart CDN even with correct browser headers).
   const vendorContent = imageContent(vendorImg, vendorImageUrl);
-
-  const usableLive = liveImgs.filter((i): i is FetchedImage => !!i);
-  // Use binary for whichever live images downloaded; fall back to URL for the
-  // rest.  If NONE downloaded, use all URLs — never bail out here.
-  const liveContents: ImageContent[] = usableLive.length > 0
-    ? usableLive.map((img) => imageContent(img, ""))  // binary only — img always present
-    : urls.map((u) => imageContent(null, u));          // all-URL fallback
-
-  const liveCount = liveContents.length;
-  const listingLabel = liveCount === 1
-    ? `Image 2 is from a marketplace listing`
-    : `Images 2-${liveCount + 1} are different photos from a single marketplace listing`;
+  const liveContent   = imageContent(liveImg,   urls[0]);
 
   try {
     const { text } = await generateText({
@@ -267,29 +272,12 @@ export async function compareVendorAgainstAllImages(
               type: "text",
               text:
                 `Product: "${productName}"\n\n` +
-                `Image 1 is from our product catalog. ${listingLabel} ` +
-                `we matched to this product. Decide whether the listing shows the SAME product ` +
-                `as the catalog image.\n\n` +
-                `Rules:\n` +
-                `- The listing photos may show different angles, or accessories and alternate ` +
-                `views of the same item. If ANY of them clearly shows the catalog product ` +
-                `(same design AND same color/finish), answer MATCH.\n` +
-                `- Ignore differences in background, angle, lighting, watermarks, cropping, ` +
-                `lifestyle staging, and image quality.\n` +
-                `- SAME product, SAME color/finish → MATCH.\n` +
-                `- Clearly different color or finish (e.g. natural/beige vs black, red vs blue, ` +
-                `chrome vs matte black) → MISMATCH. Color variants are separate marketplace ` +
-                `listings; a color difference means the wrong product was matched.\n` +
-                `- Minor shade differences that look like photography/lighting variation (same ` +
-                `hue, slightly different exposure) are acceptable — treat as MATCH.\n` +
-                `- A clearly different item, design, pattern, or pack quantity (e.g. one item vs ` +
-                `a multi-pack shot) is a MISMATCH.\n` +
-                `- If the images are too unclear to judge, answer UNSURE.\n\n` +
-                `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE. ` +
-                `On the second line give a one-sentence reason.`,
+                `Image 1 is from our product catalog. ` +
+                `Image 2 is the primary photo from the marketplace listing for this product.\n\n` +
+                VISION_PROMPT,
             },
             vendorContent,
-            ...liveContents,
+            liveContent,
           ],
         },
       ],
