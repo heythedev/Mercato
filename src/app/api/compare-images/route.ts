@@ -29,6 +29,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
 import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
 
+// Moonshot (OpenAI-compatible) supports jpeg, png, gif, webp — NOT avif.
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
 const FETCH_TIMEOUT_MS = 20_000;
@@ -39,35 +40,58 @@ type ImgBlock = {
   mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 };
 
-const BROWSER_HEADERS = {
+/**
+ * Deliberately omits image/avif from Accept.
+ *
+ * Walmart's CDN content-negotiates the image format based on the Accept header.
+ * When a client sends "image/avif,...", the CDN serves AVIF — even for URLs that
+ * look like .jpg.  By NOT advertising avif support, the CDN falls back to WebP
+ * or JPEG, which Moonshot's vision model can actually process.
+ */
+const IMAGE_HEADERS = {
   "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept":          "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+  "Accept":          "image/jpeg,image/webp,image/png,image/*;q=0.5,*/*;q=0.3",
   "Accept-Language": "en-US,en;q=0.9",
   "Referer":         "https://www.walmart.com/",
 };
 
 /**
- * Download one image URL, trying multiple strategies in order:
- *  1. Direct fetch (fast; works for vendor CDNs and sometimes Walmart)
- *  2. corsproxy.io  — Cloudflare-hosted; bypasses Walmart CDN IP blocks
- *  3. allorigins.win — independent CORS proxy fallback
+ * Build the list of candidate URLs to try for one image.
  *
- * Returns null only if every candidate fails.
+ * When the URL explicitly contains .avif (Walmart sometimes embeds the format
+ * in the path), the CDN ignores Accept and always returns AVIF.  For those,
+ * prepend JPEG and WebP variants — Walmart stores each asset in all three
+ * formats at the same base path, so this reliably gets a usable format.
+ */
+function candidateUrls(url: string): string[] {
+  const hasAvifExt = /\.avif(\?|$)/i.test(url);
+  const bases = hasAvifExt
+    ? [
+        url.replace(/\.avif(\?|$)/i, ".jpeg$1"),  // JPEG first (widest AI support)
+        url.replace(/\.avif(\?|$)/i, ".webp$1"),  // WebP second
+        url,                                        // original .avif last (will be rejected by mime check)
+      ]
+    : [url];
+  // For each base URL, try direct then two CORS proxies.
+  return bases.flatMap(u => [
+    u,
+    `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  ]);
+}
+
+/**
+ * Download one image URL, trying multiple URL variants and proxy strategies.
+ * Returns null only if every candidate fails or yields an unsupported format.
  */
 async function fetchImageAsBlock(url: string): Promise<ImgBlock | null> {
   if (!url?.startsWith("http")) return null;
 
-  const candidates = [
-    url,
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  ];
-
-  for (const fetchUrl of candidates) {
+  for (const fetchUrl of candidateUrls(url)) {
     try {
       const res = await fetch(fetchUrl, {
         signal:   AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers:  BROWSER_HEADERS,
+        headers:  IMAGE_HEADERS,
         redirect: "follow",
       });
       if (!res.ok) continue;
@@ -75,16 +99,17 @@ async function fetchImageAsBlock(url: string): Promise<ImgBlock | null> {
       const rawMime = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
       const normMime = rawMime === "image/jpg" ? "image/jpeg" : rawMime;
 
-      // Skip HTML error pages that proxies sometimes return
+      // Skip avif (AI can't process), HTML error pages, or unknown types.
       if (!ALLOWED_MIME.test(normMime)) continue;
 
       const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.length < 512) continue; // suspiciously small — probably an error body
+      if (buf.length < 512) continue; // probably an error body
 
-      console.log(`[compare-images] fetched ${buf.length}b via ${fetchUrl.startsWith("https://cors") || fetchUrl.startsWith("https://api.all") ? "proxy" : "direct"}`);
+      const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
+      console.log(`[compare-images] fetched ${buf.length}b as ${normMime} via ${via}`);
       return { type: "image", image: buf, mediaType: normMime as ImgBlock["mediaType"] };
     } catch {
-      // timeout, network error, etc. — try next candidate
+      // timeout / network error — try next candidate
     }
   }
 

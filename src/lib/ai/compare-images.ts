@@ -15,48 +15,62 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // image/jpg is non-standard but Walmart's CDN uses it; allow it alongside jpeg.
 const SUPPORTED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 
-// Headers that look like a real Chrome browser on Windows.
-// Walmart's CDN (i5.walmartimages.com) blocks requests with minimal or
-// bot-identifying User-Agent strings — the browser can load the image fine
-// but a server with a fake UA gets a 403. This header set passes CDN checks.
-const BROWSER_HEADERS = {
+/**
+ * Deliberately omits image/avif from Accept.
+ *
+ * Walmart's CDN content-negotiates the image format based on Accept.  When the
+ * client sends "image/avif,...", the CDN serves AVIF — even for URLs that look
+ * like .jpg.  By NOT advertising avif support the CDN falls back to WebP or
+ * JPEG, which Moonshot's vision model can process.  Moonshot is OpenAI-
+ * compatible and OpenAI's vision API does not support AVIF.
+ */
+const IMAGE_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+  "Accept": "image/jpeg,image/webp,image/png,image/*;q=0.5,*/*;q=0.3",
   "Accept-Language": "en-US,en;q=0.9",
   "Referer": "https://www.walmart.com/",
-  "Sec-Fetch-Dest": "image",
-  "Sec-Fetch-Mode": "no-cors",
-  "Sec-Fetch-Site": "cross-site",
 };
 
 type FetchedImage = { data: Uint8Array; mimeType: string };
 
+/**
+ * Build candidate fetch URLs for a given image URL.
+ * When the URL explicitly contains .avif, prepend JPEG/WebP alternatives.
+ * Walmart stores assets at the same path in all three formats so the swap
+ * reliably returns a format the AI model can actually process.
+ */
+function imageCandidates(url: string): string[] {
+  const hasAvifExt = /\.avif(\?|$)/i.test(url);
+  const bases = hasAvifExt
+    ? [
+        url.replace(/\.avif(\?|$)/i, ".jpeg$1"),
+        url.replace(/\.avif(\?|$)/i, ".webp$1"),
+        url, // original last (will be rejected by SUPPORTED_MIME check)
+      ]
+    : [url];
+  return bases.flatMap(u => [
+    u,
+    `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  ]);
+}
+
 async function fetchImage(url: string): Promise<FetchedImage | null> {
   if (!url?.startsWith("http")) return null;
-  // Tiered proxy strategy — same as the /api/compare-images endpoint:
-  //   1. Direct fetch (fast; works for vendor CDNs and sometimes Walmart)
-  //   2. corsproxy.io  — Cloudflare-hosted; Walmart CDN (also Cloudflare) won't
-  //      block Cloudflare IPs, so this reliably fetches Walmart images from Render
-  //   3. allorigins.win — independent fallback
-  const candidates = [
-    url,
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  ];
 
-  for (const candidate of candidates) {
+  for (const candidate of imageCandidates(url)) {
     try {
       const res = await fetch(candidate, {
-        signal: AbortSignal.timeout(20_000),
-        headers: BROWSER_HEADERS,
+        signal:   AbortSignal.timeout(20_000),
+        headers:  IMAGE_HEADERS,
         redirect: "follow",
       });
       if (!res.ok) continue;
       const mimeType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
       // Normalise image/jpg → image/jpeg so the AI SDK always sees a known type.
       const normMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
-      // Skip HTML error pages that proxies sometimes return for blocked requests.
+      // Skip avif (AI can't process it) and HTML error pages from proxies.
       if (!SUPPORTED_MIME.test(normMime)) continue;
       const buf = new Uint8Array(await res.arrayBuffer());
       if (buf.length < 512 || buf.length > MAX_IMAGE_BYTES) continue;
