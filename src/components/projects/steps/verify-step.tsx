@@ -251,12 +251,29 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                                  `Needs manual review — ${reason}`;
       setFinal(verdict, note);
 
-      // When images are confirmed as matching, trigger a lightweight re-verify
-      // so the database status updates and the product moves to the correct
-      // section without the user having to click Re-verify manually.
+      // When images are confirmed as matching, auto-approve the product so the
+      // database status updates and the product moves to Match without the user
+      // having to click anything.
+      //
+      // Use onApproveProduct (direct PATCH verifyStatus="ok") NOT onReverifyProduct:
+      //   • Re-verify re-runs the full server-side image comparison which will likely
+      //     fail again (AVIF images, timeout, CDN blocks) → returns "warning" again.
+      //   • Approve patches the status directly and updates the count immediately.
+      //
+      // Only block on real mismatches — soft warnings (brand sub-brand note, model N/A,
+      // colour not stated) are informational and should not prevent auto-move.
       if (verdict === "match" && expandedRef.current === productId) {
-        setReverifying(productId);
-        onReverifyProduct(productId).finally(() => setReverifying(null));
+        const prod = productsRef.current.find(p => p.id === productId);
+        if (prod) {
+          const allF  = (prod.verifyFields ?? []) as Array<{ field: string; severity?: string }>;
+          const nonImg = allF.filter(f => f.field !== "images");
+          const hasHardMismatch = nonImg.some(f => f.severity === "mismatch" && HARD_FIELDS_SET.has(f.field));
+          const hasMismatch     = nonImg.some(f => f.severity === "mismatch");
+          if (!hasHardMismatch && !hasMismatch) {
+            setReverifying(productId);
+            onApproveProduct(productId).finally(() => setReverifying(null));
+          }
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
@@ -385,10 +402,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
           const nonImg = fields.filter(f => f.field !== "images");
           const hasHardMismatch = nonImg.some(f => f.severity === "mismatch" && HARD_FIELDS_SET.has(f.field));
           const hasMismatch     = nonImg.some(f => f.severity === "mismatch");
-          const hasHardWarning  = nonImg.some(f => f.severity === "warning"  && HARD_FIELDS_SET.has(f.field));
-          if (!hasHardMismatch && !hasMismatch && !hasHardWarning) {
+          // Soft warnings (brand sub-brand note, model N/A, colour not stated) do NOT
+          // block auto-move. Only actual mismatches prevent approval.
+          // Use onApproveProduct (direct PATCH) not onReverifyProduct — re-verify would
+          // re-run the server-side image comparison which fails for AVIF/CDN-blocked
+          // images and resets the status back to "warning" undoing the AI confirmation.
+          if (!hasHardMismatch && !hasMismatch) {
             setReverifying(productId);
-            onReverifyProduct(productId).finally(() => setReverifying(null));
+            onApproveProduct(productId).finally(() => setReverifying(null));
           }
         }
       }
@@ -880,7 +901,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                       const isUrl = (v: string) => v && v.startsWith("http");
                       return (
                         <div key={f.field} className="grid grid-cols-[90px_1fr_1fr] sm:grid-cols-[120px_1fr_1fr] gap-2 sm:gap-4 px-3 sm:px-4 py-2.5 text-xs">
-                          <span className={cn("font-medium", FIELD_SEVERITY[f.severity])}>{f.label}</span>
+                          <span className={cn("font-medium",
+                            // When the product is approved (effective status = ok), downgrade
+                            // warning-severity field labels to muted — they're informational
+                            // annotations about minor differences, not real blocking issues.
+                            getEffectiveStatus(p) === "ok" && f.severity === "warning"
+                              ? "text-muted-foreground"
+                              : FIELD_SEVERITY[f.severity]
+                          )}>{f.label}</span>
                           <div>
                             <p className="text-muted-foreground mb-0.5">Catalog</p>
                             {isImg && isUrl(f.stored) ? (
