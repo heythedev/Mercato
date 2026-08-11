@@ -39601,6 +39601,38 @@
             {
               "productTypeName": "Vibrators",
               "description": "Devices meant for massage or sexual stimulation."
+            },
+            {
+              "productTypeName": "Adult Oriented Figures",
+              "description": "Adult-themed collectible or novelty figures marketed for mature audiences."
+            },
+            {
+              "productTypeName": "Bondage Restraints",
+              "description": "Cuffs, ropes, straps, or similar restraint devices used during sexual role play."
+            },
+            {
+              "productTypeName": "Erotic Kits & Gift Sets",
+              "description": "Bundled sets of sexual wellness products, often paired together as themed gift sets."
+            },
+            {
+              "productTypeName": "Bondage Paddles, Whips & Ticklers",
+              "description": "Impact and sensation play accessories, including paddles, whips, and ticklers, used during sexual role play."
+            },
+            {
+              "productTypeName": "Ball Stretchers",
+              "description": "A device worn around the scrotum to apply gentle downward pressure for sexual stimulation."
+            },
+            {
+              "productTypeName": "Edible Sensual Products",
+              "description": "Flavored or edible products, such as body paints and lubricants, designed for sexual play."
+            },
+            {
+              "productTypeName": "Sex Dolls",
+              "description": "Life-sized dolls designed for sexual use."
+            },
+            {
+              "productTypeName": "Sex Swings",
+              "description": "A harness or sling device that supports the body during sexual activity."
             }
           ],
           "department": [
@@ -40791,6 +40823,16 @@
             {
               "departmentName": "CHEMICALS & CLEANING SUPPLIES",
               "departmentNumber": "13"
+            }
+          ]
+        },
+        {
+          "productTypeGroupName": "Health & Beauty Misc.",
+          "description": "Health & Beauty Misc.",
+          "productType": [
+            {
+              "productTypeName": "Health & Beauty Misc.",
+              "description": "Health and beauty products that do not fall under a more specific product type."
             }
           ]
         }
