@@ -398,8 +398,8 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
       setBgCheckStatus({ total: items.length, done: i + 1, current: null });
 
-      // Throttle: 1 s gap between products to avoid rate-limiting the API.
-      if (i < items.length - 1) await sleep(1_000);
+      // Throttle: 2 s gap between products to avoid rate-limiting and 502s under load.
+      if (i < items.length - 1) await sleep(2_000);
     }
 
     // Leave the "all done" count visible for 3 s then clear the banner.
@@ -414,7 +414,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     if (loading) return; // wait until verification finishes
     if (bgCheckRunningRef.current) return; // already running
 
-    type FR = { field: string; stored?: string; live?: string; liveImage?: string; severity?: string };
+    type FR = { field: string; stored?: string; live?: string; liveImage?: string; severity?: string; note?: string };
 
     const toCheck = products
       .filter(p => p.verifyStatus === "warning")
@@ -423,6 +423,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         const fields = (p.verifyFields ?? []) as FR[];
         const imgField = fields.find(f => f.field === "images");
         if (!imgField) return [];
+        // Only batch-check when images are actually the flagged field (mismatch/warning
+        // severity, or a failed server-side comparison). Skip products in warning only
+        // due to other soft fields (model, dimensions) where re-checking images won't help.
+        const imgIsProblem =
+          imgField.severity === "mismatch" ||
+          imgField.severity === "warning" ||
+          /image comparison failed|could not download|could not load catalog/i.test(imgField.note ?? "");
+        if (!imgIsProblem) return [];
         const vendorUrl  = imgField.stored?.startsWith("http") ? imgField.stored : "";
         const liveImgUrl = imgField.liveImage || (imgField.live?.startsWith("http") ? imgField.live : "");
         if (!vendorUrl || !liveImgUrl) return [];

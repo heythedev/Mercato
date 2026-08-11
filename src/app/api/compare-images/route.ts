@@ -33,20 +33,23 @@ import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/mo
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
 
-// Per-candidate fetch timeout: 6 s per URL attempt (direct / corsproxy / allorigins).
-// 3 candidates × 6 s = 18 s worst-case per image — leaves room for the AI call.
-const FETCH_TIMEOUT_MS = 6_000;
+// Per-candidate fetch timeout: 4 s per URL attempt (3 candidates × 4 s = 12 s max
+// per image). Keeps total download + AI call well within the 20 s deadline below.
+const FETCH_TIMEOUT_MS = 4_000;
 
 // Hard ceiling for the entire handler. Render's load balancer times out HTTP
-// responses at ~30 s and returns 502. We return a clean JSON "unsure" at 25 s
-// so the UI retry logic takes over instead of the user seeing a 502 error.
-const HANDLER_DEADLINE_MS = 25_000;
+// responses at ~30 s and returns 502. We return a clean JSON "unsure" at 20 s
+// so the UI retry logic takes over — leaving Render a clear 10 s margin so the
+// deadline always fires before Render kills the connection.
+const HANDLER_DEADLINE_MS = 20_000;
 
-type ImgBlock = {
-  type: "image";
-  image: Uint8Array;
-  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-};
+// ImgBlock supports both binary bytes (preferred — fastest for Moonshot) and a
+// URL reference. The URL path lets Moonshot's own servers fetch the image,
+// bypassing CDN restrictions on Render's IP range AND AVIF served by vendor
+// CDNs that ignore the Accept header.
+type ImgBlock =
+  | { type: "image"; image: Uint8Array; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" }
+  | { type: "image"; image: URL };
 
 /**
  * Deliberately omits image/avif from Accept.
@@ -90,7 +93,13 @@ function candidateUrls(url: string): string[] {
 
 /**
  * Download one image URL, trying multiple URL variants and proxy strategies.
- * Returns null only if every candidate fails or yields an unsupported format.
+ *
+ * Returns a binary block on success. When ALL binary attempts fail (e.g. vendor
+ * CDN serves AVIF regardless of Accept header, or Render's IP is blocked), falls
+ * back to a URL-reference block — the AI SDK passes this as `image_url` to
+ * Moonshot whose own servers fetch the image, bypassing both issues.
+ *
+ * Only returns null for completely invalid (non-http) URLs.
  */
 async function fetchImageAsBlock(url: string): Promise<ImgBlock | null> {
   if (!url?.startsWith("http")) return null;
@@ -115,13 +124,17 @@ async function fetchImageAsBlock(url: string): Promise<ImgBlock | null> {
 
       const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
       console.log(`[compare-images] fetched ${buf.length}b as ${normMime} via ${via}`);
-      return { type: "image", image: buf, mediaType: normMime as ImgBlock["mediaType"] };
+      return { type: "image", image: buf, mediaType: normMime as "image/jpeg" | "image/png" | "image/gif" | "image/webp" };
     } catch {
       // timeout / network error — try next candidate
     }
   }
 
-  return null;
+  // All binary download attempts failed. Fall back to URL reference so Moonshot
+  // fetches the image from its own servers — handles vendor CDN AVIF and
+  // Render IP-blocked Walmart CDN images without a proxy needed.
+  console.log(`[compare-images] binary fetch failed for ${url.slice(0, 80)} — using URL fallback`);
+  return { type: "image", image: new URL(url) };
 }
 
 function b64ToBlock(b64: string, mime: string): ImgBlock | null {
@@ -132,7 +145,7 @@ function b64ToBlock(b64: string, mime: string): ImgBlock | null {
     const bytes  = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     if (bytes.length < 512) return null;
-    return { type: "image", image: bytes, mediaType: normMime as ImgBlock["mediaType"] };
+    return { type: "image", image: bytes, mediaType: normMime as "image/jpeg" | "image/png" | "image/gif" | "image/webp" };
   } catch {
     return null;
   }
@@ -186,24 +199,30 @@ async function handlePost(req: NextRequest): Promise<NextResponse> {
   }
 
   if (!liveBlocks.length) {
-    console.error(`[compare-images] Could not fetch any live images for: ${liveUrls?.join(", ") ?? "(b64 decode failed)"}`);
+    // Only happens when all liveUrls were invalid (non-http) or b64 decode failed.
+    // fetchImageAsBlock always returns a URL fallback for valid http URLs.
+    console.error(`[compare-images] No usable live image blocks for: ${liveUrls?.join(", ") ?? "(b64)"}`);
     return NextResponse.json({
       verdict: "unsure",
-      reason:  "Could not download marketplace image(s) — will retry automatically.",
+      reason:  "No marketplace image URL provided — will retry automatically.",
     });
   }
 
   // ── Fetch vendor/catalog image ────────────────────────────────────────────
+  // fetchImageAsBlock returns a URL fallback when binary download fails (e.g.
+  // vendor CDN serves AVIF), so vendorBlock is only null for invalid URLs.
   const vendorBlock = await fetchImageAsBlock(vendorUrl);
   if (!vendorBlock) {
-    console.error(`[compare-images] Could not fetch vendor image: ${vendorUrl}`);
     return NextResponse.json({
       verdict: "unsure",
-      reason:  "Could not load catalog image — will retry automatically.",
+      reason:  "Invalid catalog image URL.",
     });
   }
 
-  console.log(`[compare-images] vendor OK (${vendorBlock.image.length}b), live: ${liveBlocks.length} image(s)`);
+  const vendorDesc = "image" in vendorBlock && vendorBlock.image instanceof URL
+    ? `URL fallback: ${String(vendorBlock.image).slice(0, 60)}`
+    : `binary ${(vendorBlock as { image: Uint8Array }).image.length}b`;
+  console.log(`[compare-images] vendor OK (${vendorDesc}), live: ${liveBlocks.length} block(s)`);
 
   // ── AI comparison ─────────────────────────────────────────────────────────
   try {
