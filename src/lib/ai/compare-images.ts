@@ -98,6 +98,15 @@ type ImageCache = Map<string, Promise<FetchedImage | null>>;
 
 const cacheStore = new AsyncLocalStorage<ImageCache>();
 
+// Cap how many downloads stay pinned at once. The reuse this cache exists for
+// — one vendor image vs several marketplace angles, and CDN URLs recurring
+// between neighbouring products — always happens close together in time, so a
+// small window keeps those hits. Without the cap, a full-project run pins the
+// bytes of EVERY image it ever downloaded until the run ends (easily 100+ MB
+// on a 50-product project), which is enough to OOM a 512 MB instance and take
+// the whole server down mid-run.
+const IMAGE_CACHE_MAX = 24;
+
 function fetchImageCached(url: string): Promise<FetchedImage | null> {
   const cache = cacheStore.getStore();
   if (!cache) return fetchImage(url);
@@ -107,6 +116,11 @@ function fetchImageCached(url: string): Promise<FetchedImage | null> {
   if (!hit) {
     hit = fetchImage(url);
     cache.set(url, hit);
+    // FIFO eviction (Map preserves insertion order): drop the oldest entries.
+    for (const key of cache.keys()) {
+      if (cache.size <= IMAGE_CACHE_MAX) break;
+      cache.delete(key);
+    }
   }
   return hit;
 }
