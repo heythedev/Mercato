@@ -51,8 +51,13 @@ function imageCandidates(url: string): string[] {
         url, // original last (will be rejected by SUPPORTED_MIME check)
       ]
     : [url];
+  // Direct first, then wsrv.nl — an image proxy that fetches from ITS servers
+  // (bypasses CDN IP blocks), converts AVIF to JPEG, and resizes to 1280px so
+  // the download stays small whatever the original size — then two plain CORS
+  // proxies as last resorts.
   return bases.flatMap(u => [
     u,
+    `https://wsrv.nl/?url=${encodeURIComponent(u)}&w=1280&output=jpg`,
     `https://corsproxy.io/?${encodeURIComponent(u)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   ]);

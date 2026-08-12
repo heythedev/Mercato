@@ -8,11 +8,19 @@
  *
  * - Marketplace/live images: fetched SERVER-SIDE via a tiered proxy strategy:
  *   1. Direct fetch with browser-like headers (works when not IP-blocked)
- *   2. corsproxy.io  — Cloudflare-hosted; Walmart runs on Cloudflare so
+ *   2. wsrv.nl — image proxy/resizer; fetches from ITS servers (bypasses CDN
+ *      IP blocks), converts AVIF→JPEG, and resizes to 1280px so the download
+ *      stays small no matter how large the original is.
+ *   3. corsproxy.io  — Cloudflare-hosted; Walmart runs on Cloudflare so
  *      Cloudflare IPs are never blocked by Walmart CDN.
- *   3. allorigins.win — independent fallback proxy.
+ *   4. allorigins.win — independent fallback proxy.
  *   Supply as `liveUrls` (preferred) or as pre-fetched `liveB64`/`liveMime`
  *   (legacy / browser-supplied).
+ *
+ *   Every image MUST reach the model as bytes: Moonshot's vision API rejects
+ *   remote image URLs outright (400 "unsupported image url" — verified), so
+ *   there is no URL pass-through. A failed download returns a retryable
+ *   "unsure" instead.
  *
  * Body (JSON):
  *   vendorUrl:   string   — URL of the catalog image
@@ -39,8 +47,8 @@ const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
 // outbound request bytes), so one uncapped 30 MB hi-res vendor original is a
 // ~150 MB transient spike — enough to OOM-kill the 512 MB instance, which is
 // what the recurring 502s on this endpoint were. Oversized images are NOT
-// dropped: they fall back to a URL-reference block so Moonshot's own servers
-// fetch them — zero bytes held here, same image analyzed.
+// dropped: the wsrv.nl candidate re-serves the same asset resized to 1280px,
+// well under the cap — same image analyzed, tiny download.
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 // Per-candidate fetch timeout: 4 s per URL attempt. An .avif URL expands to
@@ -62,13 +70,13 @@ const MAX_CONCURRENT = 2;
 // deadline always fires before Render kills the connection.
 const HANDLER_DEADLINE_MS = 20_000;
 
-// ImgBlock supports both binary bytes (preferred — fastest for Moonshot) and a
-// URL reference. The URL path lets Moonshot's own servers fetch the image,
-// bypassing CDN restrictions on Render's IP range AND AVIF served by vendor
-// CDNs that ignore the Accept header.
+// Binary bytes ONLY. There used to be a URL-reference variant here (`image:
+// URL`) on the theory that Moonshot's servers would fetch the image themselves
+// — they don't: Moonshot's vision API returns 400 "unsupported image url" for
+// any remote URL, which poisoned the ENTIRE vision call whenever one image
+// fell back to it. Bytes are the only currency this model accepts.
 type ImgBlock =
-  | { type: "image"; image: Uint8Array; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" }
-  | { type: "image"; image: URL };
+  { type: "image"; image: Uint8Array; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" };
 
 /**
  * Deliberately omits image/avif from Accept.
@@ -102,9 +110,13 @@ function candidateUrls(url: string): string[] {
         url,                                        // original .avif last (will be rejected by mime check)
       ]
     : [url];
-  // For each base URL, try direct then two CORS proxies.
+  // For each base URL: direct first (fastest when the CDN allows our IP), then
+  // wsrv.nl — an image proxy that fetches from ITS servers, converts AVIF to
+  // JPEG, and resizes to 1280px (small download regardless of original size) —
+  // then two plain CORS proxies as last resorts.
   return bases.flatMap(u => [
     u,
+    `https://wsrv.nl/?url=${encodeURIComponent(u)}&w=1280&output=jpg`,
     `https://corsproxy.io/?${encodeURIComponent(u)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   ]);
@@ -113,12 +125,9 @@ function candidateUrls(url: string): string[] {
 /**
  * Download one image URL, trying multiple URL variants and proxy strategies.
  *
- * Returns a binary block on success. When ALL binary attempts fail (e.g. vendor
- * CDN serves AVIF regardless of Accept header, or Render's IP is blocked), falls
- * back to a URL-reference block — the AI SDK passes this as `image_url` to
- * Moonshot whose own servers fetch the image, bypassing both issues.
- *
- * Only returns null for completely invalid (non-http) URLs.
+ * Returns a binary block on success, null on failure — the caller decides
+ * whether the failure is permanent (dead link, non-http URL) or transient
+ * (every candidate timed out / was blocked; the client should retry).
  */
 /** A signal that aborts when `outer` aborts OR after `ms` — whichever is first. */
 function timeoutOr(outer: AbortSignal, ms: number): AbortSignal {
@@ -140,7 +149,6 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
   if (!url?.startsWith("http")) return { block: null, dead: false };
 
   let dead = false;
-  let oversized = false;
   const started = Date.now();
   for (const fetchUrl of candidateUrls(url)) {
     // Stop walking candidates once the per-image budget (or the whole handler)
@@ -166,13 +174,9 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
       if (!ALLOWED_MIME.test(normMime)) continue;
 
       const buf = await readBodyCapped(res, MAX_IMAGE_BYTES);
-      if (buf === null) {
-        // Too big to hold in this process — and every mirror serves the same
-        // bytes, so stop downloading and let the URL fallback hand the original
-        // link to Moonshot's fetcher instead.
-        oversized = true;
-        break;
-      }
+      // Too big to hold in this process — move on: the wsrv.nl candidate
+      // re-serves the same asset resized to well under the cap.
+      if (buf === null) continue;
       if (buf.length < 512) continue; // probably an error body
 
       const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
@@ -191,20 +195,12 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
     return { block: null, dead: true };
   }
 
-  // Binary download failed or the image is too large to hold. Fall back to a
-  // URL reference so Moonshot fetches the image from its own servers — handles
-  // vendor CDN AVIF, Render IP-blocked Walmart CDN images, AND oversized
-  // originals without holding a byte of them here.
-  console.log(`[compare-images] ${oversized ? "image exceeds size cap" : "binary fetch failed"} for ${url.slice(0, 80)} — using URL fallback`);
-  try {
-    return { block: { type: "image", image: new URL(url) }, dead: false };
-  } catch {
-    // fetch() and the URL parser both rejected it — no fetcher anywhere can
-    // use this link. Must return, never throw: a rejection here can float out
-    // of an early-returned handler as an unhandled promise rejection, which
-    // kills the whole Node process.
-    return { block: null, dead: false };
-  }
+  // Every candidate (direct, wsrv resize, both CORS proxies) failed — likely a
+  // transient proxy/CDN hiccup. Report failure and let the client retry; do
+  // NOT hand Moonshot the URL instead, its vision API rejects remote URLs
+  // (400 "unsupported image url") and that poisons the whole comparison.
+  console.log(`[compare-images] all download attempts failed for ${url.slice(0, 80)}`);
+  return { block: null, dead: false };
 }
 
 function b64ToBlock(b64: string, mime: string): ImgBlock | null {
@@ -275,37 +271,39 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
   }
 
   if (!liveBlocks.length) {
-    // All liveUrls were invalid (non-http), dead links, or b64 decode failed —
-    // none of which a retry can fix, so tell the client to stop.
+    // Permanent failures (dead links, non-http URLs, bad b64) tell the client
+    // to stop; transient download failures (proxy/CDN hiccup) tell it to
+    // retry — with the URL pass-through gone, those land here too.
+    const anyFetchable = (liveUrls ?? []).some(u => u?.startsWith("http"));
+    const permanent = liveDead || !anyFetchable;
     console.error(`[compare-images] No usable live image blocks for: ${liveUrls?.join(", ") ?? "(b64)"}`);
     return NextResponse.json({
       verdict:   "unsure",
-      retryable: false,
+      retryable: !permanent,
       reason:    liveDead
         ? "Marketplace image link is broken (404) — needs manual review."
+        : !permanent
+        ? "Could not download marketplace image — will retry automatically."
         : "No usable marketplace image URL — needs manual review.",
     });
   }
 
-  // fetchImageAsBlock returns a URL fallback when binary download fails (e.g.
-  // vendor CDN serves AVIF), so block is only null for invalid or dead URLs —
-  // both permanent conditions the client must not retry.
   const vendor = await vendorPromise;
   if (!vendor.block) {
+    const permanent = vendor.dead || !vendorUrl.startsWith("http");
     return NextResponse.json({
       verdict:   "unsure",
-      retryable: false,
+      retryable: !permanent,
       reason:    vendor.dead
         ? "Catalog image link is broken (404) — the image no longer exists at that URL. Needs manual review."
+        : !permanent
+        ? "Could not download catalog image — will retry automatically."
         : "Invalid catalog image URL — needs manual review.",
     });
   }
   const vendorBlock = vendor.block;
 
-  const vendorDesc = "image" in vendorBlock && vendorBlock.image instanceof URL
-    ? `URL fallback: ${String(vendorBlock.image).slice(0, 60)}`
-    : `binary ${(vendorBlock as { image: Uint8Array }).image.length}b`;
-  console.log(`[compare-images] vendor OK (${vendorDesc}), live: ${liveBlocks.length} block(s)`);
+  console.log(`[compare-images] vendor OK (binary ${vendorBlock.image.length}b), live: ${liveBlocks.length} block(s)`);
 
   // ── AI comparison ─────────────────────────────────────────────────────────
   try {
