@@ -233,10 +233,26 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
    */
   function startVerifyFeed(fromScratch: boolean): () => void {
     let cancelled = false;
+    // On a forced re-verify the server clears the previous verdicts inside the
+    // POST handler, but this feed's first poll is a much lighter query and
+    // usually reaches the database first — it would read the previous run's
+    // rows and merge them back into state, resurrecting the results the client
+    // just cleared from the screen. Start the cursor past the newest existing
+    // verdict so only rows written by THIS run (whose verifiedAt is always
+    // newer) can come back, no matter which request lands first. "~" sorts
+    // after every id character, so same-timestamp rows are excluded too.
+    // A resume keeps the cursor at the start: rows verified by earlier passes
+    // are legitimately part of what should be on screen.
     let cursor: string | null = null;
-    // A re-verify rewrites every row's verifiedAt, so the cursor must start
-    // empty; a resume continues past whatever is already on screen.
-    if (!fromScratch) cursor = null;
+    if (fromScratch) {
+      let newest: string | null = null;
+      for (const p of products) {
+        if (!p.verifiedAt) continue;
+        const at = new Date(p.verifiedAt).toISOString();
+        if (!newest || at > newest) newest = at;
+      }
+      if (newest) cursor = `${newest}|~`;
+    }
 
     // Returns true when this poll produced new rows, so the scheduler can stay on
     // the fast cadence while data flows and ease off when the run goes quiet.
