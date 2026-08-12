@@ -120,9 +120,16 @@ function timeoutOr(outer: AbortSignal, ms: number): AbortSignal {
   return ac.signal;
 }
 
-async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<ImgBlock | null> {
-  if (!url?.startsWith("http")) return null;
+// dead=true means the ORIGINAL URL answered 404/410 — the image is gone, no
+// fetcher (browser, proxy, or Moonshot) will ever get it, so retrying the whole
+// comparison is pointless. block=null + dead=false means "couldn't download
+// here but the link may still work elsewhere".
+type FetchResult = { block: ImgBlock | null; dead: boolean };
 
+async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<FetchResult> {
+  if (!url?.startsWith("http")) return { block: null, dead: false };
+
+  let dead = false;
   const started = Date.now();
   for (const fetchUrl of candidateUrls(url)) {
     // Stop walking candidates once the per-image budget (or the whole handler)
@@ -134,7 +141,12 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<ImgB
         headers:  IMAGE_HEADERS,
         redirect: "follow",
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        // Only the original URL is authoritative — a 404 on a proxy or a
+        // .jpeg/.webp format variant proves nothing about the real link.
+        if (fetchUrl === url && (res.status === 404 || res.status === 410)) dead = true;
+        continue;
+      }
 
       const rawMime = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
       const normMime = rawMime === "image/jpg" ? "image/jpeg" : rawMime;
@@ -147,17 +159,25 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<ImgB
 
       const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
       console.log(`[compare-images] fetched ${buf.length}b as ${normMime} via ${via}`);
-      return { type: "image", image: buf, mediaType: normMime as "image/jpeg" | "image/png" | "image/gif" | "image/webp" };
+      return {
+        block: { type: "image", image: buf, mediaType: normMime as "image/jpeg" | "image/png" | "image/gif" | "image/webp" },
+        dead: false,
+      };
     } catch {
       // timeout / network error — try next candidate
     }
+  }
+
+  if (dead) {
+    console.log(`[compare-images] dead link (404/410) for ${url.slice(0, 80)}`);
+    return { block: null, dead: true };
   }
 
   // All binary download attempts failed. Fall back to URL reference so Moonshot
   // fetches the image from its own servers — handles vendor CDN AVIF and
   // Render IP-blocked Walmart CDN images without a proxy needed.
   console.log(`[compare-images] binary fetch failed for ${url.slice(0, 80)} — using URL fallback`);
-  return { type: "image", image: new URL(url) };
+  return { block: { type: "image", image: new URL(url) }, dead: false };
 }
 
 function b64ToBlock(b64: string, mime: string): ImgBlock | null {
@@ -208,12 +228,14 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
   const vendorPromise = fetchImageAsBlock(vendorUrl, signal);
 
   let liveBlocks: ImgBlock[];
+  let liveDead = false;
 
   if (liveUrls?.length) {
     // Preferred path: server fetches via proxy chain (no CORS restrictions server-side)
     console.log(`[compare-images] fetching ${liveUrls.length} live URL(s) server-side`);
     const settled = await Promise.all(liveUrls.slice(0, 3).map(u => fetchImageAsBlock(u, signal)));
-    liveBlocks = settled.filter((b): b is ImgBlock => b !== null);
+    liveBlocks = settled.map(r => r.block).filter((b): b is ImgBlock => b !== null);
+    liveDead   = liveBlocks.length === 0 && settled.some(r => r.dead);
   } else {
     // Legacy path: browser already fetched and sent base64 bytes
     if (liveB64!.some(b => b.length > MAX_B64_LEN)) {
@@ -226,24 +248,32 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
   }
 
   if (!liveBlocks.length) {
-    // Only happens when all liveUrls were invalid (non-http) or b64 decode failed.
-    // fetchImageAsBlock always returns a URL fallback for valid http URLs.
+    // All liveUrls were invalid (non-http), dead links, or b64 decode failed —
+    // none of which a retry can fix, so tell the client to stop.
     console.error(`[compare-images] No usable live image blocks for: ${liveUrls?.join(", ") ?? "(b64)"}`);
     return NextResponse.json({
-      verdict: "unsure",
-      reason:  "No marketplace image URL provided — will retry automatically.",
+      verdict:   "unsure",
+      retryable: false,
+      reason:    liveDead
+        ? "Marketplace image link is broken (404) — needs manual review."
+        : "No usable marketplace image URL — needs manual review.",
     });
   }
 
   // fetchImageAsBlock returns a URL fallback when binary download fails (e.g.
-  // vendor CDN serves AVIF), so vendorBlock is only null for invalid URLs.
-  const vendorBlock = await vendorPromise;
-  if (!vendorBlock) {
+  // vendor CDN serves AVIF), so block is only null for invalid or dead URLs —
+  // both permanent conditions the client must not retry.
+  const vendor = await vendorPromise;
+  if (!vendor.block) {
     return NextResponse.json({
-      verdict: "unsure",
-      reason:  "Invalid catalog image URL.",
+      verdict:   "unsure",
+      retryable: false,
+      reason:    vendor.dead
+        ? "Catalog image link is broken (404) — the image no longer exists at that URL. Needs manual review."
+        : "Invalid catalog image URL — needs manual review.",
     });
   }
+  const vendorBlock = vendor.block;
 
   const vendorDesc = "image" in vendorBlock && vendorBlock.image instanceof URL
     ? `URL fallback: ${String(vendorBlock.image).slice(0, 60)}`

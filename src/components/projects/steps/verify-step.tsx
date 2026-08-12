@@ -229,8 +229,14 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         return;
       }
 
-      const data = await res.json() as { verdict: string; reason: string };
+      const data = await res.json() as { verdict: string; reason: string; retryable?: boolean };
       const { verdict, reason } = data;
+
+      // Permanent failure (broken/invalid image link) — retrying can't help.
+      if (data.retryable === false) {
+        setFinal(verdict, `Needs manual review — ${reason}`);
+        return;
+      }
 
       // "unsure": proxy chain may have had a transient failure — retry.
       if (verdict === "unsure" && attempt < MAX_ATTEMPTS) {
@@ -375,10 +381,11 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
           });
           if (!res.ok) continue; // transient server error — retry
 
-          const data = await res.json() as { verdict: string; reason: string };
+          const data = await res.json() as { verdict: string; reason: string; retryable?: boolean };
           finalVerdict = data.verdict;
           finalReason  = data.reason ?? "";
 
+          if (data.retryable === false) break; // broken link — retrying can't help
           if (finalVerdict === "unsure") continue; // unclear — retry
           if (finalVerdict === "mismatch" && attempt === 1) continue; // confirm once
           break; // definitive result
