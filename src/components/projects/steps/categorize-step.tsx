@@ -97,15 +97,25 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
   function downloadCsv() {
     const rows = [
-      ["SKU", "Product Name", "Brand", "Category", "Category Path", "Status"],
-      ...products.map((p) => [
-        p.vendorSku ?? p.id,
-        p.name,
-        p.brand ?? "",
-        p.marketplaceCategory ?? "",
-        p.categoryPath ?? "",
-        p.marketplaceCategory === "Uncategorized" ? "No match" : p.marketplaceCategory ? "Done" : "Not categorized",
-      ]),
+      ["SKU", "Product Name", "Brand", "Category", "Product Type", "Category Path", "Status"],
+      ...products.map((p) => {
+        // "Category > Product Type" paths are split into two columns for easier
+        // review. The CSV import (PUT) re-joins them, so download -> edit ->
+        // upload stays lossless — keep the header names in sync with it.
+        const cat = p.marketplaceCategory ?? "";
+        const sep = cat.indexOf(" > ");
+        const topCategory = sep === -1 ? cat : cat.slice(0, sep);
+        const productType = sep === -1 ? "" : cat.slice(sep + 3);
+        return [
+          p.vendorSku ?? p.id,
+          p.name,
+          p.brand ?? "",
+          topCategory,
+          productType,
+          p.categoryPath ?? "",
+          p.marketplaceCategory === "Uncategorized" ? "No match" : p.marketplaceCategory ? "Done" : "Not categorized",
+        ];
+      }),
     ];
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -189,7 +199,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
             onClick={() => csvRef.current?.click()}
             disabled={uploading || loading}
             className="inline-flex shrink-0 whitespace-nowrap items-center gap-2 h-9 px-4 rounded-lg border text-sm font-medium hover:bg-accent transition disabled:opacity-50"
-            title="Upload a corrected category CSV (SKU, Category, Category Path columns)"
+            title="Upload a corrected category CSV (SKU, Category, Product Type, Category Path columns)"
           >
             {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
             Import Categories

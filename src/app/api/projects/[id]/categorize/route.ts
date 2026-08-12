@@ -126,6 +126,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const skuIdx = headers.findIndex(h => /sku|sku_id|vendor_sku|item_sku/.test(h));
   const nameIdx = headers.findIndex(h => /product[\s_]?name|name|title/.test(h));
   const catIdx = headers.findIndex(h => /^category$|marketplace[\s_]?cat/.test(h));
+  const ptIdx = headers.findIndex(h => /^product[\s_]?type$/.test(h));
   const pathIdx = headers.findIndex(h => /category[\s_]?path|path/.test(h));
 
   if (catIdx === -1) {
@@ -142,7 +143,12 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     const cols = line.split(delim).map(c => c.replace(/^"|"$/g, "").trim());
     const sku = skuIdx >= 0 ? (cols[skuIdx] ?? "") : "";
     const name = nameIdx >= 0 ? (cols[nameIdx] ?? "") : "";
-    const category = (cols[catIdx] ?? "").trim();
+    let category = (cols[catIdx] ?? "").trim();
+    const productType = ptIdx >= 0 ? (cols[ptIdx] ?? "").trim() : "";
+    // The downloaded CSV splits "Category > Product Type" into two columns;
+    // re-join here so download -> edit -> upload round-trips are lossless.
+    // Skip when the category cell already carries a full path (older files).
+    if (productType && !category.includes(" > ")) category = `${category} > ${productType}`;
     const path = pathIdx >= 0 ? (cols[pathIdx] ?? "").trim() || null : null;
     if (!category) continue;
 
