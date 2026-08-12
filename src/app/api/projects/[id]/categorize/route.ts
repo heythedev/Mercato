@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
+import { Prisma } from "@prisma/client";
 import { categorizeProducts, type ProductInput } from "@/lib/ai/categorize";
 import { enrichSkuOnlyProducts, looksLikeSkuName } from "@/lib/ai/resolve-sku";
 import {
@@ -264,44 +265,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Heavy work runs here; the HTTP response returns the jobId below.
   void (async () => {
    try {
-    const project = await prisma.project.findUnique({
-      where: { id },
-      include: {
-        products: {
-          select: {
-            id: true,
-            name: true,
-            brand: true,
-            description: true,
-            vendorSku: true,
-            marketplaceCategory: true,
-            vendorData: true,
-            // Verification stores the matched marketplace listing here, which
-            // includes Walmart's own category path for the product.
-            liveData: true,
-          },
-        },
-      },
-    });
-    if (!project) throw new Error("Project not found");
-
     // Temu & Best Buy share temu_categories.csv; Mathis uses mathis_categories.csv.
     // These CSV taxonomy sheets drive categorization inside categorizeProducts (not template names).
     // The top level of each assigned path still fuzzy-matches export templates at export time.
-    const mpLower = project.marketplace.toLowerCase();
+    const mpLower = projectMeta.marketplace.toLowerCase();
 
-    setCategorizeJobPhase(jobId, `Categorizing ${project.products.length} products…`);
+    const totalCount = await prisma.product.count({ where: { projectId: id } });
+    setCategorizeJobPhase(jobId, `Categorizing ${totalCount} products…`);
+
+    // Never load the whole catalog in one SELECT: each row drags its raw
+    // vendorData and liveData JSON blobs along — at 10k+ products that is
+    // 100+ MB held for the whole run, enough to OOM the 512 MB production
+    // instance. Instead, stream id-ordered pages and keep only the slim,
+    // extracted values every later step actually works from; the blobs are
+    // released with each page.
+    const PAGE_SIZE = 500;
 
     // Build ProductInput with vendor category hint + supplemental context fields
-    let productInputs: ProductInput[] = project.products.map((p) => ({
-      id: p.id,
-      name: p.name,
-      brand: p.brand,
-      description: p.description,
-      sku: p.vendorSku,
-      vendorCategory: extractVendorCategory(p.vendorData),
-      vendorContext: extractVendorContext(p.vendorData),
-    }));
+    const productInputsAll: ProductInput[] = [];
 
     // ── Walmart's own category, harvested during verification ──────────────────
     // When a product was matched to a real Walmart listing, that listing carries
@@ -330,36 +311,75 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // value Walmart uses for that listing. This is more reliable than AI assignment
     // so we persist it directly and skip those products in the AI pass below.
     const walmartSpecTypeById = new Map<string, string>();
+    // Existing category per product — drives repeatable re-runs and the final counts.
+    const existingCatById = new Map<string, string | null>();
     let walmartRejected = 0;
-    if (mpLower === "walmart") {
-      for (const p of project.products) {
-        const ld = p.liveData as Record<string, unknown> | null;
-        const parsed = parseWalmartCategoryPath(ld?.categoryPath);
-        if (!parsed) continue;
-        if (implausibleWalmartCategory(p.name, parsed.path)) { walmartRejected++; continue; }
-        walmartCategoryById.set(p.id, parsed);
-        // productType is present when the Seller API was the match source.
-        const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
-        if (pt) walmartSpecTypeById.set(p.id, pt);
-      }
-      if (walmartRejected) {
-        console.log(
-          `[categorize] rejected ${walmartRejected} Walmart categories as implausible ` +
-            `for the product — those fall through to the AI`,
-        );
+
+    {
+      let cursor: string | null = null;
+      for (;;) {
+        const where: Prisma.ProductWhereInput = cursor
+          ? { projectId: id, id: { gt: cursor } }
+          : { projectId: id };
+        const page = await prisma.product.findMany({
+          where,
+          orderBy: { id: "asc" },
+          take: PAGE_SIZE,
+          select: {
+            id: true,
+            name: true,
+            brand: true,
+            description: true,
+            vendorSku: true,
+            marketplaceCategory: true,
+            vendorData: true,
+            // Verification stores the matched marketplace listing here, which
+            // includes Walmart's own category path for the product.
+            liveData: true,
+          },
+        });
+        if (page.length === 0) break;
+        cursor = page[page.length - 1].id;
+
+        for (const p of page) {
+          existingCatById.set(p.id, p.marketplaceCategory);
+
+          // Reuse existing categories for repeatable re-runs: unless `force`,
+          // only send products that don't yet have a confident category (null
+          // or "Uncategorized"). Already-categorized products are left
+          // untouched, so their result never changes.
+          if (force || !p.marketplaceCategory || p.marketplaceCategory === "Uncategorized") {
+            productInputsAll.push({
+              id: p.id,
+              name: p.name,
+              brand: p.brand,
+              description: p.description,
+              sku: p.vendorSku,
+              vendorCategory: extractVendorCategory(p.vendorData),
+              vendorContext: extractVendorContext(p.vendorData),
+            });
+          }
+
+          if (mpLower !== "walmart") continue;
+          const ld = p.liveData as Record<string, unknown> | null;
+          const parsed = parseWalmartCategoryPath(ld?.categoryPath);
+          if (!parsed) continue;
+          if (implausibleWalmartCategory(p.name, parsed.path)) { walmartRejected++; continue; }
+          walmartCategoryById.set(p.id, parsed);
+          // productType is present when the Seller API was the match source.
+          const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
+          if (pt) walmartSpecTypeById.set(p.id, pt);
+        }
       }
     }
+    if (walmartRejected) {
+      console.log(
+        `[categorize] rejected ${walmartRejected} Walmart categories as implausible ` +
+          `for the product — those fall through to the AI`,
+      );
+    }
 
-    // Reuse existing categories for repeatable re-runs: unless `force`, only send
-    // products that don't yet have a confident category (null or "Uncategorized").
-    // Already-categorized products are left untouched, so their result never changes.
-    const existingCatById = new Map(project.products.map((p) => [p.id, p.marketplaceCategory]));
-    const needsCategorization = (id: string) => {
-      if (force) return true;
-      const cat = existingCatById.get(id);
-      return !cat || cat === "Uncategorized";
-    };
-    productInputs = productInputs.filter((p) => needsCategorization(p.id));
+    let productInputs = productInputsAll;
 
     // Apply Walmart's own categories first. These are authoritative for a
     // Walmart export, so they are written straight through and skip the AI
@@ -419,9 +439,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           // Merge catalog attributes (Size/Color/images/weight) INTO the existing
           // vendorData so the export template can fill those columns — the vendor sheet
           // itself was bare SKUs, so this is the only source for them.
-          const vendorDataById = new Map(
-            project.products.map((p) => [p.id, (p.vendorData ?? {}) as Record<string, unknown>]),
-          );
+          // Fetched here for just the enriched rows: the streaming load above
+          // deliberately let go of the raw vendorData blobs to keep memory flat.
+          const enrichedIds = enrichments.map((e) => e.productId);
+          const vendorDataById = new Map<string, Record<string, unknown>>();
+          for (let i = 0; i < enrichedIds.length; i += PAGE_SIZE) {
+            const rows = await prisma.product.findMany({
+              where: { id: { in: enrichedIds.slice(i, i + PAGE_SIZE) } },
+              select: { id: true, vendorData: true },
+            });
+            for (const row of rows) {
+              vendorDataById.set(row.id, (row.vendorData ?? {}) as Record<string, unknown>);
+            }
+          }
           await inChunks(enrichments, (e) => {
             const mergedVendorData = e.attributes
               ? { ...(vendorDataById.get(e.productId) ?? {}), ...e.attributes }
@@ -442,7 +472,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       setCategorizeJobPhase(jobId, `Assigning categories to ${productInputs.length} products…`);
       const results = await categorizeProducts(
-        project.marketplace,
+        projectMeta.marketplace,
         productInputs,
         undefined,
         // Live progress → job.updatedAt advances every wave, so the client sees a slow
@@ -542,21 +572,45 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (mpLower === "walmart") {
       // All products (including those that went through the Walmart category path)
       // need a spec type. Use all project products minus those already assigned from
-      // live data.
-      const allProductsForSpec = project.products.filter(
-        (p) => !walmartSpecTypeById.has(p.id),
-      );
-      if (allProductsForSpec.length > 0) {
+      // live data. Paged back out of the DB — the streaming load above kept no
+      // product rows around — into the slim inputs the spec assigner needs.
+      const specInputs: Array<{
+        id: string;
+        name: string;
+        brand: string | null;
+        description: string | null;
+        category: string | null;
+      }> = [];
+      {
+        let cursor: string | null = null;
+        for (;;) {
+          const where: Prisma.ProductWhereInput = cursor
+            ? { projectId: id, id: { gt: cursor } }
+            : { projectId: id };
+          const page = await prisma.product.findMany({
+            where,
+            orderBy: { id: "asc" },
+            take: PAGE_SIZE,
+            select: { id: true, name: true, brand: true, description: true },
+          });
+          if (page.length === 0) break;
+          cursor = page[page.length - 1].id;
+          for (const p of page) {
+            if (walmartSpecTypeById.has(p.id)) continue;
+            specInputs.push({
+              id: p.id,
+              name: p.name,
+              brand: p.brand,
+              description: p.description,
+              category: existingCatById.get(p.id) ?? null,
+            });
+          }
+        }
+      }
+      if (specInputs.length > 0) {
         try {
           setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
           const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");
-          const specInputs = allProductsForSpec.map((p) => ({
-            id: p.id,
-            name: p.name,
-            brand: p.brand,
-            description: p.description,
-            category: existingCatById.get(p.id) ?? null,
-          }));
           const specMap = await assignSpecProductTypes(specInputs);
           if (specMap.size > 0) {
             await inChunks([...specMap], ([productId, specProductType]) =>
