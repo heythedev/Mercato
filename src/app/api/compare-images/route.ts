@@ -33,9 +33,18 @@ import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/mo
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
 
-// Per-candidate fetch timeout: 4 s per URL attempt (3 candidates × 4 s = 12 s max
-// per image). Keeps total download + AI call well within the 20 s deadline below.
+// Per-candidate fetch timeout: 4 s per URL attempt. An .avif URL expands to
+// 9 candidates (3 format variants × 3 proxies), so without a per-image budget
+// one image could take 36 s. The budget cuts the candidate walk off early and
+// lets the URL-reference fallback take over.
 const FETCH_TIMEOUT_MS = 4_000;
+const IMAGE_BUDGET_MS  = 10_000;
+
+// At most this many comparisons run at once; extra requests get an instant
+// "unsure" so the client's retry/backoff takes over. Each comparison downloads
+// several MB of images and holds them through a vision call — letting them
+// stack unbounded is what starves the hosting instance into real 502s.
+const MAX_CONCURRENT = 2;
 
 // Hard ceiling for the entire handler. Render's load balancer times out HTTP
 // responses at ~30 s and returns 502. We return a clean JSON "unsure" at 20 s
@@ -101,13 +110,27 @@ function candidateUrls(url: string): string[] {
  *
  * Only returns null for completely invalid (non-http) URLs.
  */
-async function fetchImageAsBlock(url: string): Promise<ImgBlock | null> {
+/** A signal that aborts when `outer` aborts OR after `ms` — whichever is first. */
+function timeoutOr(outer: AbortSignal, ms: number): AbortSignal {
+  const ac = new AbortController();
+  const abort = () => ac.abort();
+  if (outer.aborted) abort();
+  else outer.addEventListener("abort", abort, { once: true });
+  setTimeout(abort, ms);
+  return ac.signal;
+}
+
+async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<ImgBlock | null> {
   if (!url?.startsWith("http")) return null;
 
+  const started = Date.now();
   for (const fetchUrl of candidateUrls(url)) {
+    // Stop walking candidates once the per-image budget (or the whole handler)
+    // is spent — the URL-reference fallback below still gives the AI a shot.
+    if (signal.aborted || Date.now() - started > IMAGE_BUDGET_MS) break;
     try {
       const res = await fetch(fetchUrl, {
-        signal:   AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal:   timeoutOr(signal, FETCH_TIMEOUT_MS),
         headers:  IMAGE_HEADERS,
         redirect: "follow",
       });
@@ -151,7 +174,7 @@ function b64ToBlock(b64: string, mime: string): ImgBlock | null {
   }
 }
 
-async function handlePost(req: NextRequest): Promise<NextResponse> {
+async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextResponse> {
   if (!moonshotConfigured()) {
     return NextResponse.json({ verdict: "unsure", reason: "Vision AI not configured" });
   }
@@ -179,13 +202,17 @@ async function handlePost(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "liveUrls or liveB64 is required" }, { status: 400 });
   }
 
-  // ── Build live image blocks ───────────────────────────────────────────────
+  // ── Build image blocks (vendor + live fetched in PARALLEL) ───────────────
+  // Sequential fetching could spend two full per-image budgets before the AI
+  // call even started, so the deadline would fire and the attempt was wasted.
+  const vendorPromise = fetchImageAsBlock(vendorUrl, signal);
+
   let liveBlocks: ImgBlock[];
 
   if (liveUrls?.length) {
     // Preferred path: server fetches via proxy chain (no CORS restrictions server-side)
     console.log(`[compare-images] fetching ${liveUrls.length} live URL(s) server-side`);
-    const settled = await Promise.all(liveUrls.slice(0, 3).map(u => fetchImageAsBlock(u)));
+    const settled = await Promise.all(liveUrls.slice(0, 3).map(u => fetchImageAsBlock(u, signal)));
     liveBlocks = settled.filter((b): b is ImgBlock => b !== null);
   } else {
     // Legacy path: browser already fetched and sent base64 bytes
@@ -208,10 +235,9 @@ async function handlePost(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  // ── Fetch vendor/catalog image ────────────────────────────────────────────
   // fetchImageAsBlock returns a URL fallback when binary download fails (e.g.
   // vendor CDN serves AVIF), so vendorBlock is only null for invalid URLs.
-  const vendorBlock = await fetchImageAsBlock(vendorUrl);
+  const vendorBlock = await vendorPromise;
   if (!vendorBlock) {
     return NextResponse.json({
       verdict: "unsure",
@@ -260,6 +286,7 @@ async function handlePost(req: NextRequest): Promise<NextResponse> {
         ],
       }],
       maxOutputTokens: 150,
+      abortSignal: signal,
     });
 
     const lines   = text.trim().split("\n").map(l => l.trim()).filter(Boolean);
@@ -282,23 +309,50 @@ async function handlePost(req: NextRequest): Promise<NextResponse> {
   }
 }
 
+// Live count of in-flight comparisons (per server instance).
+let activeComparisons = 0;
+
 /**
- * Public handler — races handlePost() against a hard 25 s deadline.
+ * Public handler — races handlePost() against the hard 20 s deadline.
  *
- * Render's load balancer times out HTTP responses at ~30 s and returns a 502
- * Bad Gateway.  By resolving with a clean JSON "unsure" at 25 s we keep the
- * response within Render's window; the UI retry logic then kicks in (up to 3
- * attempts) instead of the user seeing a cryptic 502 error page.
+ * The hosting proxy times out slow responses and returns 502 Bad Gateway. By
+ * resolving with a clean JSON "unsure" before that window we keep the retry
+ * loop in the UI instead of surfacing a cryptic 502 page. Crucially, when the
+ * deadline fires it also ABORTS the in-flight downloads and AI call: racing
+ * alone leaves the work running in the background, and with the client
+ * retrying on top, those zombies stack up until the instance is so starved
+ * that the proxy 502s everything — the exact failure this endpoint had.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const deadline = new Promise<NextResponse>(resolve =>
-    setTimeout(
-      () => resolve(NextResponse.json({
+  // Shed load instead of queueing — the client treats "unsure" as retryable.
+  if (activeComparisons >= MAX_CONCURRENT) {
+    return NextResponse.json({
+      verdict: "unsure",
+      reason:  "Server busy with other image checks — will retry automatically.",
+    });
+  }
+  activeComparisons++;
+
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<NextResponse>(resolve => {
+    timer = setTimeout(() => {
+      ac.abort();
+      resolve(NextResponse.json({
         verdict: "unsure",
         reason:  "Image check timed out — will retry automatically.",
-      })),
-      HANDLER_DEADLINE_MS,
-    )
-  );
-  return Promise.race([handlePost(req), deadline]);
+      }));
+    }, HANDLER_DEADLINE_MS);
+  });
+
+  const work = handlePost(req, ac.signal);
+  // The deadline may win the race — don't let the loser reject unhandled.
+  work.catch(() => {});
+
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    activeComparisons--;
+  }
 }
