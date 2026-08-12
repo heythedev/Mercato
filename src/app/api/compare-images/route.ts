@@ -28,10 +28,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
 import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
+import { readBodyCapped } from "@/lib/ai/compare-images";
 
 // Moonshot (OpenAI-compatible) supports jpeg, png, gif, webp — NOT avif.
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
 const MAX_B64_LEN  = 8 * 1024 * 1024; // ~6 MB decoded per image
+
+// Hard ceiling per downloaded image. Every downloaded image is held ~4x over
+// during a comparison (raw bytes -> base64 string -> JSON request body ->
+// outbound request bytes), so one uncapped 30 MB hi-res vendor original is a
+// ~150 MB transient spike — enough to OOM-kill the 512 MB instance, which is
+// what the recurring 502s on this endpoint were. Oversized images are NOT
+// dropped: they fall back to a URL-reference block so Moonshot's own servers
+// fetch them — zero bytes held here, same image analyzed.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 // Per-candidate fetch timeout: 4 s per URL attempt. An .avif URL expands to
 // 9 candidates (3 format variants × 3 proxies), so without a per-image budget
@@ -130,6 +140,7 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
   if (!url?.startsWith("http")) return { block: null, dead: false };
 
   let dead = false;
+  let oversized = false;
   const started = Date.now();
   for (const fetchUrl of candidateUrls(url)) {
     // Stop walking candidates once the per-image budget (or the whole handler)
@@ -154,7 +165,14 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
       // Skip avif (AI can't process), HTML error pages, or unknown types.
       if (!ALLOWED_MIME.test(normMime)) continue;
 
-      const buf = new Uint8Array(await res.arrayBuffer());
+      const buf = await readBodyCapped(res, MAX_IMAGE_BYTES);
+      if (buf === null) {
+        // Too big to hold in this process — and every mirror serves the same
+        // bytes, so stop downloading and let the URL fallback hand the original
+        // link to Moonshot's fetcher instead.
+        oversized = true;
+        break;
+      }
       if (buf.length < 512) continue; // probably an error body
 
       const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
@@ -173,11 +191,20 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
     return { block: null, dead: true };
   }
 
-  // All binary download attempts failed. Fall back to URL reference so Moonshot
-  // fetches the image from its own servers — handles vendor CDN AVIF and
-  // Render IP-blocked Walmart CDN images without a proxy needed.
-  console.log(`[compare-images] binary fetch failed for ${url.slice(0, 80)} — using URL fallback`);
-  return { block: { type: "image", image: new URL(url) }, dead: false };
+  // Binary download failed or the image is too large to hold. Fall back to a
+  // URL reference so Moonshot fetches the image from its own servers — handles
+  // vendor CDN AVIF, Render IP-blocked Walmart CDN images, AND oversized
+  // originals without holding a byte of them here.
+  console.log(`[compare-images] ${oversized ? "image exceeds size cap" : "binary fetch failed"} for ${url.slice(0, 80)} — using URL fallback`);
+  try {
+    return { block: { type: "image", image: new URL(url) }, dead: false };
+  } catch {
+    // fetch() and the URL parser both rejected it — no fetcher anywhere can
+    // use this link. Must return, never throw: a rejection here can float out
+    // of an early-returned handler as an unhandled promise rejection, which
+    // kills the whole Node process.
+    return { block: null, dead: false };
+  }
 }
 
 function b64ToBlock(b64: string, mime: string): ImgBlock | null {

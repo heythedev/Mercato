@@ -58,6 +58,45 @@ function imageCandidates(url: string): string[] {
   ]);
 }
 
+/**
+ * Read a response body under a hard byte ceiling. Streams the body so an
+ * oversized file is abandoned AT the cap — arrayBuffer()-then-check lets a
+ * single rogue hi-res catalog image (vendor CDNs serve 10–30 MB originals)
+ * transit memory whole, which on a 512 MB instance is an OOM kill, not a
+ * rejected image. Returns null when the declared or actual size exceeds cap.
+ */
+export async function readBodyCapped(res: Response, cap: number): Promise<Uint8Array | null> {
+  const claimed = Number(res.headers.get("content-length"));
+  if (Number.isFinite(claimed) && claimed > cap) {
+    res.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!res.body) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return buf.length > cap ? null : buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > cap) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
 async function fetchImage(url: string): Promise<FetchedImage | null> {
   if (!url?.startsWith("http")) return null;
 
@@ -74,8 +113,8 @@ async function fetchImage(url: string): Promise<FetchedImage | null> {
       const normMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
       // Skip avif (AI can't process it) and HTML error pages from proxies.
       if (!SUPPORTED_MIME.test(normMime)) continue;
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.length < 512 || buf.length > MAX_IMAGE_BYTES) continue;
+      const buf = await readBodyCapped(res, MAX_IMAGE_BYTES);
+      if (!buf || buf.length < 512) continue;
       return { data: buf, mimeType: normMime };
     } catch {
       // timeout, network error — try next candidate

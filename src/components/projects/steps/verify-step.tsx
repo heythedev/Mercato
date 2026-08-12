@@ -165,8 +165,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
    * proxy chain (direct → corsproxy.io → allorigins.win). No base64 transfer from
    * the browser — just send the URLs.
    *
-   * Retry logic (MAX_ATTEMPTS = 3):
-   *   - "unsure" or HTTP/network error → auto-retry with 4s/8s backoff
+   * Retry logic (MAX_ATTEMPTS = 5):
+   *   - "unsure" or HTTP/network error → auto-retry with 6s/12s/18s/24s backoff.
+   *     The window is sized to ride out a full server restart: when the free
+   *     512 MB instance is killed and cold-boots (~a minute at 0.1 CPU), every
+   *     request 502s instantly — a short retry budget burns all attempts inside
+   *     that window and gives up on products the next minute would have checked.
    *   - "mismatch" on attempt 1 → retry once to confirm (avoids false diffs
    *     from proxy compression artefacts)
    *   - "match" → done immediately; also triggers onReverifyProduct to persist
@@ -186,7 +190,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
     productName: string,
     attempt = 1,
   ) {
-    const MAX_ATTEMPTS = 3;
+    const MAX_ATTEMPTS = 5;
     const stateKey = `${productId}:${fieldKey}`;
 
     // Cancel any pending retry for this key before starting a fresh attempt.
@@ -222,7 +226,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
       if (!res.ok) {
         if (attempt < MAX_ATTEMPTS) {
-          scheduleRetry(attempt * 4_000, `Server error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
+          scheduleRetry(attempt * 6_000, `Server error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
           return;
         }
         setFinal("unsure", `Image check failed after ${MAX_ATTEMPTS} attempts — please verify manually.`);
@@ -240,7 +244,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
       // "unsure": proxy chain may have had a transient failure — retry.
       if (verdict === "unsure" && attempt < MAX_ATTEMPTS) {
-        scheduleRetry(attempt * 4_000, `Image check uncertain — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
+        scheduleRetry(attempt * 6_000, `Image check uncertain — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
         return;
       }
 
@@ -285,7 +289,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       const msg = err instanceof Error ? err.message : "unknown error";
       console.error(`[img-check] attempt ${attempt} failed:`, msg);
       if (attempt < MAX_ATTEMPTS) {
-        scheduleRetry(attempt * 4_000, `Connection error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
+        scheduleRetry(attempt * 6_000, `Connection error — retrying… (attempt ${attempt}/${MAX_ATTEMPTS})`);
         return;
       }
       setFinal("unsure", "Image check failed — please verify manually.");
@@ -367,11 +371,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       // Show the spinner in the product's image row
       setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt: 1 }));
 
-      // Attempt up to 3 times with backoff
+      // Attempt up to 5 times with backoff — long enough to ride out a full
+      // restart of the 512 MB instance (see runImageCheck's retry notes).
       let finalVerdict = "unsure", finalReason = "";
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
         try {
-          if (attempt > 1) await sleep(attempt * 4_000);
+          if (attempt > 1) await sleep(attempt * 6_000);
           setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt }));
 
           const res = await fetch("/api/compare-images", {
@@ -1002,7 +1007,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                             // Loading message includes attempt counter when retrying
                             const attemptNum = browserState?.attempt ?? 1;
                             const loadingMsg = attemptNum > 1
-                              ? `Retrying AI image check… (attempt ${attemptNum}/3)`
+                              ? `Retrying AI image check… (attempt ${attemptNum}/5)`
                               : "Running AI image check…";
 
                             if (!displayNote && !browserState?.loading) return null;
