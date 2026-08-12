@@ -18,13 +18,20 @@ import {
   refreshKeepaTokens,
 } from "@/lib/keepa/client";
 
-// Products per lookup batch. The limiter — not this number — governs API
-// concurrency, but each batch is a barrier: the next one cannot start until the
-// slowest product in this one finishes. With concurrency ~96 a small batch
-// drains almost as fast as it fills, so the run spends a large fraction of its
-// time in barrier stalls. 1000 keeps the pool saturated between barriers while
-// still committing progress often enough to survive the time ceiling.
-const BATCH_SIZE = 1000;
+// Products per lookup batch — also the page size for streaming rows out of the
+// database. Each batch is the unit of both progress and memory: rows are
+// fetched (with their multi-KB vendorData blobs), verified, persisted, then
+// released, so peak memory is bounded by this number instead of catalog size.
+// The 512 MB production instance is the sizing constraint here. The limiter
+// (~100 concurrent calls) still saturates within a 500-row batch; the extra
+// barrier stalls vs. the old 1000 cost seconds over a full run, where loading
+// the whole catalog up front cost hundreds of MB.
+const BATCH_SIZE = 500;
+
+// Flagged rows adjudicated (and re-persisted) per AI slice. Bounds the AI
+// pass's working set and the work lost if a long pass is interrupted: each
+// slice's verdicts are committed before the next slice starts.
+const AI_CHUNK = 100;
 
 // Stop starting new batches once we're this close to the `maxDuration` ceiling.
 // A run that is cut off mid-batch loses that batch's work and strands the
@@ -271,22 +278,6 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       marketplace: true,
       verifyMs: true,
       verifyCompletedAt: true,
-      products: {
-        select: {
-          id: true,
-          name: true,
-          vendorSku: true,
-          upc: true,
-          asin: true,
-          brand: true,
-          price: true,
-          description: true,
-          imageUrl: true,
-          verifyStatus: true,
-          verifyFields: true,
-          vendorData: true,
-        },
-      },
     },
   });
 
@@ -303,6 +294,19 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // vision check so it is skipped. Pass `?ai=0` to disable it explicitly.
   const useAi = _req.nextUrl.searchParams.get("ai") !== "0";
 
+  // Peak memory must stay bounded regardless of catalog size, so products are
+  // never loaded wholesale — this route works from counts here plus
+  // BATCH_SIZE-row pages streamed out of the database in the loop below.
+  const totalProducts = await prisma.product.count({ where: { projectId: id } });
+  const verifiedBefore = await prisma.product.count({
+    where: { projectId: id, verifyStatus: { not: null } },
+  });
+
+  // A fresh run (explicit re-verify, or nothing verified yet) resets the timer;
+  // a resume ("Continue") adds this pass onto the accumulated time.
+  const isFreshStart = force || verifiedBefore === 0;
+  const priorMs = isFreshStart ? 0 : (project.verifyMs ?? 0);
+
   // A forced re-verify starts this run's progress from ZERO: clear the previous
   // run's verdicts server-side (the client already clears them visually). Without
   // this, old `verifiedAt` timestamps make the live progress feed report the run
@@ -311,23 +315,22 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // carrying a stale status from the prior run. Discontinued flags are kept:
   // they can originate from the vendor sheet, not verification, and would not be
   // re-derived by this run.
-  if (force && project.products.length > 0) {
+  if (force && totalProducts > 0) {
     await prisma.product.updateMany({
       where: { projectId: id, NOT: { verifyStatus: "discontinued" } },
       data: { verifiedAt: null, verifyStatus: null, verifyFields: Prisma.DbNull },
     });
   }
-  const allProducts = force
-    ? project.products
-    : project.products.filter((p) => p.verifyStatus == null);
 
-  // A fresh run (explicit re-verify, or nothing verified yet) resets the timer;
-  // a resume ("Continue") adds this pass onto the accumulated time.
-  const isFreshStart = force || project.products.every((p) => p.verifyStatus == null);
-  const priorMs = isFreshStart ? 0 : (project.verifyMs ?? 0);
+  // What this pass has to cover: every row never verified (or just cleared by
+  // force). Rows already marked discontinued keep that flag and are not
+  // re-checked — the force-clear above deliberately preserves them, and a
+  // re-check would only re-derive the same verdict from the vendor sheet.
+  const pendingWhere = { projectId: id, verifyStatus: null } as const;
+  const pendingTotal = await prisma.product.count({ where: pendingWhere });
 
   // Nothing left to do — the project is already fully verified.
-  if (allProducts.length === 0) {
+  if (pendingTotal === 0) {
     await prisma.project.update({
       where: { id },
       data: {
@@ -341,13 +344,13 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       skipped: 0,
       remaining: 0,
       complete: true,
-      totalProducts: project.products.length,
+      totalProducts,
     });
   }
 
   // Preflight: Amazon verify needs enough Keepa tokens for the estimate before starting.
-  if (isAmazonMarketplace(project.marketplace) && allProducts.length > 0) {
-    const { estimated, required } = estimateAmazonVerifyTokens(allProducts.length);
+  if (isAmazonMarketplace(project.marketplace)) {
+    const { estimated, required } = estimateAmazonVerifyTokens(pendingTotal);
     const tokenInfo = await refreshKeepaTokens();
     const tokensLeft = tokenInfo?.tokensLeft ?? 0;
 
@@ -387,12 +390,14 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   let attempted = 0;
   let ranOutOfTime = false;
 
-  // Accumulate only the flagged results (and their matching products) so the AI
-  // post-pass can run once at the end. Holding every result — each carries a full
-  // raw `liveData` blob — for a 10k-product run exhausts the heap (OOM crash), and
-  // the AI pass is `onlyFlagged` anyway, so non-flagged rows are never needed here.
+  // Accumulate only the flagged results for the AI post-pass — and only the
+  // parts of them the passes actually read. A full VerifyResult drags its raw
+  // liveData blob along, and the matching product row its vendorData blob; at
+  // 10k-catalog scale holding those for every flagged row exhausts the heap
+  // (OOM crash). The passes need the fields (mutated in place, so shared by
+  // reference), the live image URLs, and the product name — nothing else.
   const flaggedResults: Awaited<ReturnType<typeof verifyProducts>> = [];
-  const flaggedProducts: typeof allProducts = [];
+  const flaggedNames: Array<{ id: string; name: string }> = [];
 
   // One download cache for the whole run: vendor images are compared against
   // several marketplace angles, and marketplace CDN URLs recur across products,
@@ -408,15 +413,43 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
 
   try {
     await withImageCache(async () => {
-      for (let i = 0; i < allProducts.length; i += BATCH_SIZE) {
+      // Stream unverified rows in id order. Persisting a row sets its
+      // verifyStatus, but "skipped" rows keep NULL (they were never resolved),
+      // so the cursor — not the NULL filter — is what guarantees forward
+      // progress within this pass. A later pass retries the skipped rows.
+      let cursor: string | null = null;
+      for (;;) {
         if (Date.now() - startedAt > lookupBudgetMs) {
           ranOutOfTime = true;
           break;
         }
-        const batch = allProducts.slice(i, i + BATCH_SIZE);
+        const where: Prisma.ProductWhereInput = cursor
+          ? { ...pendingWhere, id: { gt: cursor } }
+          : { ...pendingWhere };
+        const batch = await prisma.product.findMany({
+          where,
+          orderBy: { id: "asc" },
+          take: BATCH_SIZE,
+          select: {
+            id: true,
+            name: true,
+            vendorSku: true,
+            upc: true,
+            asin: true,
+            brand: true,
+            price: true,
+            description: true,
+            imageUrl: true,
+            verifyStatus: true,
+            verifyFields: true,
+            vendorData: true,
+          },
+        });
+        if (batch.length === 0) break;
+        cursor = batch[batch.length - 1].id;
         attempted += batch.length;
 
-        // Skip AI passes here — they run once after all batches below.
+        // Skip AI passes here — they run over the flagged rows below.
         const results = await verifyProducts(
           project.marketplace,
           batch as Parameters<typeof verifyProducts>[1],
@@ -432,41 +465,54 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
 
         totalProcessed += processed.length;
 
-        // Retain only what the end-of-run AI pass will actually look at. This
-        // keeps peak memory bounded by the number of problems found rather than
-        // by catalog size, so a large run no longer OOMs.
+        // Retain slim copies of what the AI pass will look at: same `fields`
+        // array by reference (the pass mutates it, the re-persist reads it),
+        // liveData pared down to the image URLs the comparison needs.
         if (useAi) {
-          const flaggedInBatch = results.filter(
-            (r) => r.status === "warning" || r.status === "mismatch" || needsImageCheck(r),
-          );
-          if (flaggedInBatch.length) {
-            const ids = new Set(flaggedInBatch.map((r) => r.productId));
-            flaggedResults.push(...flaggedInBatch);
-            flaggedProducts.push(...batch.filter((p) => ids.has(p.id)));
+          const nameById = new Map(batch.map((b) => [b.id, b.name]));
+          for (const r of results) {
+            if (r.status !== "warning" && r.status !== "mismatch" && !needsImageCheck(r)) continue;
+            const liveImages = Array.isArray(r.liveData?.images) ? (r.liveData.images as unknown[]) : [];
+            flaggedResults.push({
+              productId: r.productId,
+              status: r.status,
+              fields: r.fields,
+              liveData: { images: liveImages.slice(0, 6) },
+            });
+            flaggedNames.push({ id: r.productId, name: nameById.get(r.productId) ?? "" });
           }
+        }
+      }
+
+      // Optional AI post-pass over the flagged rows, in slices: each slice is
+      // adjudicated and persisted before the next starts, so an interrupted
+      // pass keeps every verdict already paid for and the working set stays a
+      // slice deep. Runs inside the image-cache scope so repeat downloads
+      // (one vendor image vs several marketplace angles) are deduped.
+      if (useAi && flaggedResults.length > 0) {
+        const productById = new Map(flaggedNames.map((p) => [p.id, p]));
+        for (let i = 0; i < flaggedResults.length; i += AI_CHUNK) {
+          const slice = flaggedResults.slice(i, i + AI_CHUNK);
+          const sliceProducts = slice
+            .map((r) => productById.get(r.productId))
+            .filter((p): p is { id: string; name: string } => !!p);
+          await applyAiVerificationPasses(
+            slice,
+            sliceProducts as unknown as Parameters<typeof applyAiVerificationPasses>[1],
+            project.marketplace,
+            { onlyFlagged: true },
+          );
+          // Re-persist only the rows the AI pass could have changed. liveData /
+          // asin / price / upc were already written in the batch loop above.
+          await persistResults(
+            slice.filter((r) => r.status !== "skipped"),
+            { statusAndFieldsOnly: true },
+          );
         }
       }
     });
 
-    // Optional AI post-pass, once over all gathered results (never per batch).
-    // Restricted to flagged results, so its cost scales with the number of
-    // problems found rather than with catalog size.
-    if (useAi && flaggedResults.length > 0) {
-      await applyAiVerificationPasses(
-        flaggedResults,
-        flaggedProducts as Parameters<typeof applyAiVerificationPasses>[1],
-        project.marketplace,
-        { onlyFlagged: true },
-      );
-      // Re-persist only the rows the AI pass could have changed. liveData / asin
-      // / price / upc were already written in the batch loop and don't change.
-      await persistResults(
-        flaggedResults.filter((r) => r.status !== "skipped"),
-        { statusAndFieldsOnly: true },
-      );
-    }
-
-    const remaining = allProducts.length - attempted;
+    const remaining = Math.max(0, pendingTotal - attempted);
     const complete = remaining === 0;
 
     // Active time of this pass, accumulated onto prior passes. Idle gaps between
@@ -490,7 +536,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       remaining,
       complete,
       partial: ranOutOfTime,
-      totalProducts: project.products.length,
+      totalProducts,
     });
   } catch (err) {
     // Work already committed to the DB is preserved; the project drops back to
