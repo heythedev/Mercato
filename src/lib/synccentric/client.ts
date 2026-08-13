@@ -28,8 +28,15 @@ export class SynccentricError extends Error {
   }
 }
 
+/** Token from the environment, tolerating surrounding quotes/whitespace —
+ *  dashboard env editors (Render) take pasted quotes literally, and a quoted
+ *  Bearer value fails auth in a way that's invisible until runtime. */
+function apiToken(): string {
+  return (process.env.SYNCCENTRIC_API_TOKEN ?? "").trim().replace(/^["']+|["']+$/g, "");
+}
+
 export function synccentricConfigured(): boolean {
-  return !!process.env.SYNCCENTRIC_API_TOKEN;
+  return !!apiToken();
 }
 
 export interface SynccentricQuota {
@@ -86,7 +93,7 @@ const FIELDS = [
 ] as const;
 
 async function call(params: URLSearchParams): Promise<unknown> {
-  const token = process.env.SYNCCENTRIC_API_TOKEN;
+  const token = apiToken();
   if (!token) throw new SynccentricError("SYNCCENTRIC_API_TOKEN not configured", 401);
 
   const res = await fetch(`${BASE}/products/search?${params.toString()}`, {
