@@ -102,10 +102,18 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
         // "Category > Product Type" paths are split into two columns for easier
         // review. The CSV import (PUT) re-joins them, so download -> edit ->
         // upload stays lossless — keep the header names in sync with it.
+        // Most rows store only the leaf ("Shop All Wall Sconces") in
+        // marketplaceCategory while categoryPath carries the full two-level
+        // path — split from the path in that case so Product Type isn't blank.
         const cat = p.marketplaceCategory ?? "";
-        const sep = cat.indexOf(" > ");
-        const topCategory = sep === -1 ? cat : cat.slice(0, sep);
-        const productType = sep === -1 ? "" : cat.slice(sep + 3);
+        const path = p.categoryPath ?? "";
+        const full =
+          cat && cat !== "Uncategorized" && !cat.includes(" > ") && path.includes(" > ")
+            ? path
+            : cat;
+        const sep = full.indexOf(" > ");
+        const topCategory = sep === -1 ? full : full.slice(0, sep);
+        const productType = sep === -1 ? "" : full.slice(sep + 3);
         return [
           p.vendorSku ?? p.id,
           p.name,
