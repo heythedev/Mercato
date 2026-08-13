@@ -386,7 +386,21 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       : [];
     if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
 
-    const raw = [...cached.values(), ...fetched];
+    let raw = [...cached.values(), ...fetched];
+    // ASINs still missing while Keepa is token-starved were never asked, not
+    // absent — backfill from Synccentric so they don't roll up as not_found.
+    // When Keepa is healthy, a missing ASIN is Keepa's real verdict and the
+    // (possibly stale) Synccentric database must not override it.
+    const gotAsins = new Set(raw.map((r) => r.asin));
+    const asinsUnasked = missing.filter((a) => !gotAsins.has(a));
+    if (asinsUnasked.length && (getLastTokenInfo()?.tokensLeft ?? 0) < 100) {
+      const { synccentricConfigured, searchByAsin } = await import("@/lib/synccentric/client");
+      if (synccentricConfigured()) {
+        const fb = await searchByAsin(asinsUnasked);
+        console.log(`[synccentric] asin fallback: ${asinsUnasked.length} unasked → ${fb.length} found`);
+        raw = [...raw, ...fb];
+      }
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const live = normalizeMany(raw, 1) as any[];
     // Don't throw on empty — Keepa may simply not carry these ASINs. Mark as not_found and continue.
@@ -454,10 +468,27 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     stats.codeMisses += toFetch.length;
     stats.productHits += cachedProducts.size;
 
-    const { products: fetchedProducts, failedCodes } = toFetch.length
+    let { products: fetchedProducts, failedCodes } = toFetch.length
       ? await getProductsByCode(KEEPA_DOMAIN, toFetch, { stats: 1 })
       : { products: [], failedCodes: [] as string[] };
+    // Cache before any fallback: only genuine Keepa payloads may enter the
+    // Keepa cache — partial Synccentric rows would mask a richer later fetch.
     if (fetchedProducts.length) await cacheProducts(KEEPA_DOMAIN, fetchedProducts);
+
+    // Codes Keepa never completed (out of tokens / outage) get a second chance
+    // against the Synccentric database before being declared unresolved.
+    if (failedCodes.length) {
+      const { synccentricConfigured, searchByCode } = await import("@/lib/synccentric/client");
+      if (synccentricConfigured()) {
+        const fb = await searchByCode(failedCodes);
+        console.log(
+          `[synccentric] code fallback: ${failedCodes.length} unresolved → ` +
+            `${fb.products.length} found, ${fb.failedCodes.length} still unresolved`,
+        );
+        fetchedProducts = [...fetchedProducts, ...fb.products];
+        failedCodes = fb.failedCodes;
+      }
+    }
 
     // Codes whose batch never completed aren't "not found" — they're unasked.
     // Distinguishing them keeps a transient outage from being recorded as fact.
@@ -551,10 +582,23 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
           try {
             const { products: rescueRaw, failedCodes: rescueFailed } =
               await getProductsByCode(KEEPA_DOMAIN, rescueCodes, { stats: 1 });
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const rescueNorm = normalizeMany(rescueRaw, 1) as any[];
-            candidates = rescueNorm.filter(Boolean);
             if (rescueRaw.length) await cacheProducts(KEEPA_DOMAIN, rescueRaw);
+            // Rescue also gets the Synccentric fallback when Keepa never
+            // answered — same reasoning as the main code lookup above. The
+            // synthetic rows are merged after caching so they stay out of the
+            // Keepa cache, and rescueFailed keeps Keepa's value so a
+            // Synccentric answer is never cached as a Keepa code lookup.
+            let rescueAll = rescueRaw;
+            if (rescueFailed.length) {
+              const { synccentricConfigured, searchByCode } = await import("@/lib/synccentric/client");
+              if (synccentricConfigured()) {
+                const fb = await searchByCode(rescueFailed);
+                if (fb.products.length) rescueAll = [...rescueRaw, ...fb.products];
+              }
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const rescueNorm = normalizeMany(rescueAll, 1) as any[];
+            candidates = rescueNorm.filter(Boolean);
             // Only record when Keepa actually answered — a failed rescue says
             // nothing about whether the product exists.
             if (!rescueFailed.length) {

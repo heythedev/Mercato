@@ -349,12 +349,20 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   }
 
   // Preflight: Amazon verify needs enough Keepa tokens for the estimate before starting.
+  // With Synccentric configured the shortage is survivable — Keepa does what it
+  // can afford and the fallback source resolves the rest — so the run proceeds.
   if (isAmazonMarketplace(project.marketplace)) {
     const { estimated, required } = estimateAmazonVerifyTokens(pendingTotal);
     const tokenInfo = await refreshKeepaTokens();
     const tokensLeft = tokenInfo?.tokensLeft ?? 0;
+    const { synccentricConfigured } = await import("@/lib/synccentric/client");
 
-    if (tokensLeft < required) {
+    if (tokensLeft < required && synccentricConfigured()) {
+      console.log(
+        `[keepa-tokens] short ${required - tokensLeft} of ${required} needed — ` +
+          `proceeding with Synccentric fallback`,
+      );
+    } else if (tokensLeft < required) {
       const refillRate = tokenInfo?.refillRate ?? 0;
       const shortfall = required - tokensLeft;
       const waitMins = refillRate > 0 ? Math.ceil(shortfall / refillRate) : null;
