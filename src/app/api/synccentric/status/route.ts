@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
-import { synccentricConfigured, testSynccentric } from "@/lib/synccentric/client";
+import { synccentricConfigured, synccentricPrimary, testSynccentric } from "@/lib/synccentric/client";
 
 export const dynamic = "force-dynamic";
 
@@ -15,11 +15,12 @@ export async function GET() {
   if (!synccentricConfigured()) {
     return NextResponse.json({
       configured: false,
+      primary: false,
       ok: false,
       message: "SYNCCENTRIC_API_TOKEN not configured",
     });
   }
 
   const result = await testSynccentric();
-  return NextResponse.json({ configured: true, ...result });
+  return NextResponse.json({ configured: true, primary: synccentricPrimary(), ...result });
 }

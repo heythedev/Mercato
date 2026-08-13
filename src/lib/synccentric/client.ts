@@ -39,6 +39,18 @@ export function synccentricConfigured(): boolean {
   return !!apiToken();
 }
 
+/** When SYNCCENTRIC_PRIMARY is truthy (and a token is configured), Synccentric
+ *  is asked FIRST for Amazon product lookups and Keepa only covers what it
+ *  misses — conserving Keepa tokens at the cost of Synccentric's shallower,
+ *  snapshot-based data (no price/rank history, no dimensions). Off by default:
+ *  Keepa leads and Synccentric backfills token-starved gaps. */
+export function synccentricPrimary(): boolean {
+  return (
+    synccentricConfigured() &&
+    /^(1|true|yes|on)$/i.test((process.env.SYNCCENTRIC_PRIMARY ?? "").trim())
+  );
+}
+
 export interface SynccentricQuota {
   limit: number | null;
   used: number | null;

@@ -1,4 +1,5 @@
 import type { Product } from "@prisma/client";
+import type { KeepaProduct } from "@/lib/keepa/types";
 import { ASIN_RE, barcodeVariants, toDisplayBarcode, toGtin14 } from "@/lib/barcode";
 import {
   getCachedCodeLookups, getCachedProducts, cacheCodeLookup, cacheCodeLookups,
@@ -381,25 +382,44 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     stats.productHits += cached.size;
     stats.productMisses += missing.length;
 
-    const fetched = missing.length
-      ? await getProducts(KEEPA_DOMAIN, missing, { stats: 1, rating: true })
+    // Configurable source order (see the code-lookup section below): with
+    // SYNCCENTRIC_PRIMARY set, Synccentric answers first and Keepa fills its
+    // misses; synthetic rows are never written to the Keepa cache.
+    const syncAsin = await import("@/lib/synccentric/client");
+    let synthetic: KeepaProduct[] = [];
+    let toAsk = missing;
+    if (missing.length && syncAsin.synccentricPrimary()) {
+      synthetic = await syncAsin.searchByAsin(missing);
+      const got = new Set(synthetic.map((p) => p.asin));
+      toAsk = missing.filter((a) => !got.has(a));
+      console.log(
+        `[synccentric] asin primary: ${missing.length} requested → ` +
+          `${synthetic.length} found, ${toAsk.length} left for Keepa`,
+      );
+    }
+
+    const fetched = toAsk.length
+      ? await getProducts(KEEPA_DOMAIN, toAsk, { stats: 1, rating: true })
       : [];
     if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
 
-    let raw = [...cached.values(), ...fetched];
+    let raw = [...cached.values(), ...synthetic, ...fetched];
     // ASINs still missing while Keepa is token-starved were never asked, not
     // absent — backfill from Synccentric so they don't roll up as not_found.
     // When Keepa is healthy, a missing ASIN is Keepa's real verdict and the
-    // (possibly stale) Synccentric database must not override it.
+    // (possibly stale) Synccentric database must not override it. (In primary
+    // mode Synccentric already answered for every missing ASIN — no re-ask.)
     const gotAsins = new Set(raw.map((r) => r.asin));
     const asinsUnasked = missing.filter((a) => !gotAsins.has(a));
-    if (asinsUnasked.length && (getLastTokenInfo()?.tokensLeft ?? 0) < 100) {
-      const { synccentricConfigured, searchByAsin } = await import("@/lib/synccentric/client");
-      if (synccentricConfigured()) {
-        const fb = await searchByAsin(asinsUnasked);
-        console.log(`[synccentric] asin fallback: ${asinsUnasked.length} unasked → ${fb.length} found`);
-        raw = [...raw, ...fb];
-      }
+    if (
+      asinsUnasked.length &&
+      !syncAsin.synccentricPrimary() &&
+      syncAsin.synccentricConfigured() &&
+      (getLastTokenInfo()?.tokensLeft ?? 0) < 100
+    ) {
+      const fb = await syncAsin.searchByAsin(asinsUnasked);
+      console.log(`[synccentric] asin fallback: ${asinsUnasked.length} unasked → ${fb.length} found`);
+      raw = [...raw, ...fb];
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const live = normalizeMany(raw, 1) as any[];
@@ -468,26 +488,44 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     stats.codeMisses += toFetch.length;
     stats.productHits += cachedProducts.size;
 
-    let { products: fetchedProducts, failedCodes } = toFetch.length
-      ? await getProductsByCode(KEEPA_DOMAIN, toFetch, { stats: 1 })
-      : { products: [], failedCodes: [] as string[] };
-    // Cache before any fallback: only genuine Keepa payloads may enter the
-    // Keepa cache — partial Synccentric rows would mask a richer later fetch.
-    if (fetchedProducts.length) await cacheProducts(KEEPA_DOMAIN, fetchedProducts);
+    // Source order is configurable: with SYNCCENTRIC_PRIMARY set, Synccentric
+    // is asked first and Keepa only covers its misses (conserving Keepa
+    // tokens); otherwise Keepa leads and Synccentric backfills what Keepa
+    // never completed. Either way only genuine Keepa payloads may enter the
+    // Keepa caches — partial Synccentric rows would mask a richer later fetch.
+    const sync = await import("@/lib/synccentric/client");
+    let fetchedProducts: KeepaProduct[] = [];
+    let failedCodes: string[] = toFetch;
+    const syncResolved = new Set<string>();
+    if (toFetch.length && sync.synccentricPrimary()) {
+      const fb = await sync.searchByCode(toFetch);
+      fetchedProducts = fb.products;
+      failedCodes = fb.failedCodes;
+      const failedSet = new Set(fb.failedCodes);
+      for (const c of toFetch) if (!failedSet.has(c)) syncResolved.add(c);
+      console.log(
+        `[synccentric] code primary: ${toFetch.length} requested → ` +
+          `${fb.products.length} found, ${failedCodes.length} left for Keepa`,
+      );
+    }
+
+    if (failedCodes.length) {
+      const kp = await getProductsByCode(KEEPA_DOMAIN, failedCodes, { stats: 1 });
+      if (kp.products.length) await cacheProducts(KEEPA_DOMAIN, kp.products);
+      fetchedProducts = [...fetchedProducts, ...kp.products];
+      failedCodes = kp.failedCodes;
+    }
 
     // Codes Keepa never completed (out of tokens / outage) get a second chance
     // against the Synccentric database before being declared unresolved.
-    if (failedCodes.length) {
-      const { synccentricConfigured, searchByCode } = await import("@/lib/synccentric/client");
-      if (synccentricConfigured()) {
-        const fb = await searchByCode(failedCodes);
-        console.log(
-          `[synccentric] code fallback: ${failedCodes.length} unresolved → ` +
-            `${fb.products.length} found, ${fb.failedCodes.length} still unresolved`,
-        );
-        fetchedProducts = [...fetchedProducts, ...fb.products];
-        failedCodes = fb.failedCodes;
-      }
+    if (failedCodes.length && !sync.synccentricPrimary() && sync.synccentricConfigured()) {
+      const fb = await sync.searchByCode(failedCodes);
+      console.log(
+        `[synccentric] code fallback: ${failedCodes.length} unresolved → ` +
+          `${fb.products.length} found, ${fb.failedCodes.length} still unresolved`,
+      );
+      fetchedProducts = [...fetchedProducts, ...fb.products];
+      failedCodes = fb.failedCodes;
     }
 
     // Codes whose batch never completed aren't "not found" — they're unasked.
@@ -529,6 +567,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     const learned = new Map<string, string[]>();
     for (const code of toFetch) {
       if (unresolved.has(code)) continue; // never asked — not a fact
+      if (syncResolved.has(code)) continue; // Synccentric's answer — never cache as a Keepa fact
       const g = toGtin14(code);
       if (!g) continue;
       const hits = (codeToLiveList.get(code) ?? [])
@@ -580,28 +619,37 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
         const rescueCodes = barcodeVariants(resolvedUpc(p));
         if (rescueCodes.length) {
           try {
-            const { products: rescueRaw, failedCodes: rescueFailed } =
-              await getProductsByCode(KEEPA_DOMAIN, rescueCodes, { stats: 1 });
-            if (rescueRaw.length) await cacheProducts(KEEPA_DOMAIN, rescueRaw);
-            // Rescue also gets the Synccentric fallback when Keepa never
-            // answered — same reasoning as the main code lookup above. The
-            // synthetic rows are merged after caching so they stay out of the
-            // Keepa cache, and rescueFailed keeps Keepa's value so a
-            // Synccentric answer is never cached as a Keepa code lookup.
-            let rescueAll = rescueRaw;
-            if (rescueFailed.length) {
-              const { synccentricConfigured, searchByCode } = await import("@/lib/synccentric/client");
-              if (synccentricConfigured()) {
-                const fb = await searchByCode(rescueFailed);
-                if (fb.products.length) rescueAll = [...rescueRaw, ...fb.products];
-              }
+            // Same configurable source order as the batch lookup above: in
+            // primary mode Synccentric answers first and Keepa covers its
+            // misses. Keepa payloads are cached; Synccentric's never are.
+            let rescueAll: KeepaProduct[] = [];
+            let rescuePending = rescueCodes;
+            if (sync.synccentricPrimary()) {
+              const fb = await sync.searchByCode(rescueCodes);
+              rescueAll = fb.products;
+              rescuePending = fb.failedCodes;
+            }
+            let rescueFailed: string[] = [];
+            if (rescuePending.length) {
+              const kp = await getProductsByCode(KEEPA_DOMAIN, rescuePending, { stats: 1 });
+              if (kp.products.length) await cacheProducts(KEEPA_DOMAIN, kp.products);
+              rescueAll = [...rescueAll, ...kp.products];
+              rescueFailed = kp.failedCodes;
+            }
+            // Fallback mode: Synccentric rescues what Keepa never answered.
+            // rescueFailed keeps Keepa's value so a Synccentric answer is
+            // never recorded as a Keepa code lookup below.
+            if (rescueFailed.length && !sync.synccentricPrimary() && sync.synccentricConfigured()) {
+              const fb = await sync.searchByCode(rescueFailed);
+              if (fb.products.length) rescueAll = [...rescueAll, ...fb.products];
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const rescueNorm = normalizeMany(rescueAll, 1) as any[];
             candidates = rescueNorm.filter(Boolean);
-            // Only record when Keepa actually answered — a failed rescue says
-            // nothing about whether the product exists.
-            if (!rescueFailed.length) {
+            // Only record when Keepa itself answered every code — a failed
+            // rescue says nothing about whether the product exists, and a
+            // Synccentric-sourced mapping must not be cached as a Keepa fact.
+            if (!sync.synccentricPrimary() && !rescueFailed.length) {
               const g = toGtin14(resolvedUpc(p));
               if (g) {
                 await cacheCodeLookup(
