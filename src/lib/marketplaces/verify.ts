@@ -46,6 +46,32 @@ function isDiscontinuedInVendorData(vendorData: unknown): boolean {
  */
 const HARD_FIELDS = new Set(["title", "brand", "model", "upc"]);
 
+/** Total AI image-comparison attempts allowed per product. Transient failures
+ *  (download hiccups, vision API errors) keep the "not compared" marker so the
+ *  background sweep retries them; after this many failed attempts the field is
+ *  finalized as "needs manual review" so the sweep always terminates. */
+const MAX_IMAGE_AI_ATTEMPTS = 3;
+
+/**
+ * Recompute a product's overall status from its field severities.
+ *
+ * Images escalate a product to "warning" only once the AI check has actually
+ * CONCLUDED it can't confirm them. While the note still carries the
+ * "not compared" pending marker the product keeps its identity-based status —
+ * same rule as the pre-AI rollup — so a Match doesn't flicker to Warning
+ * between background-sweep retry rounds.
+ */
+function rollupStatus(result: VerifyResult): "ok" | "warning" | "mismatch" {
+  const fields = result.fields;
+  const hasHardMismatch = fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
+  const hasMismatch = fields.some((f) => f.severity === "mismatch");
+  const hasHardWarning = fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
+  const hasUnresolvedImage = fields.some(
+    (f) => f.field === "images" && f.severity === "warning" && !f.note?.includes("not compared"),
+  );
+  return hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : (hasHardWarning || hasUnresolvedImage) ? "warning" : "ok";
+}
+
 /** A Walmart search hit, as returned by the Affiliate API before selection. */
 type WalmartCandidate = import("@/lib/walmart/client").WalmartItem;
 
@@ -59,6 +85,7 @@ type FieldResult = {
   note?: string; // extra context shown in the UI (e.g. AI image-comparison reasoning)
   liveImage?: string; // images field only: the marketplace image URL (for thumbnail + modal preview)
   liveUrl?: string;   // images field only: the marketplace PRODUCT PAGE URL (for the "View Product" link)
+  aiAttempts?: number; // images field only: failed AI comparison attempts so far (retry budget for the background sweep)
 };
 
 export async function verifyProducts(
@@ -195,35 +222,31 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
     if (v.verdict === "match") {
       t.field.severity = "ok";
       t.field.match = true;
+      t.field.note = `AI visual check: images match — ${v.reason}`;
     } else if (v.verdict === "mismatch") {
       t.field.severity = "mismatch";
       t.field.match = false;
+      t.field.note = `AI visual check: images differ — ${v.reason}`;
+    } else if (v.retryable && (t.field.aiAttempts ?? 0) + 1 < MAX_IMAGE_AI_ATTEMPTS) {
+      // Transient failure (image download hiccup, vision API error): keep the
+      // "not compared" marker so the background sweep picks this product up
+      // again, and count the attempt so it can't retry forever.
+      t.field.aiAttempts = (t.field.aiAttempts ?? 0) + 1;
+      t.field.severity = "warning";
+      t.field.match = false;
+      t.field.note =
+        `Images not compared yet — ${v.reason} ` +
+        `Automatic retry queued (attempt ${t.field.aiAttempts} of ${MAX_IMAGE_AI_ATTEMPTS} failed).`;
     } else {
-      // "unsure" — if the catalog image URL couldn't be fetched the check never
-      // ran. Downgrade from "ok" (UPC-confirmed auto-pass) to "warning" so the
-      // reviewer knows there is a data gap, not a confirmed visual match.
-      const fetchFailed = /could not (download|fetch|load)|not (accessible|reachable)|download.*fail/i.test(v.reason ?? "");
-      if (fetchFailed && t.field.severity === "ok") {
-        t.field.severity = "warning";
-        t.field.match = false;
-      }
+      // The model looked and couldn't tell, or the retry budget is spent —
+      // finalize as manual review. Dropping the marker takes the product out
+      // of the sweep for good.
+      t.field.aiAttempts = (t.field.aiAttempts ?? 0) + 1;
+      t.field.severity = "warning";
+      t.field.match = false;
+      t.field.note = `Needs manual review — ${v.reason}`;
     }
-    t.field.note = v.verdict === "match"
-      ? `AI visual check: images match — ${v.reason}`
-      : v.verdict === "mismatch"
-        ? `AI visual check: images differ — ${v.reason}`
-        : `Needs manual review — ${v.reason}`;
-
-    // Recompute overall status after AI image verdict.
-    // Pre-AI, image warnings are "pending check" and are soft (don't escalate).
-    // Post-AI, if the image is still "warning" the AI ran but couldn't confirm
-    // (e.g. catalog image URL inaccessible) — that requires manual review, so
-    // it escalates to "warning" just like a hard-field warning.
-    const hasHardMismatch = t.result.fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
-    const hasMismatch = t.result.fields.some((f) => f.severity === "mismatch");
-    const hasHardWarning = t.result.fields.some((f) => f.severity === "warning" && HARD_FIELDS.has(f.field));
-    const hasUnverifiedImage = t.result.fields.some((f) => f.field === "images" && f.severity === "warning");
-    t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : (hasHardWarning || hasUnverifiedImage) ? "warning" : "ok";
+    t.result.status = rollupStatus(t.result);
   });
 }
 
@@ -245,6 +268,9 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
     if (r.status === "not_found" || r.status === "discontinued") continue;
     const field = r.fields.find((f) => f.field === "title");
     if (!field || field.severity === "ok") continue; // re-evaluate both "warning" and "mismatch"
+    // Already adjudicated on an earlier pass — the background sweep re-runs
+    // these passes per chunk and a settled verdict must not be re-billed.
+    if (field.note?.startsWith("AI title check")) continue;
     const vendorTitle = nameById.get(r.productId) ?? field.stored;
     const liveTitle = field.live;
     if (!vendorTitle || !liveTitle) continue;
@@ -286,13 +312,9 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
           t.field.match = false;
           t.field.note = `AI title check: different product — ${reason}`;
         }
-        // Recompute overall status after AI title verdict.
-        // Same rule as the image rollup: post-AI image warnings escalate.
-        const hasHardMismatch = t.result.fields.some(f => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
-        const hasMismatch = t.result.fields.some(f => f.severity === "mismatch");
-        const hasHardWarning = t.result.fields.some(f => f.severity === "warning" && HARD_FIELDS.has(f.field));
-        const hasUnverifiedImage = t.result.fields.some(f => f.field === "images" && f.severity === "warning");
-        t.result.status = hasHardMismatch ? "mismatch" : hasMismatch ? "warning" : (hasHardWarning || hasUnverifiedImage) ? "warning" : "ok";
+        // Recompute overall status after AI title verdict (shared rollup —
+        // pending image checks stay soft, concluded ones escalate).
+        t.result.status = rollupStatus(t.result);
       } catch { /* leave existing severity in place */ }
     }));
   }

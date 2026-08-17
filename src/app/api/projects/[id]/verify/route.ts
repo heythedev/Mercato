@@ -33,6 +33,15 @@ const BATCH_SIZE = 500;
 // slice's verdicts are committed before the next slice starts.
 const AI_CHUNK = 100;
 
+// Only run the AI post-pass INSIDE this request when the flagged set is small.
+// Each flagged product costs a multi-second vision call; at catalog scale that
+// adds up to tens of minutes inside a single HTTP request — Render's proxy
+// gives up long before that and kills the connection, so the browser reports a
+// failed verify even though every lookup was already persisted. Larger sets
+// keep their "not compared" markers and are worked through by the background
+// image sweep (POST /verify/images) in short, resumable chunks instead.
+const AI_INLINE_MAX = 50;
+
 // Stop starting new batches once we're this close to the `maxDuration` ceiling.
 // A run that is cut off mid-batch loses that batch's work and strands the
 // project; stopping cleanly lets the caller resume from where we left off.
@@ -497,9 +506,19 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       // pass keeps every verdict already paid for and the working set stays a
       // slice deep. Runs inside the image-cache scope so repeat downloads
       // (one vendor image vs several marketplace angles) are deduped.
-      if (useAi && flaggedResults.length > 0) {
+      // Sets larger than AI_INLINE_MAX are deferred to the background sweep.
+      if (useAi && flaggedResults.length > AI_INLINE_MAX) {
+        console.log(
+          `[verify] ${flaggedResults.length} products flagged for AI checks — ` +
+            `deferring to the background image sweep (inline cap ${AI_INLINE_MAX})`,
+        );
+      }
+      if (useAi && flaggedResults.length > 0 && flaggedResults.length <= AI_INLINE_MAX) {
         const productById = new Map(flaggedNames.map((p) => [p.id, p]));
         for (let i = 0; i < flaggedResults.length; i += AI_CHUNK) {
+          // Belt-and-braces: never let the AI phase push the request past the
+          // budget the lookup loop already respects — return cleanly instead.
+          if (Date.now() - startedAt > TIME_BUDGET_MS) break;
           const slice = flaggedResults.slice(i, i + AI_CHUNK);
           const sliceProducts = slice
             .map((r) => productById.get(r.productId))

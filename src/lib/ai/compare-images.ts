@@ -7,6 +7,10 @@ export type ImageCompareVerdict = "match" | "mismatch" | "unsure";
 export type ImageCompareResult = {
   verdict: ImageCompareVerdict;
   reason: string;
+  /** True when the failure was transient (download hiccup, vision API error)
+   *  and a later retry could succeed. Absent when the model actually looked at
+   *  both images and said UNSURE — that verdict is final. */
+  retryable?: boolean;
 };
 
 // ── Image download ────────────────────────────────────────────────────────────
@@ -175,25 +179,22 @@ export function withImageCache<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // ── Image content builder ──────────────────────────────────────────────────────
-// When a binary download succeeded, pass the raw bytes (most reliable).
-// When the server download was blocked (CDN IP-block, 403, timeout) fall back
-// to a URL object — the AI SDK translates this to an `image_url` in the API
-// call, so Moonshot's own servers fetch the image rather than ours, bypassing
-// CDN restrictions on Render's IP range.
-type ImageContent =
-  | { type: "image"; image: Uint8Array; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" }
-  | { type: "image"; image: URL };
+// Always passes raw bytes. There is deliberately NO remote-URL fallback:
+// Moonshot's vision API rejects image_url content with HTTP 400, so sending a
+// URL when the download failed guarantees the whole comparison throws. Callers
+// bail out with a retryable "unsure" before reaching this point instead.
+type ImageContent = {
+  type: "image";
+  image: Uint8Array;
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+};
 
-function imageContent(downloaded: FetchedImage | null, url: string): ImageContent {
-  if (downloaded) {
-    return {
-      type: "image",
-      image: downloaded.data,
-      mediaType: downloaded.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-    };
-  }
-  // URL fallback — model fetches directly (no server-side download needed).
-  return { type: "image", image: new URL(url) };
+function imageContent(downloaded: FetchedImage): ImageContent {
+  return {
+    type: "image",
+    image: downloaded.data,
+    mediaType: downloaded.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+  };
 }
 
 /**
@@ -256,6 +257,12 @@ export async function compareProductImages(
     fetchImageCached(vendorImageUrl),
     fetchImageCached(liveImageUrl),
   ]);
+  if (!vendorImg) {
+    return { verdict: "unsure", reason: "Could not download the catalog image.", retryable: true };
+  }
+  if (!liveImg) {
+    return { verdict: "unsure", reason: "Could not download the marketplace image.", retryable: true };
+  }
 
   try {
     const { text } = await generateText({
@@ -272,8 +279,8 @@ export async function compareProductImages(
                 `Image 2 is the primary photo from the marketplace listing for this product.\n\n` +
                 VISION_PROMPT,
             },
-            imageContent(vendorImg, vendorImageUrl),
-            imageContent(liveImg, liveImageUrl),
+            imageContent(vendorImg),
+            imageContent(liveImg),
           ],
         },
       ],
@@ -281,7 +288,7 @@ export async function compareProductImages(
     });
     return parseVisionResponse(text);
   } catch {
-    return { verdict: "unsure", reason: "Image comparison failed" };
+    return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
   }
 }
 
@@ -317,9 +324,15 @@ export async function compareVendorAgainstAllImages(
     fetchImageCached(vendorImageUrl),
     fetchImageCached(urls[0]),
   ]);
+  if (!vendorImg) {
+    return { verdict: "unsure", reason: "Could not download the catalog image.", retryable: true };
+  }
+  if (!liveImg) {
+    return { verdict: "unsure", reason: "Could not download the marketplace image.", retryable: true };
+  }
 
-  const vendorContent = imageContent(vendorImg, vendorImageUrl);
-  const liveContent   = imageContent(liveImg,   urls[0]);
+  const vendorContent = imageContent(vendorImg);
+  const liveContent   = imageContent(liveImg);
 
   try {
     const { text } = await generateText({
@@ -345,7 +358,7 @@ export async function compareVendorAgainstAllImages(
     });
     return parseVisionResponse(text);
   } catch {
-    return { verdict: "unsure", reason: "Image comparison failed" };
+    return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
   }
 }
 

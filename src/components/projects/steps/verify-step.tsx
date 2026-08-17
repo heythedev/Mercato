@@ -54,7 +54,7 @@ const FIELD_SEVERITY = {
   mismatch: "text-red-600",
 };
 
-export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, verifyTotal, verifyDone, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onNext }: {
+export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, verifyTotal, verifyDone, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onProductsUpdated, onNext }: {
   projectId: string;
   projectName: string;
   marketplace: string;
@@ -76,6 +76,9 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   onApproveProduct: (productId: string) => Promise<void>;
   onMarkDiscontinued: (productId: string) => Promise<void>;
   onReverifyProduct: (productId: string) => Promise<void>;
+  /** Merge server-persisted rows (from the background image sweep) into the
+   *  page's products state, so statuses and counts update without a refetch. */
+  onProductsUpdated: (updates: Array<{ id: string; verifyStatus: string; verifyFields: unknown }>) => void;
   onNext: () => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -107,10 +110,10 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const [bgCheckStatus, setBgCheckStatus] = useState<{
     total: number; done: number; current: string | null;
   } | null>(null);
-  // Products already queued so the effect doesn't re-queue on re-renders.
-  const bgCheckStartedRef = useRef<Set<string>>(new Set());
-  // Prevents two concurrent batch runners if the effect fires twice.
-  const bgCheckRunningRef = useRef(false);
+  // Prevents two concurrent sweep drivers if the effect fires twice.
+  const sweepRunningRef = useRef(false);
+  // Raised when a verify run starts so an in-flight sweep stops cleanly.
+  const sweepStopRef = useRef(false);
   // Always-fresh product list for async callbacks that outlive a render cycle.
   const productsRef = useRef(products);
 
@@ -337,144 +340,115 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
   /**
-   * Background batch AI image checker.
+   * Background image sweep driver.
    *
-   * Processes warning products SEQUENTIALLY (one at a time) with ~1 s gap
-   * between requests.  Uses the same /api/compare-images endpoint and the same
-   * retry logic as the interactive runImageCheck, but does not depend on the
-   * user expanding the product row.
+   * The heavy lifting lives on the server now: POST /verify/images adjudicates
+   * one small chunk of pending products per request and PERSISTS every verdict
+   * before responding, so a closed tab or a dropped connection never loses
+   * progress — reopening the page resumes wherever the sweep stopped. This
+   * loop just keeps asking for the next chunk, merges the returned rows into
+   * the page state, and feeds the progress banner.
    *
-   * After a definitive "match" result the function also checks non-image field
-   * severities.  If no hard mismatches remain, it calls onReverifyProduct so
-   * the database status is updated and the product moves from Warning → Match
-   * entirely automatically.
+   * Sweeps EVERY verified status, not just Warning: pending images are a soft
+   * field, so a product with an unchecked image can sit at Match.
    */
-  async function runBatchImageChecks(items: Array<{
-    productId: string; productName: string; vendorUrl: string; liveImgUrl: string;
-  }>) {
-    if (bgCheckRunningRef.current) return;
-    bgCheckRunningRef.current = true;
+  async function runImageSweep() {
+    if (sweepRunningRef.current) return;
+    sweepRunningRef.current = true;
+    sweepStopRef.current = false;
 
-    setBgCheckStatus({ total: items.length, done: 0, current: null });
+    let sawCleanFinish = false;
+    try {
+      // One round = one cursor walk over the whole project. Later rounds retry
+      // products whose attempt failed transiently; the server counts attempts
+      // per product and finalizes after 3, so this always terminates.
+      for (let round = 1; round <= 3; round++) {
+        let cursor = "";
+        let failures = 0;
+        let processedThisRound = 0;
+        let announcedTotal: number | null = null;
+        let pending = 0;
 
-    for (let i = 0; i < items.length; i++) {
-      const { productId, productName, vendorUrl, liveImgUrl } = items[i];
-      const stateKey = `${productId}:images`;
+        for (;;) {
+          if (sweepStopRef.current) return;
+          let data: {
+            processed: number;
+            results?: Array<{ id: string; verifyStatus: string; verifyFields: unknown }>;
+            nextCursor: string | null;
+            pendingTotal: number;
+            lastName: string | null;
+          } | null = null;
+          try {
+            const res = await fetch(`/api/projects/${projectId}/verify/images`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ cursor }),
+            });
+            if (res.ok) data = await res.json();
+          } catch { /* network error — backoff below */ }
 
-      // Show this product as "currently checking"
-      setBgCheckStatus({ total: items.length, done: i, current: productName });
-
-      // Cancel any in-flight retry timer from an earlier interactive check.
-      const existing = retryTimersRef.current.get(stateKey);
-      if (existing) { clearTimeout(existing); retryTimersRef.current.delete(stateKey); }
-
-      // Show the spinner in the product's image row
-      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt: 1 }));
-
-      // Attempt up to 5 times with backoff — long enough to ride out a full
-      // restart of the 512 MB instance (see runImageCheck's retry notes).
-      let finalVerdict = "unsure", finalReason = "";
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-          if (attempt > 1) await sleep(attempt * 6_000);
-          setImgCheckState(prev => new Map(prev).set(stateKey, { loading: true, attempt }));
-
-          const res = await fetch("/api/compare-images", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ vendorUrl, liveUrls: [liveImgUrl], productName }),
-          });
-          if (!res.ok) continue; // transient server error — retry
-
-          const data = await res.json() as { verdict: string; reason: string; retryable?: boolean };
-          finalVerdict = data.verdict;
-          finalReason  = data.reason ?? "";
-
-          if (data.retryable === false) break; // broken link — retrying can't help
-          if (finalVerdict === "unsure") continue; // unclear — retry
-          if (finalVerdict === "mismatch" && attempt === 1) continue; // confirm once
-          break; // definitive result
-        } catch {
-          // network / parse error — retry
-        }
-      }
-
-      const note =
-        finalVerdict === "match"    ? `AI visual check: images match — ${finalReason}` :
-        finalVerdict === "mismatch" ? `AI visual check: images differ — ${finalReason}` :
-                                      `Needs manual review — ${finalReason || "Image check inconclusive"}`;
-
-      setImgCheckState(prev => new Map(prev).set(stateKey, { loading: false, verdict: finalVerdict, note }));
-
-      // Auto-move to Match when images are confirmed and no other hard issues remain.
-      if (finalVerdict === "match") {
-        const product = productsRef.current.find(p => p.id === productId);
-        if (product) {
-          const fields = (product.verifyFields ?? []) as Array<{ field: string; severity?: string }>;
-          const nonImg = fields.filter(f => f.field !== "images");
-          const hasHardMismatch = nonImg.some(f => f.severity === "mismatch" && HARD_FIELDS_SET.has(f.field));
-          const hasMismatch     = nonImg.some(f => f.severity === "mismatch");
-          // Soft warnings (brand sub-brand note, model N/A, colour not stated) do NOT
-          // block auto-move. Only actual mismatches prevent approval.
-          // Use onApproveProduct (direct PATCH) not onReverifyProduct — re-verify would
-          // re-run the server-side image comparison which fails for AVIF/CDN-blocked
-          // images and resets the status back to "warning" undoing the AI confirmation.
-          if (!hasHardMismatch && !hasMismatch) {
-            setReverifying(productId);
-            onApproveProduct(productId).finally(() => setReverifying(null));
+          if (!data) {
+            // Server busy, restarting, or asleep (free tier). Back off, and
+            // give up after 5 straight misses — all progress so far is safely
+            // persisted, and the next page load picks the sweep back up.
+            if (++failures >= 5) return;
+            await sleep(failures * 5_000);
+            continue;
           }
+          failures = 0;
+          processedThisRound += data.processed;
+          pending = data.pendingTotal;
+          if (announcedTotal === null) announcedTotal = data.pendingTotal + data.processed;
+          if (data.results?.length) onProductsUpdated(data.results);
+          setBgCheckStatus({
+            total: announcedTotal,
+            done: Math.max(0, Math.min(announcedTotal, announcedTotal - data.pendingTotal)),
+            current: data.lastName,
+          });
+          if (!data.nextCursor) break;
+          cursor = data.nextCursor;
         }
+
+        if (pending <= 0) { sawCleanFinish = true; break; }
+        if (processedThisRound === 0) break; // whatever remains isn't ours to fix
+        await sleep(15_000); // give transient failures a moment to clear before retrying
       }
 
-      // Mark so expand-auto-check doesn't double-trigger for this product.
-      autoCheckedRef.current.add(productId);
-
-      setBgCheckStatus({ total: items.length, done: i + 1, current: null });
-
-      // Throttle: 2 s gap between products to avoid rate-limiting and 502s under load.
-      if (i < items.length - 1) await sleep(2_000);
+      if (sawCleanFinish) {
+        // Leave the "all done" banner visible for 3 s before clearing.
+        setBgCheckStatus(s => (s ? { ...s, done: s.total, current: null } : s));
+        await sleep(3_000);
+      }
+    } finally {
+      setBgCheckStatus(null);
+      sweepRunningRef.current = false;
     }
-
-    // Leave the "all done" count visible for 3 s then clear the banner.
-    await sleep(3_000);
-    setBgCheckStatus(null);
-    bgCheckRunningRef.current = false;
   }
 
-  // Trigger the batch runner once products are loaded and any warning products
-  // that haven't been queued yet are detected.
+  // Kick off the sweep whenever verified products still carry the server's
+  // "not compared" images marker — including after a page reload, so a sweep
+  // interrupted yesterday resumes the moment someone opens the project.
   useEffect(() => {
-    if (loading) return; // wait until verification finishes
-    if (bgCheckRunningRef.current) return; // already running
+    if (loading) {
+      // A verify run owns the products now; stop the sweep at its next chunk
+      // boundary. It restarts automatically when the run finishes.
+      sweepStopRef.current = true;
+      return;
+    }
+    if (sweepRunningRef.current) return;
 
-    type FR = { field: string; stored?: string; live?: string; liveImage?: string; severity?: string; note?: string };
+    type FR = { field: string; stored?: string; liveImage?: string; note?: string };
+    const hasPending = products.some(p => {
+      if (p.verifyStatus !== "ok" && p.verifyStatus !== "warning" && p.verifyStatus !== "mismatch") return false;
+      const fields = (p.verifyFields ?? []) as FR[];
+      const img = fields.find(f => f.field === "images");
+      return !!img?.note?.includes("not compared") &&
+        !!img.stored?.startsWith("http") &&
+        !!img.liveImage?.startsWith("http");
+    });
+    if (!hasPending) return;
 
-    const toCheck = products
-      .filter(p => p.verifyStatus === "warning")
-      .filter(p => !bgCheckStartedRef.current.has(p.id))
-      .flatMap(p => {
-        const fields = (p.verifyFields ?? []) as FR[];
-        const imgField = fields.find(f => f.field === "images");
-        if (!imgField) return [];
-        // Only batch-check when images are actually the flagged field (mismatch/warning
-        // severity, or a failed server-side comparison). Skip products in warning only
-        // due to other soft fields (model, dimensions) where re-checking images won't help.
-        const imgIsProblem =
-          imgField.severity === "mismatch" ||
-          imgField.severity === "warning" ||
-          /image comparison failed|could not download|could not load catalog/i.test(imgField.note ?? "");
-        if (!imgIsProblem) return [];
-        const vendorUrl  = imgField.stored?.startsWith("http") ? imgField.stored : "";
-        const liveImgUrl = imgField.liveImage || (imgField.live?.startsWith("http") ? imgField.live : "");
-        if (!vendorUrl || !liveImgUrl) return [];
-        return [{ productId: p.id, productName: p.name, vendorUrl, liveImgUrl }];
-      });
-
-    if (!toCheck.length) return;
-
-    // Mark before starting so a re-render during the async run doesn't re-queue.
-    toCheck.forEach(({ productId }) => bgCheckStartedRef.current.add(productId));
-    runBatchImageChecks(toCheck);
+    runImageSweep();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [products, loading]);
 

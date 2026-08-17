@@ -507,6 +507,20 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     toast.success("Product re-verified");
   }
 
+  /** Merge rows the background image sweep already persisted server-side into
+   *  local state. The status counts below derive from `products`, so the badge
+   *  numbers move as verdicts land — no refetch needed. */
+  function handleProductsUpdated(updates: Array<{ id: string; verifyStatus: string; verifyFields: unknown }>) {
+    if (!updates.length) return;
+    const byId = new Map(updates.map((u) => [u.id, u]));
+    setProducts((prev) => prev.map((p) => {
+      const u = byId.get(p.id);
+      return u
+        ? { ...p, verifyStatus: u.verifyStatus, verifyFields: u.verifyFields as Record<string, unknown>[] | null }
+        : p;
+    }));
+  }
+
   async function handleDelete() {
     const ok = await confirm({
       title: `Delete "${project.name}"?`,
@@ -691,6 +705,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             onApproveProduct={handleApproveProduct}
             onMarkDiscontinued={handleMarkDiscontinued}
             onReverifyProduct={handleReverifyProduct}
+            onProductsUpdated={handleProductsUpdated}
             marketplace={project.marketplace}
             elapsedMs={project.verifyMs ?? null}
             completedAt={project.verifyCompletedAt ?? null}
