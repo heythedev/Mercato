@@ -61,14 +61,21 @@ function normalizeUpc(upc: string): string {
   return digits;
 }
 
-export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | null> {
+/**
+ * Returns the item on a hit, null when Walmart ANSWERED and had nothing, and
+ * undefined when the lookup itself failed (missing credentials, HTTP error,
+ * network). Callers must not cache undefined as an absence — a failure means
+ * we never asked, and remembering it as "not on Walmart" poisons the cache
+ * for days after the outage ends.
+ */
+export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | null | undefined> {
   const normalized = normalizeUpc(upc);
   try {
     const headers = generateAuthHeaders();
     const res = await fetchWithRetry(`${BASE}/items?upc=${encodeURIComponent(normalized)}`, { headers });
     if (!res.ok) {
       console.error(`[walmart] UPC search ${res.status}:`, await res.text().catch(() => ""));
-      return null;
+      return undefined;
     }
     const data = await res.json() as Record<string, unknown>;
     const items = (data.items as WalmartItem[] | undefined) ?? [];
@@ -84,7 +91,7 @@ export async function searchWalmartByUpc(upc: string): Promise<WalmartItem | nul
   } catch (e) {
     if (e instanceof RateLimitError) throw e; // let the limiter see the pushback
     console.error("[walmart] UPC search error:", e);
-    return null;
+    return undefined;
   }
 }
 
@@ -142,8 +149,12 @@ export async function searchWalmartByName(
  * Handing the caller every candidate lets it pick by evidence (barcode, model
  * code, title) instead of by position, and reject the whole result set when
  * nothing is actually the product being looked for.
+ *
+ * Returns [] when Walmart answered with no candidates, undefined when the
+ * search itself failed — the same do-not-cache-failures contract as
+ * searchWalmartByUpc.
  */
-export async function searchWalmartCandidates(query: string): Promise<WalmartItem[]> {
+export async function searchWalmartCandidates(query: string): Promise<WalmartItem[] | undefined> {
   try {
     const headers = generateAuthHeaders();
     const res = await fetchWithRetry(
@@ -152,7 +163,7 @@ export async function searchWalmartCandidates(query: string): Promise<WalmartIte
     );
     if (!res.ok) {
       console.error(`[walmart] Name search ${res.status}:`, await res.text().catch(() => ""));
-      return [];
+      return undefined;
     }
     const data = await res.json() as Record<string, unknown>;
     const search = data.search as Record<string, unknown> | undefined;
@@ -164,7 +175,7 @@ export async function searchWalmartCandidates(query: string): Promise<WalmartIte
   } catch (e) {
     if (e instanceof RateLimitError) throw e;
     console.error("[walmart] Name search error:", e);
-    return [];
+    return undefined;
   }
 }
 

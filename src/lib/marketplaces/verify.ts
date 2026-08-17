@@ -1155,9 +1155,14 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         apiCalls.count++;
         const items = await limiter
           .run(() => searchWalmartCandidates(query))
-          .catch(() => [] as WalmartCandidate[]);
-        pendingCacheWrites.push({ key, item: items.length ? items : null, source: "name" });
-        return items;
+          .catch(() => undefined);
+        // Cache only definitive answers. A failed search never asked Walmart,
+        // and recording it as "nothing there" poisons the cache for days after
+        // the outage ends — missing affiliate credentials did exactly that.
+        if (items !== undefined) {
+          pendingCacheWrites.push({ key, item: items.length ? items : null, source: "name" });
+        }
+        return items ?? [];
       })();
       nameSearchInFlight.set(key, inflight);
     }
@@ -1200,8 +1205,11 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         } else {
           stats.misses++;
           apiCalls.count++;
-          seller = await getSellerItemByGtin(p.upc).catch(() => null);
-          pendingCacheWrites.push({ key: k.seller, item: seller, source: "seller" });
+          seller = await getSellerItemByGtin(p.upc).catch(() => undefined);
+          // undefined = the request failed; only a definitive answer is cached.
+          if (seller !== undefined) {
+            pendingCacheWrites.push({ key: k.seller, item: seller, source: "seller" });
+          }
           sellerBreaker.record(!!seller);
         }
         if (seller) {
@@ -1256,12 +1264,14 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
         } else {
           stats.misses++;
           apiCalls.count++;
-          item = await limiter.run(() => searchWalmartByUpc(p.upc!)).catch(() => null);
-          if (k.upc) pendingCacheWrites.push({ key: k.upc, item, source: "upc" });
+          item = await limiter.run(() => searchWalmartByUpc(p.upc!)).catch(() => undefined);
+          // undefined = the request failed; only a definitive answer is cached.
+          if (item !== undefined && k.upc) pendingCacheWrites.push({ key: k.upc, item, source: "upc" });
         }
         if (!item) {
           // UPC lookup found nothing — fall back to name search, but only accept
           // a candidate the evidence actually supports (see pickWalmartCandidate).
+          upcLookupFailed = true;
           item = await findByName(p) as typeof item;
         }
       } else {

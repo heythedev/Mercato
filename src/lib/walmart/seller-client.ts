@@ -124,7 +124,8 @@ function normalizeItem(raw: Record<string, unknown>): SellerItem {
   };
 }
 
-async function sellerFetch(path: string): Promise<Record<string, unknown> | null> {
+/** null = Walmart answered "no such item"; undefined = the request failed. */
+async function sellerFetch(path: string): Promise<Record<string, unknown> | null | undefined> {
   const token = await getToken();
   const res = await fetchWithRetry(`${BASE}${path}`, {
     headers: {
@@ -143,7 +144,7 @@ async function sellerFetch(path: string): Promise<Record<string, unknown> | null
       throw new Error(`Walmart Seller API auth failed ${res.status}: ${body.slice(0, 300)}`);
     }
     console.error(`[walmart-seller] ${path} → ${res.status}:`, await res.text().catch(() => ""));
-    return null;
+    return undefined;
   }
   return (await res.json()) as Record<string, unknown>;
 }
@@ -151,17 +152,20 @@ async function sellerFetch(path: string): Promise<Record<string, unknown> | null
 /**
  * Look up one of OUR published items by GTIN/UPC. Returns the seller item when
  * found in our catalog (regardless of publish status — the caller inspects
- * `publishedStatus`), or null when the code is not in our catalog.
+ * `publishedStatus`), null when the code is confirmed not in our catalog, or
+ * undefined when the lookup failed and the answer is unknown — callers must
+ * not cache undefined as an absence.
  *
  * Uses /v3/items/search, which queries the seller's own item catalog. Note this
  * is distinct from /v3/items/walmart/search, which searches Walmart's catalog.
  */
-export async function getSellerItemByGtin(rawCode: string): Promise<SellerItem | null> {
+export async function getSellerItemByGtin(rawCode: string): Promise<SellerItem | null | undefined> {
   const gtin = toGtin14(rawCode);
   if (!gtin) return null;
   try {
     const data = await sellerFetch(`/v3/items/search?gtin=${encodeURIComponent(gtin)}`);
-    if (!data) return null;
+    if (data === undefined) return undefined;
+    if (data === null) return null;
     // Response shape: { ItemResponse: [ {...} ] } or { items: [...] }.
     const itemResponse =
       (data.ItemResponse as Record<string, unknown>[] | undefined) ??
@@ -170,14 +174,15 @@ export async function getSellerItemByGtin(rawCode: string): Promise<SellerItem |
     if (!itemResponse.length) return null;
     return normalizeItem(itemResponse[0]);
   } catch (e) {
-    // Auth errors propagate; everything else (network, parse) degrades to null
-    // so the caller can fall back to the Affiliate lookup.
+    // Auth errors propagate; everything else (network, parse) degrades to
+    // undefined so the caller can fall back to the Affiliate lookup without
+    // recording a false absence.
     if (e instanceof Error && /auth failed/.test(e.message)) throw e;
     // Rate limiting must also propagate — swallowing it would hide the pushback
     // from the adaptive limiter, which would keep widening into a wall of 429s.
     if (e instanceof RateLimitError) throw e;
     console.error("[walmart-seller] GTIN lookup error:", e);
-    return null;
+    return undefined;
   }
 }
 
