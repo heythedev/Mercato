@@ -82,6 +82,12 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   onNext: () => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Rendered-row cap: counts and filters still cover the whole catalog, but
+  // only this many result cards go into the DOM at once — 10k of them (each
+  // with buttons and expand state) freeze the tab.
+  const INITIAL_ROWS = 200;
+  const ROWS_STEP = 500;
+  const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
   const [downloading, setDownloading] = useState(false);
   const [approving, setApproving] = useState<string | null>(null);
   const [discontinuing, setDiscontinuing] = useState<string | null>(null);
@@ -640,7 +646,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               return (
                 <button
                   key={s.label}
-                  onClick={() => { setActiveFilter(isActive ? null : s.status); setExpanded(null); }}
+                  onClick={() => { setActiveFilter(isActive ? null : s.status); setExpanded(null); setVisibleRows(INITIAL_ROWS); }}
                   className={cn(
                     "rounded-2xl p-4 text-left transition-all w-full",
                     s.color,
@@ -749,7 +755,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             </div>
           )}
 
-          {visibleProducts.map((p) => {
+          {visibleProducts.slice(0, visibleRows).map((p) => {
             const effectiveStatus = getEffectiveStatus(p);
             const cfg = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
             const Icon = cfg.icon;
@@ -1037,6 +1043,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               </div>
             );
           })}
+
+          {visibleProducts.length > visibleRows && (
+            <div className="flex justify-center py-3">
+              <button
+                onClick={() => setVisibleRows((v) => v + ROWS_STEP)}
+                className="inline-flex items-center gap-2 h-8 px-4 rounded-lg border text-xs font-medium hover:bg-accent transition"
+              >
+                Show more ({(visibleProducts.length - visibleRows).toLocaleString()} remaining)
+              </button>
+            </div>
+          )}
 
           {/* Streaming footer: sits below the last verified row so the list
               reads as "more on the way" rather than "this is everything". */}

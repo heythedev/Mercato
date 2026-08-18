@@ -12,29 +12,12 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
   await recoverStaleProjects({ id });
 
+  // Deliberately NO products here: rendering the whole catalog into one RSC
+  // payload is what killed the 512 MB instance at 10k rows ("Connection
+  // closed"). The client pulls products in pages from /api/projects/[id]/products.
   const project = await prisma.project.findUnique({
     where: { id },
-    include: {
-      products: {
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true,
-          name: true,
-          vendorSku: true,
-          upc: true,
-          asin: true,
-          brand: true,
-          price: true,
-          imageUrl: true,
-          verifyStatus: true,
-          verifyFields: true,
-          marketplaceCategory: true,
-          categoryPath: true,
-          categorizedAt: true,
-          verifiedAt: true,
-        },
-      },
-    },
+    include: { _count: { select: { products: true } } },
   });
 
   if (!project) notFound();
@@ -55,10 +38,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         categorizeMs: project.categorizeMs,
         categorizeCompletedAt: project.categorizeCompletedAt?.toISOString() ?? null,
       }}
-      products={project.products.map((p) => ({
-        ...p,
-        verifyFields: p.verifyFields as unknown as Record<string, unknown>[] | null,
-      }))}
+      productCount={project._count.products}
     />
   );
 }

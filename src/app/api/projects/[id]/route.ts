@@ -23,23 +23,20 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 
   await recoverStaleProjects({ id });
 
+  // No products in this payload — serializing the whole catalog into one JSON
+  // response has the same 512 MB failure mode as the old server render did.
+  // The client loads rows in pages from /api/projects/[id]/products instead.
   const project = await prisma.project.findUnique({
     where: { id },
-    include: {
-      products: {
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true, name: true, vendorSku: true, upc: true, asin: true,
-          brand: true, price: true, imageUrl: true, verifyStatus: true,
-          verifyFields: true, marketplaceCategory: true, categoryPath: true,
-          categorizedAt: true, verifiedAt: true,
-        },
-      },
-    },
+    include: { _count: { select: { products: true } } },
   });
 
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  // Admins can open any project page, so the refresh call must not 403 them.
+  const isAdmin = (user as { role?: string }).role === "admin";
+  if (project.userId !== user!.id && !isAdmin) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   return NextResponse.json({
     project: {
@@ -53,6 +50,6 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       categorizeMs: project.categorizeMs,
       categorizeCompletedAt: project.categorizeCompletedAt,
     },
-    products: project.products,
+    productCount: project._count.products,
   });
 }

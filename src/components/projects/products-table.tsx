@@ -22,6 +22,11 @@ const STATUS_BADGE: Record<string, string> = {
   discontinued: "bg-purple-100 text-purple-700",
 };
 
+// Rendered-row cap: searching/filtering still runs over the whole catalog,
+// but only this many rows go into the DOM at once — 10k <tr>s freeze the tab.
+const INITIAL_ROWS = 200;
+const ROWS_STEP = 500;
+
 export function ProductsTable({ products, onNext, onRunVerify, loading, projectStatus, skipVerify }: {
   products: Product[];
   onNext: () => void;
@@ -31,6 +36,7 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
   skipVerify?: boolean;
 }) {
   const [search, setSearch] = useState("");
+  const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
 
   const filtered = products.filter((p) => {
     const q = search.toLowerCase();
@@ -41,6 +47,7 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
       (p.brand ?? "").toLowerCase().includes(q)
     );
   });
+  const shown = filtered.slice(0, visibleRows);
 
   const hasVerified = products.some((p) => p.verifyStatus);
 
@@ -94,7 +101,7 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
             </tr>
           </thead>
           <tbody className="divide-y divide-border/40">
-            {filtered.map((p) => (
+            {shown.map((p) => (
               <tr key={p.id} className="hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3">
                   <p className="font-medium line-clamp-1">{p.name}</p>
@@ -130,6 +137,16 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
             )}
           </tbody>
         </table>
+        {filtered.length > visibleRows && (
+          <div className="flex justify-center border-t border-border/40 py-3">
+            <button
+              onClick={() => setVisibleRows((v) => v + ROWS_STEP)}
+              className="inline-flex items-center gap-2 h-8 px-4 rounded-lg border text-xs font-medium hover:bg-accent transition"
+            >
+              Show more ({(filtered.length - visibleRows).toLocaleString()} remaining)
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

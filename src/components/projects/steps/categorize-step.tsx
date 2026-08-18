@@ -39,6 +39,11 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const hasResults = products.some((p) => p.marketplaceCategory);
   const total = products.length;
   const [uploading, setUploading] = useState(false);
+  // Rendered-row cap: counts and the CSV download still cover the whole
+  // catalog, but only this many rows go into the DOM — 10k <tr>s freeze the tab.
+  const INITIAL_ROWS = 200;
+  const ROWS_STEP = 500;
+  const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
   const csvRef = useRef<HTMLInputElement>(null);
 
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
@@ -338,7 +343,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                   verdict — the not-yet-processed remainder would otherwise render as
                   a wall of "—" placeholder rows. Once the run finishes, show
                   everything (matches the Verify step's resultPool pattern). */}
-              {(loading ? products.filter((p) => p.marketplaceCategory) : products).map((p) => {
+              {(loading ? products.filter((p) => p.marketplaceCategory) : products).slice(0, visibleRows).map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
                 return (
                   <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50" : "hover:bg-muted/30"}`}>
@@ -381,6 +386,22 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
               })}
             </tbody>
           </table>
+          {(() => {
+            // Same pool as the rows above: streamed verdicts while running,
+            // the whole catalog once finished.
+            const poolSize = loading ? categorized.length + uncategorized.length : total;
+            if (poolSize <= visibleRows) return null;
+            return (
+              <div className="flex justify-center border-t border-border/40 py-3">
+                <button
+                  onClick={() => setVisibleRows((v) => v + ROWS_STEP)}
+                  className="inline-flex items-center gap-2 h-8 px-4 rounded-lg border text-xs font-medium hover:bg-accent transition"
+                >
+                  Show more ({(poolSize - visibleRows).toLocaleString()} remaining)
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -16,6 +16,7 @@ import { CategorizeStep } from "./steps/categorize-step";
 import { ExportStep } from "./steps/export-step";
 import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 import { startPolling, sleepForPoll } from "@/lib/poll-scheduler";
+import { LottieLoader } from "@/components/ui/lottie-loader";
 
 type Product = {
   id: string;
@@ -88,9 +89,9 @@ function MarketplaceLogo({ marketplace, className }: { marketplace: string; clas
   );
 }
 
-export function ProjectDetail({ project: initial, products: initialProducts }: {
+export function ProjectDetail({ project: initial, productCount }: {
   project: Project;
-  products: Product[];
+  productCount: number;
 }) {
   const router = useRouter();
   const confirm = useConfirm();
@@ -98,7 +99,60 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
   // specific project is a new listing (no live page to check against).
   const skipVerify = SKIP_VERIFY.has(initial.marketplace) || !!initial.isNewListing;
   const [project, setProject] = useState(initial);
-  const [products, setProducts] = useState(initialProducts);
+  // The catalog is loaded in pages from /api/projects/[id]/products rather
+  // than arriving in the server render — one 10k-row RSC payload is what
+  // killed the 512 MB instance. Step content stays gated behind
+  // `productsReady` because every count and CSV download below derives from
+  // the FULL array; acting on a partially loaded catalog would show wrong
+  // tallies and half-empty exports.
+  const [products, setProducts] = useState<Product[]>([]);
+  const [productsReady, setProductsReady] = useState(false);
+  const [loadedCount, setLoadedCount] = useState(0);
+  // Bumped on every load; lets a newer load (post-run refresh) supersede an
+  // older one that is still walking pages, so their rows never interleave.
+  const loadRunRef = useRef(0);
+
+  async function loadProducts() {
+    const run = ++loadRunRef.current;
+    setLoadedCount(0);
+    const buffer: Product[] = [];
+    let cursor: string | null = null;
+    let failed = false;
+    for (;;) {
+      const qs = new URLSearchParams({ limit: "500" });
+      if (cursor) qs.set("cursor", cursor);
+      // A couple of retries per page: the free instance can hiccup under
+      // load, and giving up on page 12 of 20 would silently truncate every
+      // count derived from the array.
+      let res: Response | null = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try { res = await fetch(`/api/projects/${initial.id}/products?${qs}`); } catch { res = null; }
+        if (res?.ok) break;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+      if (loadRunRef.current !== run) return;
+      if (!res?.ok) { failed = true; break; }
+      const data = await res.json() as { products: Product[]; nextCursor: string | null };
+      if (loadRunRef.current !== run) return;
+      buffer.push(...data.products);
+      setLoadedCount(buffer.length);
+      cursor = data.nextCursor;
+      if (!cursor) break;
+    }
+    if (loadRunRef.current !== run) return;
+    // Swap in one state update — a page-by-page setProducts would truncate
+    // the on-screen list to the first page at the start of every refresh.
+    setProducts(buffer);
+    setProductsReady(true);
+    if (failed) {
+      toast.error(`Couldn't load the full product list (got ${buffer.length.toLocaleString()}). Refresh the page to retry.`);
+    }
+  }
+
+  useEffect(() => {
+    void loadProducts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [activeStep, setActiveStep] = useState(() => {
     const idx = stepIndex(initial.status);
     // If this project skips verification and we land on the verify step, advance to categorize
@@ -122,8 +176,10 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
     if (res.ok) {
       const data = await res.json();
       setProject(data.project);
-      setProducts(data.products);
     }
+    // Re-pull the catalog in pages; the current list stays on screen until
+    // the fresh copy is complete, then swaps in one update.
+    await loadProducts();
   }
 
   // `force` re-checks every product (explicit "Re-verify"); the default resumes,
@@ -588,7 +644,9 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
                   {MARKETPLACE_LABELS[project.marketplace]}
                 </span>
               </div>
-              <p className="text-xs text-muted-foreground">{products.length} products</p>
+              <p className="text-xs text-muted-foreground">
+                {(productsReady ? products.length : productCount).toLocaleString()} products
+              </p>
             </div>
             <button
               onClick={handleDelete}
@@ -679,7 +737,21 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
       <div className="relative z-10 pb-6 lg:pr-52">
         <div className="mx-auto max-w-6xl px-4 sm:px-8">
           <div className="rounded-3xl bg-card shadow-[0_1px_3px_rgba(0,0,0,0.04),0_8px_24px_-12px_rgba(0,0,0,0.08)] overflow-hidden">
-        {activeStep === 0 && (
+        {/* Every count, filter and download below derives from the full
+            catalog, so the steps wait for the paged load to finish rather
+            than flash wrong tallies computed from a partial list. */}
+        {!productsReady && (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <LottieLoader size={72} className="mb-3" />
+            <p className="text-sm font-medium">Loading products…</p>
+            {productCount > 0 && (
+              <p className="text-xs text-muted-foreground mt-1 tabular-nums">
+                {loadedCount.toLocaleString()} of {productCount.toLocaleString()}
+              </p>
+            )}
+          </div>
+        )}
+        {productsReady && activeStep === 0 && (
           <ProductsTable
             products={products}
             onNext={() => setActiveStep(skipVerify ? 2 : 1)}
@@ -689,7 +761,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             skipVerify={skipVerify}
           />
         )}
-        {activeStep === 1 && (
+        {productsReady && activeStep === 1 && (
           <VerifyStep
             projectId={project.id}
             projectName={project.name}
@@ -714,7 +786,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             onNext={() => setActiveStep(project.marketplace === "amazon_us" ? 3 : 2)}
           />
         )}
-        {activeStep === 2 && (
+        {productsReady && activeStep === 2 && (
           <CategorizeStep
             projectId={project.id}
             projectName={project.name}
@@ -730,7 +802,7 @@ export function ProjectDetail({ project: initial, products: initialProducts }: {
             onNext={() => setActiveStep(3)}
           />
         )}
-        {activeStep === 3 && (
+        {productsReady && activeStep === 3 && (
           <ExportStep
             projectId={project.id}
             projectName={project.name}
