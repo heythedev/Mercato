@@ -35,6 +35,7 @@ type FilterOption = {
 };
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: React.ElementType }> = {
+  uploading:   { label: "Uploading",   color: "bg-blue-100 text-blue-700",    icon: Loader2 },
   uploaded:    { label: "Uploaded",    color: "bg-blue-100 text-blue-700",    icon: Clock },
   verifying:   { label: "Verifying",   color: "bg-yellow-100 text-yellow-700", icon: Loader2 },
   verified:    { label: "Verified",    color: "bg-green-100 text-green-700",   icon: CheckCircle2 },
@@ -81,7 +82,7 @@ function MarketplaceLogo({ marketplace, className }: { marketplace: string; clas
 }
 
 const PROGRESS: Record<string, number> = {
-  uploaded: 14, verifying: 28, verified: 42,
+  uploading: 7, uploaded: 14, verifying: 28, verified: 42,
   categorizing: 57, categorized: 71, exporting: 85, done: 100,
 };
 

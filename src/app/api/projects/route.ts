@@ -7,6 +7,15 @@ import { canUseMarketplace } from "@/lib/marketplaces/catalog";
 
 export const maxDuration = 300;
 
+// Parse inside a helper so the multi-MB upload buffer becomes unreachable —
+// and collectable — as soon as parsing is done, instead of staying pinned in
+// the request scope while the insert phase still has minutes of work ahead.
+async function parseUpload(file: File) {
+  const bytes = Buffer.from(await file.arrayBuffer());
+  console.log(`[upload] File: "${file.name}", size=${bytes.byteLength} bytes`);
+  return parseVendorFile(bytes, file.name);
+}
+
 export async function POST(req: NextRequest) {
   const { user, response } = await authGuard();
   if (response) return response;
@@ -37,13 +46,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const bytes = await file.arrayBuffer();
-  console.log(`[upload] File: "${file.name}", size=${bytes.byteLength} bytes`);
-  const { rows, parseInfo } = await parseVendorFile(Buffer.from(bytes), file.name);
-  console.log(`[upload] parseVendorFile → ${rows.length} products for marketplace=${marketplace}`);
+  const { rows, parseInfo } = await parseUpload(file);
+  const totalRows = rows.length;
+  console.log(`[upload] parseVendorFile → ${totalRows} products for marketplace=${marketplace}`);
   console.log(`[upload] parseInfo: ${parseInfo}`);
 
-  if (!rows.length) {
+  if (!totalRows) {
     return NextResponse.json({ error: "No rows found in the file" }, { status: 400 });
   }
 
@@ -51,62 +59,65 @@ export async function POST(req: NextRequest) {
   // Prisma nested create sends all rows as a single parameterised statement;
   // PostgreSQL's 65 535-parameter cap silently truncates files with 6 k+ products
   // (~11 cols × 6 k rows = 66 k params). Chunked createMany stays well under the limit.
+  //
+  // Status starts as "uploading" and flips to "uploaded" only after every chunk
+  // is in. The rollback in the catch below handles a thrown insert error, but an
+  // OOM-killed process runs no catch — recoverStaleProjects deletes anything
+  // stranded in "uploading", so a kill can't leave a half-imported project
+  // masquerading as a complete one.
   const project = await prisma.project.create({
-    data: { userId: user!.id, name, marketplace, status: "uploaded", isNewListing },
+    data: { userId: user!.id, name, marketplace, status: "uploading", isNewListing },
   });
 
-  // Insert sizing, learned the hard way against Render Postgres:
+  // Insert sizing, learned the hard way against Render Postgres and revised for
+  // the 512 MB instance + remote-region Supabase:
   //  - Rows carry the FULL vendor sheet as vendorData JSON (a 73-column file ≈ 4.5 KB/row),
-  //    so a 2 000-row chunk is a ~9 MB statement.
-  //  - Sequential 9 MB statements are proven safe; FOUR of them concurrently killed the
-  //    server connection outright ("Client ... is not queryable") and lost the upload.
-  //  - So: halve the chunk (≈4.5 MB) and allow only 2 in flight — the same ~9 MB peak
-  //    the database has already demonstrated it can handle, at ~2× sequential speed.
+  //    so a 1 000-row chunk is a ~4.5 MB statement.
+  //  - One statement in flight at a time. Cross-region latency stretches each
+  //    statement to several seconds, so two concurrent ~4.5 MB serializations
+  //    held memory long enough to OOM-kill the process mid-upload on a 10k file.
+  //  - Ownership of the parsed rows moves into `chunks`, and each chunk is
+  //    released as soon as it is inserted, so peak memory falls as the upload
+  //    progresses instead of holding all 10k rows until the response.
   //  - Every chunk retries on transient/connection errors before the upload is failed.
   const CHUNK = 1000;
-  const INSERT_CONCURRENCY = 2;
   const MAX_ATTEMPTS = 3;
-  const chunks: (typeof rows)[] = [];
-  for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK));
+  const chunks: (typeof rows | null)[] = [];
+  while (rows.length) chunks.push(rows.splice(0, CHUNK));
 
   let inserted = 0;
-  let nextChunk = 0;
   try {
-    await Promise.all(
-      Array.from({ length: Math.min(INSERT_CONCURRENCY, chunks.length) }, async () => {
-        while (nextChunk < chunks.length) {
-          const idx = nextChunk++;
-          const chunk = chunks[idx];
-          for (let attempt = 1; ; attempt++) {
-            try {
-              const result = await prisma.product.createMany({
-                data: chunk.map((r) => ({
-                  projectId: project.id,
-                  name: r.name ?? "Unknown",
-                  vendorSku: r.sku ?? null,
-                  upc: r.upc ?? null,
-                  asin: r.asin ?? null,
-                  brand: r.brand ?? null,
-                  description: r.description ?? null,
-                  price: r.price ?? null,
-                  imageUrl: r.imageUrl ?? null,
-                  verifyStatus: r.discontinued === true ? "discontinued" : null,
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  vendorData: r as any,
-                })),
-              });
-              inserted += result.count;
-              console.log(`[upload] Chunk ${idx + 1}/${chunks.length}: inserted ${result.count}/${chunk.length} (total so far: ${inserted})`);
-              break;
-            } catch (err) {
-              if (attempt >= MAX_ATTEMPTS) throw err;
-              console.warn(`[upload] Chunk ${idx + 1} attempt ${attempt} failed, retrying:`, err instanceof Error ? err.message : err);
-              await new Promise((r) => setTimeout(r, 1500 * attempt));
-            }
-          }
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const chunk = chunks[idx]!;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const result = await prisma.product.createMany({
+            data: chunk.map((r) => ({
+              projectId: project.id,
+              name: r.name ?? "Unknown",
+              vendorSku: r.sku ?? null,
+              upc: r.upc ?? null,
+              asin: r.asin ?? null,
+              brand: r.brand ?? null,
+              description: r.description ?? null,
+              price: r.price ?? null,
+              imageUrl: r.imageUrl ?? null,
+              verifyStatus: r.discontinued === true ? "discontinued" : null,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              vendorData: r as any,
+            })),
+          });
+          inserted += result.count;
+          chunks[idx] = null; // inserted — release these rows to the GC
+          console.log(`[upload] Chunk ${idx + 1}/${chunks.length}: inserted ${result.count}/${chunk.length} (total so far: ${inserted})`);
+          break;
+        } catch (err) {
+          if (attempt >= MAX_ATTEMPTS) throw err;
+          console.warn(`[upload] Chunk ${idx + 1} attempt ${attempt} failed, retrying:`, err instanceof Error ? err.message : err);
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
         }
-      }),
-    );
+      }
+    }
   } catch (err) {
     // A chunk failed permanently — remove the partial project so the user doesn't end
     // up with a ghost "0 products" (or half-imported) project, and answer with real
@@ -118,7 +129,11 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
-  console.log(`[upload] Done: ${inserted}/${rows.length} products inserted for project ${project.id}`);
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { status: "uploaded" },
+  });
+  console.log(`[upload] Done: ${inserted}/${totalRows} products inserted for project ${project.id}`);
 
   return NextResponse.json({ id: project.id, count: inserted, parseInfo });
 }

@@ -38,6 +38,15 @@ export async function recoverStaleProjects(
   const skipVerify = [...SKIP_VERIFY_MARKETPLACES];
   try {
     await Promise.all([
+      // An upload that died mid-insert leaves a partial project its route's own
+      // rollback could not remove (an OOM-killed process runs no catch block).
+      // Mirror that rollback here: a project still "uploading" past any live
+      // request's lifetime is a truncated import — delete it, products and all,
+      // rather than recover it to a stable status that would present a half
+      // catalog as complete.
+      prisma.project.deleteMany({
+        where: { ...scope, status: "uploading", updatedAt: { lt: cutoff } },
+      }),
       // Fixed-fallback transient statuses.
       ...Object.entries(RECOVERY).map(([from, to]) =>
         prisma.project.updateMany({
