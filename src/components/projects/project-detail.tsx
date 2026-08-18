@@ -31,6 +31,7 @@ type Product = {
   verifyFields: Record<string, unknown>[] | null;
   marketplaceCategory: string | null;
   categoryPath: string | null;
+  categoryConfidence: number | null;
   categorizedAt: Date | null;
   verifiedAt: Date | null;
 };
@@ -454,7 +455,7 @@ export function ProjectDetail({ project: initial, productCount }: {
     setCategorizePhase(null);
     // A re-categorize (force) clears the previous run's results first, otherwise the
     // stale list would sit there looking like fresh progress — matches runVerify.
-    if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null })));
+    if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null, categoryConfidence: null })));
     const stopPolling = startCategorizeFeed();
     try {
       // Categorization is a background job (large catalogs make dozens of model

@@ -864,13 +864,13 @@ STEP 2 — Find the matching section in the Sears taxonomy, then narrow to the r
 STEP 3 — Copy the full 3-level path character-for-character.`
     : walmartRichMode
     ? `For EACH product, follow these steps:
-STEP 1 — Identify what the product physically IS (its core noun and function): e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
+STEP 1 — Identify what the product physically IS (its core noun and function) from the NAME alone — ignore the [vendor category] tag at this step: e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
 STEP 2 — Find the taxonomy CATEGORY that covers that object type (e.g. bicycle lock → Sports & Outdoors; kitchen knife → Home; table lamp → Home).
 STEP 3 — Within that category, pick the Product Type Group whose name most closely matches the product (e.g. "Sports & Outdoors > Cycling", "Home > Kitchen Cutting Utensils & Tools", "Home > Lamps and Light Bulbs Lighting & Light Fixtures").
 STEP 4 — Copy the full 2-level path character-for-character from the list.`
     : isWalmart
     ? `For EACH product, follow these steps:
-STEP 1 — Identify what the product physically IS (its core noun and function): e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
+STEP 1 — Identify what the product physically IS (its core noun and function) from the NAME alone — ignore the [vendor category] tag at this step: e.g. "bicycle lock", "yoga mat", "kitchen knife", "baby stroller".
 STEP 2 — Use the category descriptions in your instructions to find the BEST matching Walmart template category. Remember: "Sports & Recreation Other" covers ALL cycling/fitness/sports gear; "Tools" covers hand/power tools; "Hardware" covers fasteners/brackets.
 STEP 3 — When two categories seem equally valid, pick the MORE SPECIFIC one (e.g. "Bedding" over "Home Decor, Kitchen, & Other" for a comforter; "Baby Transport" over "Baby Diapering, Care, & Other" for a stroller).
 STEP 4 — Copy the chosen category character-for-character from the list.`
@@ -901,6 +901,17 @@ TEMU DISAMBIGUATION (apply when more than one section could fit — resolve by P
 7. SPORT/OUTDOOR vs GENERAL. Gear used for a specific sport or outdoor activity → "Sports & Outdoors". General-use versions of the same object go to their object section (a plain water bottle → Kitchen & Dining; a hydration pack → Sports & Outdoors).
 8. When two leaves remain equally valid after these rules, pick the MORE SPECIFIC leaf and lower your confidence (≤0.7) so it is flagged for review.` : "";
 
+  // Walmart vendor feeds carry the vendor's own store-navigation labels ("Shop
+  // All School Supplies", "All Sports") in [vendor category] — the model tends
+  // to trust or paraphrase them into the answer instead of reading the name.
+  const walmartEvidenceRule = isWalmart ? `
+WALMART EVIDENCE RULES (mandatory):
+1. Decide from the product NAME (plus brand/description) — what the item physically IS. The [vendor category] tag is the vendor's INTERNAL store-navigation label, NOT a verified Walmart category: treat it as a weak tie-breaker at most, and NEVER copy or paraphrase it into the answer (labels like "Shop All School Supplies", "All Sports", "Shop All Table Lamps" are navigation pages, not product types).
+2. A missing or generic [vendor category] changes nothing — infer entirely from the product name and description; never output "Uncategorized" just because catalog fields are blank.
+3. Products sharing a near-identical [vendor category] label are NOT necessarily the same kind of item — categorize each one independently from its own name.
+4. Prefer the most SPECIFIC listed entry the product name supports — never settle for a broad or generic entry when a narrower one plainly fits.
+5. Report confidence honestly: 0.8+ only when the name clearly identifies the product AND one listed entry plainly fits; 0.5 or below when you are guessing between plausible entries — low confidence routes the product to human review instead of silently publishing a guess.` : "";
+
   // Walmart's own category list legitimately includes single-word values like
   // "Other", "Furniture" and "Toys", so the generic "never output these" rule
   // must not apply — only forbid inventing values that aren't on the list.
@@ -920,7 +931,7 @@ RULES:
 ${noInventRule}
 3. "Uncategorized" is only for products that genuinely don't belong in ANY listed category
 4. Use product name, brand, description, vendor category as signals to identify WHAT the product is — then map that to the taxonomy leaf
-5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}${temuDisambiguationRule}${forceNearestRule}` : "";
+5. Do not override a direct taxonomy product-type match with general retail logic${mathisSizeRule}${temuDisambiguationRule}${walmartEvidenceRule}${forceNearestRule}` : "";
 
   const usesTaxonomySheet = isTemu || isMathis || isBestBuy || isWalmart || isSears;
   // The fuzzy-match floor: rich multi-word paths need a higher bar than the flat

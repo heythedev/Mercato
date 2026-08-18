@@ -113,7 +113,13 @@ export async function assignSpecProductTypes(
     try {
       const { text } = await generateText({
         model: moonshot(model),
-        prompt: `You are a Walmart listing expert. Assign each product the single best "Spec Product Type" from Walmart's official list below. Copy the value character-for-character. If none fits, use "" (empty).
+        prompt: `You are a Walmart listing expert. Assign each product the single best "Spec Product Type" from Walmart's official list below.
+
+Rules:
+1. Decide from the product NAME (plus brand/description) — what the item physically IS. The [category] tag only tells you which slice of the taxonomy you are in; it is NOT the answer and must not be echoed back as the product type.
+2. Pick the most SPECIFIC type that matches the product — never a broad catch-all (anything like "Other", "All X" or a generic parent term) when a narrower listed type plainly fits.
+3. Copy the chosen value character-for-character from the list. Never invent, abbreviate, or paraphrase a type.
+4. Use "" (empty) ONLY when genuinely no listed type describes the item — not because the name is short or the category tag is vague.
 
 Valid Spec Product Types:
 ${typeList}

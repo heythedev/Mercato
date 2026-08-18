@@ -37,7 +37,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       id: true, name: true, vendorSku: true, upc: true, asin: true,
       brand: true, price: true, imageUrl: true, verifyStatus: true,
       verifyFields: true, marketplaceCategory: true, categoryPath: true,
-      categorizedAt: true, verifiedAt: true,
+      categoryConfidence: true, categorizedAt: true, verifiedAt: true,
     },
   });
 

@@ -14,6 +14,7 @@ type Product = {
   vendorSku: string | null;
   marketplaceCategory: string | null;
   categoryPath: string | null;
+  categoryConfidence: number | null;
   categorizedAt: Date | null;
 };
 
@@ -49,6 +50,12 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
   const categorized = products.filter((p) => p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized");
   const pending = products.filter((p) => !p.marketplaceCategory);
+  // Assigned a category, but the model itself wasn't sure. Constrained
+  // marketplaces keep low-confidence guesses (gate 0.2) instead of dropping
+  // them to "Uncategorized" — precisely so a human can review them here
+  // rather than have a silent guess go straight to export.
+  const REVIEW_CONFIDENCE = 0.6;
+  const needsReview = categorized.filter((p) => p.categoryConfidence != null && p.categoryConfidence < REVIEW_CONFIDENCE);
   // Products that already have a verdict RIGHT NOW. During a run this grows as waves
   // land (see startCategorizeFeed in project-detail.tsx), which is what lets the
   // results table render mid-run instead of waiting for the whole catalog to finish —
@@ -102,7 +109,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
   function downloadCsv() {
     const rows = [
-      ["SKU", "Product Name", "Brand", "Category", "Product Type", "Category Path", "Status"],
+      // "Confidence" is ignored by the CSV import (headers resolve by name),
+      // so download -> edit -> upload stays lossless with the extra column.
+      ["SKU", "Product Name", "Brand", "Category", "Product Type", "Category Path", "Confidence", "Status"],
       ...products.map((p) => {
         // "Category > Product Type" paths are split into two columns for easier
         // review. The CSV import (PUT) re-joins them, so download -> edit ->
@@ -119,6 +128,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
         const sep = full.indexOf(" > ");
         const topCategory = sep === -1 ? full : full.slice(0, sep);
         const productType = sep === -1 ? "" : full.slice(sep + 3);
+        const conf = p.categoryConfidence;
+        const confLabel = conf == null || !cat || cat === "Uncategorized" ? ""
+          : conf >= 0.8 ? "High" : conf >= REVIEW_CONFIDENCE ? "Medium" : "Low";
         return [
           p.vendorSku ?? p.id,
           p.name,
@@ -126,6 +138,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           topCategory,
           productType,
           p.categoryPath ?? "",
+          confLabel,
           p.marketplaceCategory === "Uncategorized" ? "No match" : p.marketplaceCategory ? "Done" : "Not categorized",
         ];
       }),
@@ -251,11 +264,17 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
       {/* Progress */}
       {(hasResults || hasStreamedResults) && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
+        <div className={`grid grid-cols-1 gap-3 sm:gap-4 mb-6 ${needsReview.length > 0 ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
           <div className="rounded-2xl p-5 bg-green-50/70 dark:bg-green-950/20">
             <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categorized.length}</p>
             <p className="text-sm text-muted-foreground">Categorized</p>
           </div>
+          {needsReview.length > 0 && (
+            <div className="rounded-2xl p-5 bg-amber-50/70 dark:bg-amber-950/20">
+              <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{needsReview.length}</p>
+              <p className="text-sm text-muted-foreground">Low confidence</p>
+            </div>
+          )}
           <div className={`rounded-2xl p-5 ${uncategorized.length > 0 ? "bg-orange-50/70 dark:bg-orange-950/20" : "bg-muted/30"}`}>
             <p className={`text-2xl font-bold ${uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : ""}`}>{uncategorized.length}</p>
             <p className="text-sm text-muted-foreground">Uncategorized</p>
@@ -285,6 +304,25 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                 {isMathis
                   ? "These products don't fit any path in the Mathis category sheet (e.g. everyday apparel, fragrances, electronics, food). They will be excluded from the ZIP export. Review them below or remove them from the vendor file."
                   : "These products couldn't be confidently assigned a category. They will be excluded from the export. Try re-categorizing or check the product names."}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Low-confidence review banner — the AI assigned these a category but
+          flagged that it was guessing between plausible entries. Surfaced so a
+          human can check them before export instead of silently publishing. */}
+      {hasResults && !loading && needsReview.length > 0 && (
+        <div className="mb-6 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-amber-800">
+                {needsReview.length} product{needsReview.length !== 1 ? "s" : ""} categorized with low confidence
+              </p>
+              <p className="text-xs text-amber-700 mt-1">
+                The AI assigned these a category but wasn&apos;t sure between multiple plausible options — usually because the product name is short or ambiguous. They&apos;re marked &quot;Review&quot; in the table below. Check them before exporting, or download the CSV, correct the categories, and upload it back.
               </p>
             </div>
           </div>
@@ -345,8 +383,10 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                   everything (matches the Verify step's resultPool pattern). */}
               {(loading ? products.filter((p) => p.marketplaceCategory) : products).slice(0, visibleRows).map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
+                const lowConfidence = !isUncategorized && !!p.marketplaceCategory &&
+                  p.categoryConfidence != null && p.categoryConfidence < REVIEW_CONFIDENCE;
                 return (
-                  <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50" : "hover:bg-muted/30"}`}>
+                  <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50" : lowConfidence ? "bg-amber-50/60 hover:bg-amber-50" : "hover:bg-muted/30"}`}>
                     <td className="px-4 py-3">
                       <p className="font-medium line-clamp-1">{p.name}</p>
                       {p.brand && <p className="text-xs text-muted-foreground">{p.brand}</p>}
@@ -364,6 +404,14 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                         <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
                           <XCircle className="w-3 h-3" />
                           No match
+                        </span>
+                      ) : lowConfidence ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700"
+                          title={`AI confidence ${Math.round((p.categoryConfidence ?? 0) * 100)}% — the model was unsure between plausible categories; verify this one before exporting`}
+                        >
+                          <AlertTriangle className="w-3 h-3" />
+                          Review
                         </span>
                       ) : p.marketplaceCategory ? (
                         <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700">
