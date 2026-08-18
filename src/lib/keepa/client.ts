@@ -106,6 +106,12 @@ export async function finder(
   return { asinList, total: (json.totalResults as number) ?? asinList.length, tokens: lastToken };
 }
 
+// Product requests always send history:0 — without it Keepa attaches the full
+// price-history CSV arrays (~1MB+ per product on popular listings), and a few
+// concurrent 100-ASIN batches buffer enough JSON to OOM a 512MB instance.
+// stats.current/avg still arrive with history:0; p.csv is only a fallback.
+const BATCH = 50;
+
 export async function getProducts(
   domain: number,
   asins: string[],
@@ -113,10 +119,10 @@ export async function getProducts(
 ): Promise<KeepaProduct[]> {
   if (!asins.length) return [];
   const batches: string[][] = [];
-  for (let i = 0; i < asins.length; i += 100) batches.push(asins.slice(i, i + 100));
+  for (let i = 0; i < asins.length; i += BATCH) batches.push(asins.slice(i, i + BATCH));
 
   const fetchBatch = async (batch: string[]): Promise<KeepaProduct[]> => {
-    const params: Record<string, string | number> = { domain, asin: batch.join(","), stats: opts?.stats ?? 180 };
+    const params: Record<string, string | number> = { domain, asin: batch.join(","), stats: opts?.stats ?? 180, history: 0 };
     if (opts?.rating !== false) params.rating = 1;
     if (opts?.buybox) params.buybox = 1;
     const json = await call("product", params);
@@ -124,7 +130,7 @@ export async function getProducts(
   };
 
   const out: KeepaProduct[] = [];
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 2;
   for (let i = 0; i < batches.length; i += CONCURRENCY) {
     const group = batches.slice(i, i + CONCURRENCY);
     const settled = await Promise.allSettled(group.map(fetchBatch));
@@ -161,12 +167,12 @@ export async function getProductsByCode(
 ): Promise<{ products: KeepaProduct[]; failedCodes: string[] }> {
   if (!codes.length) return { products: [], failedCodes: [] };
   const batches: string[][] = [];
-  for (let i = 0; i < codes.length; i += 100) batches.push(codes.slice(i, i + 100));
+  for (let i = 0; i < codes.length; i += BATCH) batches.push(codes.slice(i, i + BATCH));
   const out: KeepaProduct[] = [];
   const failed: string[] = [];
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
-    const params: Record<string, string | number> = { domain, code: batch.join(","), stats: opts?.stats ?? 180 };
+    const params: Record<string, string | number> = { domain, code: batch.join(","), stats: opts?.stats ?? 180, history: 0 };
     if (opts?.rating !== false) params.rating = 1;
     try {
       const json = await call("product", params);

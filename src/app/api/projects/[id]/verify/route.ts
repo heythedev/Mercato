@@ -28,6 +28,15 @@ import {
 // the whole catalog up front cost hundreds of MB.
 const BATCH_SIZE = 500;
 
+// Amazon runs use a much smaller page. An Amazon batch resolves through
+// Synccentric (sequential groups of 10) plus a Keepa fallback, so a 500-row
+// batch can run for minutes before its persist — an OOM kill mid-batch then
+// loses every lookup in it, re-burns the same Synccentric quota on retry, and
+// strands the project in "verifying". 100 rows commits progress often enough
+// that a killed instance costs one small batch, and it bounds the in-flight
+// vendor/lookup payloads held in memory at any moment.
+const AMAZON_BATCH_SIZE = 100;
+
 // Flagged rows adjudicated (and re-persisted) per AI slice. Bounds the AI
 // pass's working set and the work lost if a long pass is interrupted: each
 // slice's verdicts are committed before the next slice starts.
@@ -428,6 +437,8 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   // earlier pass already paid to make.
   if (isFreshStart) resetWalmartRunState();
 
+  const batchSize = isAmazonMarketplace(project.marketplace) ? AMAZON_BATCH_SIZE : BATCH_SIZE;
+
   try {
     await withImageCache(async () => {
       // Stream unverified rows in id order. Persisting a row sets its
@@ -446,7 +457,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         const batch = await prisma.product.findMany({
           where,
           orderBy: { id: "asc" },
-          take: BATCH_SIZE,
+          take: batchSize,
           select: {
             id: true,
             name: true,

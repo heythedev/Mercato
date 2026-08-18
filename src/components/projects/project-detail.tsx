@@ -223,17 +223,53 @@ export function ProjectDetail({ project: initial, productCount }: {
         const qs = new URLSearchParams();
         if (useForce) qs.set("force", "1");
         if (ai) qs.set("ai", "1");
-        const res = await fetch(
-          `/api/projects/${project.id}/verify${qs.size ? `?${qs}` : ""}`,
-          { method: "POST" },
-        );
-        const data = await res.json();
+        const url = `/api/projects/${project.id}/verify${qs.size ? `?${qs}` : ""}`;
+
+        // The production instance can be killed mid-pass (memory limit), which
+        // surfaces here as a fetch failure, a 502/503/504 from the proxy, or a
+        // non-JSON body. Every batch the server finished is already persisted,
+        // so the right response is to wait out the restart and re-send the same
+        // request — not abort the whole run. The delays span the observed
+        // instance recovery time (~1–2 min). `useForce` is kept until a
+        // response actually arrives: a force request that died may or may not
+        // have cleared the old verdicts, and re-sending force is safe either way.
+        const retryDelaysMs = [15_000, 30_000, 45_000, 90_000];
+        let res: Response | null = null;
+        let data: {
+          error?: string;
+          code?: string;
+          resumable?: boolean;
+          verified?: number;
+          skipped?: number;
+          remaining?: number;
+        } | null = null;
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, retryDelaysMs[attempt - 1]));
+          try {
+            res = await fetch(url, { method: "POST" });
+          } catch {
+            res = null; // network drop while the instance restarts
+            continue;
+          }
+          if (res.status === 502 || res.status === 503 || res.status === 504) continue;
+          data = await res.json().catch(() => null);
+          if (data !== null) break;
+        }
+        if (!res || data === null) {
+          toast.warning(
+            totalVerified > 0
+              ? `The server restarted during verification — ${totalVerified} products so far are saved. Click Verify again to continue.`
+              : "The server restarted during verification. Completed batches are saved — click Verify again to continue.",
+          );
+          await refreshProject();
+          return;
+        }
         useForce = false;
 
         if (!res.ok) {
           if (data.code === "INSUFFICIENT_KEEPA_TOKENS") {
             toast.warning(data.error ?? "Not enough Keepa tokens available to verify");
-          } else if (data.resumable && (data.verified > 0 || totalVerified > 0)) {
+          } else if (data.resumable && ((data.verified ?? 0) > 0 || totalVerified > 0)) {
             toast.warning(`Verification stopped after ${totalVerified + (data.verified ?? 0)} products — results so far are saved. Run Verify again to continue.`);
           } else {
             toast.error(data.error ?? "Verification failed");
@@ -245,12 +281,13 @@ export function ProjectDetail({ project: initial, productCount }: {
         totalVerified += data.verified ?? 0;
         totalSkipped += data.skipped ?? 0;
 
-        if (data.remaining > 0) {
-          setVerifyProgress({ done: totalVerified, total: totalVerified + data.remaining });
+        const remaining = data.remaining ?? 0;
+        if (remaining > 0) {
+          setVerifyProgress({ done: totalVerified, total: totalVerified + remaining });
           // A pass that verified nothing but still reports work left would loop
           // without end — surface it and keep the partial results.
           if (!data.verified) {
-            toast.warning(`Verified ${totalVerified} products — ${data.remaining} still to check. Run Verify again to continue.`);
+            toast.warning(`Verified ${totalVerified} products — ${remaining} still to check. Run Verify again to continue.`);
             break;
           }
           continue;
