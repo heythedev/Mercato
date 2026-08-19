@@ -494,6 +494,7 @@ export function ProjectDetail({ project: initial, productCount }: {
         const data = await pollRes.json().catch(() => ({ status: "error", error: "Categorization failed" })) as {
           status: string; error?: string; phase?: string; updatedAt?: number;
           matched?: number; unmatched?: number; categorized?: number;
+          specTypesRequested?: number; specTypesAssigned?: number; specTypeError?: string;
         };
 
         if (!pollRes.ok || data.status === "error") {
@@ -510,6 +511,17 @@ export function ProjectDetail({ project: initial, productCount }: {
             toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"} (${unmatched} unmatched)`);
           } else {
             toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"}`);
+          }
+          // Walmart spec product types are a separate AI pass; a run where it
+          // failed or fell short used to look identical to a clean run, and the
+          // gap only surfaced as wrong values in the exported template.
+          if (data.specTypeError) {
+            toast.error(`Spec product types could not be assigned (${data.specTypeError}) — re-run Categorize before exporting.`);
+          } else if (
+            typeof data.specTypesRequested === "number" && data.specTypesRequested > 0 &&
+            (data.specTypesAssigned ?? 0) < data.specTypesRequested
+          ) {
+            toast.warning(`Spec product types: ${data.specTypesAssigned ?? 0} of ${data.specTypesRequested} assigned — re-run Categorize to fill the rest.`);
           }
           await refreshProject();
           setActiveStep(2);

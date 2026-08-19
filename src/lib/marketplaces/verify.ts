@@ -246,8 +246,67 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
       t.field.match = false;
       t.field.note = `Needs manual review — ${v.reason}`;
     }
+    // Colour fallback: the vision model reports each image's product colour on
+    // the same call. When neither the title, description, nor attributes named
+    // a colour, that side shows "Not stated" — fill it from the image so the
+    // reviewer sees an actual value. Image-derived colours are informative, not
+    // authoritative: a disagreement raises at most a "warning" (the visual
+    // verdict above already hard-flags a genuinely different colour variant).
+    if (v.colours) applyImageColourFallback(t.result, v.colours);
     t.result.status = rollupStatus(t.result);
   });
+}
+
+/** Canonicalise a free-text colour the vision model reported ("dark brown",
+ *  "navy blue") onto the shared vocabulary; unrecognised text passes through. */
+function canonicaliseSeenColour(seen: string | null): string | null {
+  if (!seen) return null;
+  // Longest match wins ("rosewood" is rosewood/brown, not the "rose" inside it).
+  const known = COLOUR_TERMS.filter((c) => seen === c || seen.includes(c))
+    .sort((a, b) => b.length - a.length)[0];
+  return known ? canonicalColour(known) : seen;
+}
+
+/** Base colour family for lenient comparison: "navy blue" → "blue". */
+function colourFamily(c: string): string {
+  return c.split(" ").pop() ?? c;
+}
+
+function applyImageColourFallback(
+  result: VerifyResult,
+  colours: { catalog: string | null; marketplace: string | null },
+): void {
+  const field = result.fields.find((f) => f.field === "colour");
+  if (!field) return;
+  const catalogSeen = canonicaliseSeenColour(colours.catalog);
+  const marketSeen = canonicaliseSeenColour(colours.marketplace);
+  let filled = false;
+  if (field.stored === "Not stated" && catalogSeen) {
+    field.stored = `${catalogSeen} (from image)`;
+    filled = true;
+  }
+  if (field.live === "Not stated" && marketSeen) {
+    field.live = `${marketSeen} (from image)`;
+    filled = true;
+  }
+  if (!filled) return;
+  // Re-judge now that both sides may have a value. Strip the provenance suffix
+  // and compare by base family so "navy blue" vs "blue" doesn't raise noise.
+  const stored = field.stored.replace(/ \(from image\)$/, "");
+  const live = field.live.replace(/ \(from image\)$/, "");
+  if (stored === "Not stated" || live === "Not stated") {
+    field.note = "Colour read from the product image — the other side is still not stated.";
+    return;
+  }
+  if (colourFamily(canonicaliseSeenColour(stored)!) === colourFamily(canonicaliseSeenColour(live)!)) {
+    field.match = true;
+    field.severity = "ok";
+    field.note = "Colour confirmed from the product images.";
+  } else {
+    field.match = false;
+    field.severity = "warning";
+    field.note = `Catalog colour "${stored}" vs colour seen in the marketplace image "${live}" — verify visually.`;
+  }
 }
 
 // ── AI semantic title comparison (Walmart post-pass) ──────────────────────────
@@ -1488,10 +1547,19 @@ function compareToLive(
   // (N > 1), or vice-versa, that is a definitive mismatch regardless of word similarity.
   const vendorDesc = String((p.vendorData as Record<string,unknown> | null)?.description ?? p.description ?? "");
   const liveDesc = String(liveData.description ?? liveData.shortDescription ?? liveData.longDescription ?? "");
-  const vendorQty = extractPackQty(p.name, vendorDesc);
-  const liveQty = extractPackQty(liveTitle, liveDesc);
+  const vendorPack = extractPackInfo(p.name, vendorDesc);
+  const livePack = extractPackInfo(liveTitle, liveDesc);
+  const vendorQty = vendorPack.qty;
+  const liveQty = livePack.qty;
+  // A quantity difference only counts as a pack mismatch when the signal is
+  // trustworthy: at least one side states packaging explicitly ("Pack of 6",
+  // "Set of 3"), or both sides carry an explicit count. A weak counting word on
+  // one side alone ("3-Piece Sectional Sofa" vs a plain live title) describes
+  // the product's parts, not a multipack, and must not flag.
+  const packComparable =
+    vendorPack.strong || livePack.strong || (vendorPack.explicit && livePack.explicit);
   let titleNote: string | undefined;
-  if (vendorQty !== liveQty) {
+  if (vendorQty !== liveQty && packComparable) {
     titleSeverity = "mismatch";
     titleNote = vendorQty === 1
       ? `Catalog is a single unit, but ${marketplace} title is a multipack (qty ${liveQty})`
@@ -1667,10 +1735,14 @@ function compareToLive(
     field: "pack", label: "Pack / Set Qty",
     stored: String(vendorQty),
     live: String(liveQty),
-    match: vendorQty === liveQty,
-    severity: vendorQty === liveQty ? "ok" : "mismatch",
+    match: vendorQty === liveQty || !packComparable,
+    severity: vendorQty === liveQty || !packComparable ? "ok" : "mismatch",
     ...(vendorQty !== liveQty
-      ? { note: `Pack quantity differs: catalog ${vendorQty} vs ${marketplace} ${liveQty}` }
+      ? {
+          note: packComparable
+            ? `Pack quantity differs: catalog ${vendorQty} vs ${marketplace} ${liveQty}`
+            : `Counting word on one side only ("${vendorQty !== 1 ? vendorQty : liveQty} piece/pcs/units") reads as product parts, not a multipack — not flagged.`,
+        }
       : {}),
   });
 
@@ -2172,6 +2244,15 @@ const COLOUR_TERMS = [
   "hunter", "crimson", "scarlet", "ruby", "indigo", "cobalt", "denim",
   "blush", "rose", "salmon", "slate", "graphite", "pewter", "sand",
   "oatmeal", "linen",
+  // Wood-species finishes — furniture and home-goods titles state the finish
+  // ("Oak Console Table", "Mahogany Bookshelf") where the marketplace attribute
+  // says the base colour. These were missing entirely, so every such product
+  // reported "Not stated" even though the colour was right there in the title.
+  "oak", "mahogany", "maple", "pine", "teak", "birch", "cedar", "rosewood",
+  "cherry",
+  // Fashion / decor shades that appear in titles but were unrecognised.
+  "champagne", "plum", "lilac", "fuchsia", "rust", "terracotta", "camel",
+  "smoke", "greige", "gunmetal",
 ] as const;
 
 /**
@@ -2200,6 +2281,21 @@ function canonicalColour(c: string): string {
     blush: "pink", rose: "pink", salmon: "pink",
     slate: "grey", graphite: "grey", pewter: "grey",
     sand: "beige", oatmeal: "beige", linen: "beige",
+    // Wood-species finishes fold onto their colour family the way marketplaces
+    // attribute them: most wood tones are listed as "brown"; cherry wood is
+    // reddish and cherry prints are red, so cherry folds to red; birch/maple
+    // are pale woods marketplaces typically call "natural" or "beige".
+    oak: "brown", mahogany: "brown", teak: "brown", cedar: "brown",
+    rosewood: "brown", pine: "brown",
+    cherry: "red",
+    maple: "beige", birch: "beige",
+    champagne: "gold",
+    plum: "purple", lilac: "purple",
+    fuchsia: "pink",
+    rust: "orange", terracotta: "orange",
+    camel: "tan",
+    smoke: "grey", greige: "grey", gunmetal: "grey",
+    mint: "green", lime: "green",
     gray: "grey",
     "light gray": "light grey",
     "dark gray": "dark grey",
@@ -2243,7 +2339,10 @@ export function extractColour(
       // batch of false differences (e.g. stainless steel vs multi-color), so
       // read it as "not stated" and fall through to the text scan.
       if (/^multi[\s-]?colou?r(ed)?$/.test(val) || val === "assorted" || val === "various") break;
-      const known = COLOUR_TERMS.find((c) => val === c || val.includes(c));
+      // Longest match wins so "rosewood" resolves as rosewood (brown), not the
+      // "rose" (pink) buried inside it.
+      const known = COLOUR_TERMS.filter((c) => val === c || val.includes(c))
+        .sort((a, b) => b.length - a.length)[0];
       if (known) return canonicalColour(known);
       // An unrecognised attribute value is still the marketplace's stated
       // colour — report it rather than pretending none exists.
@@ -2259,33 +2358,63 @@ export function extractColour(
   return null;
 }
 
-export function extractPackQty(title: string, description = ""): number {
-  // Check title first, then description as fallback
-  for (const src of [title, description].filter(Boolean)) {
-    const t = src.toLowerCase();
-    const patterns: RegExp[] = [
-      /pack[- ]?of[- ]?(\d+)/,             // "pack of 6", "pack-of-6", "pack of5"
-      /\(\s*pack[- ]?of[- ]?(\d+)\s*\)/,   // "(Pack of 5)"
-      /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
-      /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
-      /(\d+)[- ]?case\b/,                  // "10-case", "10 case"
-      /set[- ]?of[- ]?(\d+)/,              // "set of 3", "set of3"
-      /(\d+)[- ]?(?:pieces?|pcs?)\b/,      // "6 pieces", "6 pcs", "6pc"
-      /(\d+)[- ]?(?:count|ct)\b/,          // "6 count", "6ct"
-      /(\d+)[- ]?pk\b/,                    // "6pk", "6-pk"
-      /box[- ]?of[- ]?(\d+)/,              // "box of 12", "box of12"
-      /bundle[- ]?of[- ]?(\d+)/,           // "bundle of 4", "bundle of4"
-      /multipack[- ]?of[- ]?(\d+)/,        // "multipack of 3"
-      /(\d+)[- ]units?\b/,                 // "6 units"
-      /qty[: ]+(\d+)/,                     // "qty: 6"
-      /\((\d+)\s*(?:pack|count|ct|pk|pcs?|pieces?|case)\)/, // "(6 pack)", "(12 ct)", "(5 case)"
-    ];
-    for (const re of patterns) {
+/**
+ * Pack-quantity extraction with a signal-strength grade.
+ *
+ * STRONG patterns state packaging explicitly ("Pack of 6", "Set of 3", "12 ct")
+ * and are reliable on their own. WEAK patterns are counting words that titles
+ * also use for a product's PARTS: "3-Piece Sectional Sofa" is one sofa in three
+ * modules, not a 3-pack, and "iPhone 15 Case" is not 15 of anything (which is
+ * why a bare "N case" pattern was removed — "case of N" remains, as that
+ * word order really does mean packaging). A weak signal on one side alone must
+ * therefore never flag a pack mismatch; the caller uses `strong`/`explicit`
+ * to decide what is comparable.
+ */
+export function extractPackInfo(
+  title: string,
+  description = "",
+): { qty: number; strong: boolean; explicit: boolean } {
+  const sources = [title, description].filter(Boolean).map((s) => s.toLowerCase());
+
+  const STRONG: RegExp[] = [
+    /pack[- ]?of[- ]?(\d+)/,             // "pack of 6", "pack-of-6", "pack of5"
+    /\(\s*pack[- ]?of[- ]?(\d+)\s*\)/,   // "(Pack of 5)"
+    /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
+    /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
+    /set[- ]?of[- ]?(\d+)/,              // "set of 3", "set of3"
+    /(\d+)[- ]?(?:count|ct)\b/,          // "6 count", "6ct"
+    /(\d+)[- ]?pk\b/,                    // "6pk", "6-pk"
+    /box[- ]?of[- ]?(\d+)/,              // "box of 12", "box of12"
+    /bundle[- ]?of[- ]?(\d+)/,           // "bundle of 4", "bundle of4"
+    /multipack[- ]?of[- ]?(\d+)/,        // "multipack of 3"
+    /qty[: ]+(\d+)/,                     // "qty: 6"
+    /\((\d+)\s*(?:pack|count|ct|pk|pcs?|pieces?)\)/, // "(6 pack)", "(12 ct)", "(3 pcs)"
+  ];
+  const WEAK: RegExp[] = [
+    /(\d+)[- ]?(?:pieces?|pcs?)\b/,      // "6 pieces", "6 pcs", "6pc"
+    /(\d+)[- ]units?\b/,                 // "6 units"
+  ];
+
+  // Strong patterns win across BOTH sources before any weak pattern is
+  // consulted: an explicit "Pack of 4" in the description is more reliable
+  // than a "4-piece" in the title.
+  for (const t of sources) {
+    for (const re of STRONG) {
       const m = t.match(re);
-      if (m) return parseInt(m[1]!, 10);
+      if (m) return { qty: parseInt(m[1]!, 10), strong: true, explicit: true };
     }
   }
-  return 1;
+  for (const t of sources) {
+    for (const re of WEAK) {
+      const m = t.match(re);
+      if (m) return { qty: parseInt(m[1]!, 10), strong: false, explicit: true };
+    }
+  }
+  return { qty: 1, strong: false, explicit: false };
+}
+
+export function extractPackQty(title: string, description = ""): number {
+  return extractPackInfo(title, description).qty;
 }
 
 // ── Model-number helpers ──────────────────────────────────────────────────────

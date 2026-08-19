@@ -64,4 +64,24 @@ describe("extractColour", () => {
   it("ignores an empty attribute and falls back to text", () => {
     expect(extractColour("Widget Yellow", { color: "" })).toBe("yellow");
   });
+
+  it("recognises wood-species finishes and folds them onto colour families", () => {
+    // These were missing entirely — every "Oak Console Table" style title
+    // reported "Not stated" (client-reported gap).
+    expect(extractColour("Oak Console Table")).toBe("brown");
+    expect(extractColour("Mahogany Bookshelf 5-Tier")).toBe("brown");
+    expect(extractColour("Teak Patio Bench")).toBe("brown");
+    expect(extractColour("Maple Cutting Board")).toBe("beige");
+  });
+
+  it("recognises the newly added decor shades", () => {
+    expect(extractColour("Champagne Table Runner")).toBe("gold");
+    expect(extractColour("Terracotta Plant Pot 8 inch")).toBe("orange");
+    expect(extractColour("Plum Velvet Cushion")).toBe("purple");
+    expect(extractColour("Widget", { color: "Rust" })).toBe("orange");
+  });
+
+  it("prefers the longest attribute match over an embedded shorter term", () => {
+    expect(extractColour("Widget", { color: "Rosewood" })).toBe("brown");
+  });
 });

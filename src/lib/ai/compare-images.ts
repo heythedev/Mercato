@@ -11,6 +11,11 @@ export type ImageCompareResult = {
    *  and a later retry could succeed. Absent when the model actually looked at
    *  both images and said UNSURE — that verdict is final. */
   retryable?: boolean;
+  /** Product colour as seen in each image, reported by the vision model on the
+   *  same call. Used to fill a "Not stated" colour side in the verify report
+   *  when neither the title nor the attributes named one. null = the model
+   *  could not tell (or the call never reached the model). */
+  colours?: { catalog: string | null; marketplace: string | null };
 };
 
 // ── Image download ────────────────────────────────────────────────────────────
@@ -231,15 +236,32 @@ const VISION_PROMPT =
   `  (e.g. black frame vs white frame, chrome vs matte black, natural wood vs painted).\n\n` +
   `UNSURE when the image quality is too poor or the product is not clearly visible.\n\n` +
   `Answer on the first line with exactly one word: MATCH, MISMATCH, or UNSURE.\n` +
-  `Second line: one-sentence reason (be specific about what matches or differs).`;
+  `Second line: one-sentence reason (be specific about what matches or differs).\n` +
+  `Third line: COLOR: <main colour of the product in Image 1> | <main colour of the product in Image 2>\n` +
+  `Use one or two plain lowercase colour words per side (e.g. "COLOR: navy blue | navy blue");` +
+  ` write "unknown" for a side you cannot determine.`;
+
+/** Normalise one side of the COLOR line; junk and non-answers become null. */
+function parseColourWord(raw: string | undefined): string | null {
+  const v = (raw ?? "").trim().toLowerCase().replace(/[."']/g, "");
+  if (!v || v === "unknown" || v === "n/a" || v === "none" || v.length > 25) return null;
+  return v;
+}
 
 function parseVisionResponse(text: string): ImageCompareResult {
   const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
   const first = (lines[0] ?? "").toUpperCase();
-  const reason = lines.slice(1).join(" ") || "No reason given";
-  if (first.startsWith("MATCH")) return { verdict: "match", reason };
-  if (first.startsWith("MISMATCH")) return { verdict: "mismatch", reason };
-  return { verdict: "unsure", reason };
+  const colourLine = lines.find((l) => /^colou?rs?\s*:/i.test(l));
+  const reason =
+    lines.slice(1).filter((l) => l !== colourLine).join(" ") || "No reason given";
+  let colours: ImageCompareResult["colours"];
+  if (colourLine) {
+    const [catalog, marketplace] = colourLine.replace(/^colou?rs?\s*:/i, "").split("|");
+    colours = { catalog: parseColourWord(catalog), marketplace: parseColourWord(marketplace) };
+  }
+  if (first.startsWith("MATCH")) return { verdict: "match", reason, colours };
+  if (first.startsWith("MISMATCH")) return { verdict: "mismatch", reason, colours };
+  return { verdict: "unsure", reason, colours };
 }
 
 // ── Single pair comparison ─────────────────────────────────────────────────────
@@ -284,7 +306,7 @@ export async function compareProductImages(
           ],
         },
       ],
-      maxOutputTokens: 150,
+      maxOutputTokens: 200,
     });
     return parseVisionResponse(text);
   } catch {
@@ -354,7 +376,7 @@ export async function compareVendorAgainstAllImages(
           ],
         },
       ],
-      maxOutputTokens: 150,
+      maxOutputTokens: 200,
     });
     return parseVisionResponse(text);
   } catch {

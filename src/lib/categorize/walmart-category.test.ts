@@ -2,11 +2,21 @@ import { describe, it, expect } from "vitest";
 import { implausibleWalmartCategory, parseWalmartCategoryPath } from "./walmart-category";
 
 describe("parseWalmartCategoryPath", () => {
-  it("strips the Home Page prefix and joins with arrows", () => {
+  it("strips the Home Page prefix and collapses deep paths to top level + leaf", () => {
+    // Walmart returns 2–6 levels; the client's taxonomy is exactly 2, so the
+    // middle segments are dropped.
     expect(parseWalmartCategoryPath("Home Page/Home Improvement/Tools/Hand Tools/Hand Saws"))
       .toEqual({
         category: "Hand Saws",
-        path: "Home Improvement > Tools > Hand Tools > Hand Saws",
+        path: "Home Improvement > Hand Saws",
+      });
+  });
+
+  it("keeps a 2-level path unchanged", () => {
+    expect(parseWalmartCategoryPath("Home Page/Home Improvement/Hand Saws"))
+      .toEqual({
+        category: "Hand Saws",
+        path: "Home Improvement > Hand Saws",
       });
   });
 

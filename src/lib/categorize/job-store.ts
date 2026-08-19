@@ -15,6 +15,13 @@ export type CategorizeResultSummary = {
   reprocessed: number;
   enrichedFromSku: number;
   categories: string[];
+  /** Walmart only: spec product types assigned / needed in this run. A run
+   *  where the spec pass failed used to report plain success — the export
+   *  then silently fell back to category-leaf values, which was the root of
+   *  "only 6/45 Spec Product Types correct" in client review. */
+  specTypesAssigned?: number;
+  specTypesRequested?: number;
+  specTypeError?: string;
 };
 
 type CategorizeJob = {

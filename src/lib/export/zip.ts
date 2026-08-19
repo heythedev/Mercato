@@ -1168,9 +1168,25 @@ async function fillTemplateXlsx(
   // Map a categorized value (a rich "A > B > C" path, or already a flat value)
   // down to one of the 75 categories the Walmart template dropdown accepts.
   // Loaded lazily so non-Walmart exports never touch the taxonomy files.
-  const { mapToTemplateCategory } = isWalmart
+  const { mapToTemplateCategory, loadWalmartProductTypes } = isWalmart
     ? await import("@/lib/ai/walmart-taxonomy")
-    : { mapToTemplateCategory: (): string | null => null };
+    : {
+        mapToTemplateCategory: (): string | null => null,
+        loadWalmartProductTypes: (): string[] | null => null,
+      };
+
+  // Normalized set of official Walmart product types. Identifies the per-category
+  // column GROUPS some item-match templates carry — 12+ groups of four columns
+  // keyed "<Product Type>_condition|_mainImageUrl|_productSecondaryImageURL|
+  // _productName" (e.g. "Kitchen_Towels_condition"). Built lazily: only a
+  // Walmart export that actually hits such a column pays for the load.
+  let _wmPtNkSet: Set<string> | null = null;
+  const walmartPtNk = (): Set<string> => {
+    if (!_wmPtNkSet) {
+      _wmPtNkSet = new Set((loadWalmartProductTypes() ?? []).map((t) => normalizeKey(t)));
+    }
+    return _wmPtNkSet;
+  };
 
   // Shipping weight is a required numeric field and Walmart rejects a blank or
   // zero value, so a product whose vendor sheet has no usable weight gets a
@@ -1306,6 +1322,23 @@ async function fillTemplateXlsx(
         // If raw is still empty after the live path check, leave it blank rather
         // than writing an invalid value — mapToTemplateCategory handles the rest.
         if (raw.trim()) raw = mapToTemplateCategory(raw) ?? "";
+      }
+
+      // Per-category column groups ("Kitchen_Towels_condition", "Coasters_mainImageUrl",
+      // …): the template repeats the same four fields once per product type, and a
+      // product's values belong ONLY in its own type's group — every other group's
+      // cells stay blank. These keys resolved nothing before, so ALL of them exported
+      // blank, which the client reported as "categories not filled in the download".
+      const groupCol = /^(.+)[_ ](condition|productSecondaryImageURL|mainImageUrl|productName)$/i
+        .exec(String(col.key ?? ""));
+      if (groupCol && walmartPtNk().has(normalizeKey(groupCol[1]))) {
+        const specPt =
+          (p as { specProductType?: string | null }).specProductType
+          || (p as { categoryPath?: string | null }).categoryPath?.split(" > ").at(-1)
+          || "";
+        if (normalizeKey(specPt) !== normalizeKey(groupCol[1])) return "";
+        // Same value the bare field would get ("condition" → "New", etc.).
+        return String(getProductField(p, groupCol[2]) ?? "");
       }
     }
 
@@ -2101,6 +2134,19 @@ function getProductField(p: Product, key: string): unknown {
     productname: p.name || fromVendor("title", "product_name", "name") || "",
     productidtype: upcNorm ? (upcNorm.replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
     productid: upcNorm || normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) || "",
+
+    // ── Walmart item-match template compound field codes ──────────────────────
+    // Some item-match templates store row-1 MACHINE keys like
+    // "productIdentifiers_productId" (parent object + child, joined by "_").
+    // Those normalize to "productidentifiersproductid" etc., which none of the
+    // bare aliases above resolve — so every UPC cell exported blank even though
+    // the catalog had a UPC for all 500 products (client-reported). Map each
+    // compound form to the same values as its bare counterpart.
+    productidentifiers_productid: upcNorm || normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) || "",
+    productidentifiers_productidtype: upcNorm ? (upcNorm.replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
+    externalproductidentifier_externalproductid: upcNorm || normBarcode(fromVendor("upc", "ean", "gtin", "barcode")) || "",
+    externalproductidentifier_externalproductidtype: upcNorm ? (upcNorm.replace(/\D/g, "").length === 13 ? "EAN" : "UPC") : "",
+    inventory_quantity: fromVendor("quantity", "qty", "stock", "inventory", "available_qty", "on_hand") ?? "1",
     countryoforiginsubstantialtransformation:
       fromVendor("origin", "country_of_origin", "country", "made_in", "coo") ?? "",
     shortdescription: descriptionText || "",

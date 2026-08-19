@@ -614,6 +614,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Walmart: for products that didn't get a Spec Product Type from live Seller API
     // data, use AI to assign one from Walmart's PT taxonomy. Skip products already
     // covered above — live data is more accurate than AI inference.
+    let specTypesRequested = 0;
+    let specTypesAssigned = 0;
+    let specTypeError: string | undefined;
     if (mpLower === "walmart") {
       // All products (including those that went through the Walmart category path)
       // need a spec type. Use all project products minus those already assigned from
@@ -636,7 +639,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             where,
             orderBy: { id: "asc" },
             take: PAGE_SIZE,
-            select: { id: true, name: true, brand: true, description: true },
+            select: { id: true, name: true, brand: true, description: true, categoryPath: true },
           });
           if (page.length === 0) break;
           cursor = page[page.length - 1].id;
@@ -647,11 +650,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               name: p.name,
               brand: p.brand,
               description: p.description,
-              category: existingCatById.get(p.id) ?? null,
+              // The full "Category > Product Type Group" path scopes the spec
+              // prompt to that group's types. The flat category leaf (fallback)
+              // resolves no group, which degraded the prompt to the full ~7K
+              // type list and tanked accuracy.
+              category: p.categoryPath ?? existingCatById.get(p.id) ?? null,
             });
           }
         }
       }
+      specTypesRequested = specInputs.length;
       if (specInputs.length > 0) {
         try {
           setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
@@ -662,7 +670,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               prisma.product.update({ where: { id: productId }, data: { specProductType } }),
             );
           }
+          specTypesAssigned = specMap.size;
         } catch (err) {
+          // Surfaced in the job summary — a failed spec pass must not report as
+          // a clean run (the export would silently fall back to category-leaf
+          // values, which are usually NOT valid Walmart spec product types).
+          specTypeError = err instanceof Error ? err.message : String(err);
           console.warn("[categorize] spec product-type assignment failed:", err);
         }
       }
@@ -687,6 +700,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       unmatched,
       reprocessed: productInputs.length,
       enrichedFromSku: enrichedCount,
+      ...(mpLower === "walmart"
+        ? { specTypesRequested, specTypesAssigned, ...(specTypeError ? { specTypeError } : {}) }
+        : {}),
       categories:
         mpLower === "temu"
           ? ["(temu_categories.csv taxonomy)"]
