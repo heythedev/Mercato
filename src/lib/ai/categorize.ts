@@ -118,6 +118,11 @@ export type ProductInput = {
   sku?: string | null;            // vendor SKU — resolution key for SKU-only sheets
   vendorCategory?: string | null;
   vendorContext?: string | null;  // additional vendor fields: age_group, gender, season, etc.
+  // Navigation breadcrumb of the live Walmart.com listing this product was
+  // matched to during verification ("Home > Shop All Wall Sconces"). Strong
+  // evidence of what the product is, but site navigation — never a valid
+  // taxonomy answer, so it is passed as a hint instead of written directly.
+  walmartBreadcrumb?: string | null;
 };
 
 export type CategorizeResult = {
@@ -694,6 +699,7 @@ async function categorizeBatchWithContext(
     if (p.description) line += ` — ${p.description.slice(0, 150)}`;
     if (p.vendorCategory) line += ` [vendor category: ${p.vendorCategory}]`;
     if (p.vendorContext) line += ` [vendor info: ${p.vendorContext}]`;
+    if (p.walmartBreadcrumb) line += ` [walmart listing breadcrumb: ${p.walmartBreadcrumb}]`;
     if (p.searchContext) line += `\n   [web search context: ${p.searchContext.slice(0, 300)}]`;
     return line;
   }).join("\n");
@@ -910,7 +916,8 @@ WALMART EVIDENCE RULES (mandatory):
 2. A missing or generic [vendor category] changes nothing — infer entirely from the product name and description; never output "Uncategorized" just because catalog fields are blank.
 3. Products sharing a near-identical [vendor category] label are NOT necessarily the same kind of item — categorize each one independently from its own name.
 4. Prefer the most SPECIFIC listed entry the product name supports — never settle for a broad or generic entry when a narrower one plainly fits.
-5. Report confidence honestly: 0.8+ only when the name clearly identifies the product AND one listed entry plainly fits; 0.5 or below when you are guessing between plausible entries — low confidence routes the product to human review instead of silently publishing a guess.` : "";
+5. Report confidence honestly: 0.8+ only when the name clearly identifies the product AND one listed entry plainly fits; 0.5 or below when you are guessing between plausible entries — low confidence routes the product to human review instead of silently publishing a guess.
+6. A [walmart listing breadcrumb] tag is the navigation trail of the live Walmart.com listing this product was matched to — STRONG evidence of what the product is (stronger than [vendor category]), but it is site navigation, NOT a taxonomy entry: use it to choose the closest listed entry, and never copy it into the answer unless it appears verbatim in the list.` : "";
 
   // Walmart's own category list legitimately includes single-word values like
   // "Other", "Furniture" and "Toys", so the generic "never output these" rule

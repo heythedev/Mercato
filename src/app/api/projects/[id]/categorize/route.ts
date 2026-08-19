@@ -18,6 +18,10 @@ import {
   implausibleWalmartCategory,
   parseWalmartCategoryPath,
 } from "@/lib/categorize/walmart-category";
+import {
+  loadWalmartRichTaxonomy,
+  loadWalmartProductTypes,
+} from "@/lib/ai/walmart-taxonomy";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
@@ -290,36 +294,48 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Build ProductInput with vendor category hint + supplemental context fields
     const productInputsAll: ProductInput[] = [];
 
-    // ── Walmart's own category, harvested during verification ──────────────────
+    // ── Walmart live-listing data, harvested during verification ───────────────
     // When a product was matched to a real Walmart listing, that listing carries
-    // Walmart's category path — the authoritative answer for a Walmart export,
-    // and far more specific than a model guess ("Home Improvement > Paint >
-    // Paint Supplies & Tools > Putty Knives" vs "Tools"). Using it costs nothing
-    // (already fetched and stored) and removes the product from the AI queue.
+    // a category breadcrumb (`liveData.categoryPath`) and — when the Seller API
+    // was the match source — a productType. Both are validated against Walmart's
+    // item taxonomy before they are trusted:
     //
-    // "UNNAV" is Walmart's placeholder for items with no navigable category, so
-    // it is not a usable answer and those products fall through to the AI.
+    //   - The breadcrumb is Walmart.com SITE NAVIGATION ("Home Page/Home/Decor/
+    //     Shop All Wall Sconces"), not a seller item-taxonomy entry. Measured on
+    //     a real project, 45/49 breadcrumbs were navigation labels that exist
+    //     nowhere in the taxonomy — writing them through verbatim is what put
+    //     invented-looking values like "Shop All Wall Sconces" in exports. So a
+    //     breadcrumb is accepted ONLY when it exactly matches one of the
+    //     taxonomy's "Category > Product Type Group" paths (and is stored in the
+    //     taxonomy's own casing); otherwise the product goes to the AI with the
+    //     breadcrumb attached as a hint — evidence, not an answer.
     //
-    // Walmart's taxonomy is authoritative for a Walmart export, but its own
-    // filing is not always right: measured on a real 7k catalog, 13% of Bon
-    // masonry tools sat under a non-tool top level — a concrete "Animal Track
-    // Stamp" under Arts & Crafts > Scrapbooking, a masonry "Lewis Pin" under
-    // Auto Parts, a texture stamp under Home > Rugs > Doormats (because the
-    // name contains "Mat"). Those are Walmart's errors riding along with an
-    // otherwise correct product match.
+    //   - Even an exact taxonomy match can be Walmart's own misfiling (a masonry
+    //     "Lewis Pin" under Auto Parts, an "Animal Track Stamp" under
+    //     Scrapbooking — keyword-driven errors measured at ~13% on a 7k
+    //     trade-tool catalog), so `implausibleWalmartCategory` still applies.
     //
-    // So a path is only taken when it is plausible for the product, and
-    // implausible ones fall through to the AI instead of being accepted
-    // silently. `implausibleWalmartCategory` holds that judgement.
+    //   - "UNNAV" is Walmart's placeholder for items with no navigable category;
+    //     parseWalmartCategoryPath already rejects it.
     const walmartCategoryById = new Map<string, { category: string; path: string }>();
-    // Spec Product Type from the Seller API live data. When the verification step
-    // matched via the Seller API the response includes productType — the exact
-    // value Walmart uses for that listing. This is more reliable than AI assignment
-    // so we persist it directly and skip those products in the AI pass below.
+    // Spec Product Type from the Seller API live data — the exact value Walmart
+    // has on file for that listing. More reliable than AI assignment, so it is
+    // persisted directly (once validated) and those products skip the AI spec
+    // pass below.
     const walmartSpecTypeById = new Map<string, string>();
     // Existing category per product — drives repeatable re-runs and the final counts.
     const existingCatById = new Map<string, string | null>();
     let walmartRejected = 0;
+    let walmartSpecRejected = 0;
+
+    // Canonical taxonomy lookups: normalized value → verbatim taxonomy value.
+    const normTax = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const walmartPathByNorm = new Map<string, string>();
+    const walmartSpecByNorm = new Map<string, string>();
+    if (mpLower === "walmart") {
+      for (const path of loadWalmartRichTaxonomy() ?? []) walmartPathByNorm.set(normTax(path), path);
+      for (const t of loadWalmartProductTypes() ?? []) walmartSpecByNorm.set(normTax(t), t);
+    }
 
     {
       let cursor: string | null = null;
@@ -350,6 +366,37 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         for (const p of page) {
           existingCatById.set(p.id, p.marketplaceCategory);
 
+          // Walmart live-listing data — parsed BEFORE the AI input is built so
+          // a rejected breadcrumb can ride along as a hint for the model.
+          let breadcrumbHint: string | null = null;
+          if (mpLower === "walmart") {
+            const ld = p.liveData as Record<string, unknown> | null;
+            // productType is present when the Seller API was the match source.
+            // Independent of the breadcrumb; stored only when it's a real
+            // taxonomy value (accepted as-is if the local list is unavailable).
+            const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
+            if (pt) {
+              const canonical = walmartSpecByNorm.size ? walmartSpecByNorm.get(normTax(pt)) : pt;
+              if (canonical) walmartSpecTypeById.set(p.id, canonical);
+              else walmartSpecRejected++;
+            }
+            const parsed = parseWalmartCategoryPath(ld?.categoryPath);
+            if (parsed) {
+              const canonicalPath = walmartPathByNorm.get(normTax(parsed.path));
+              if (canonicalPath && !implausibleWalmartCategory(p.name, canonicalPath)) {
+                walmartCategoryById.set(p.id, {
+                  category: canonicalPath.split(" > ").pop() ?? canonicalPath,
+                  path: canonicalPath,
+                });
+              } else {
+                // Site-navigation breadcrumb (or a misfiled listing) — not a
+                // taxonomy value. Hand the AI the evidence instead.
+                walmartRejected++;
+                breadcrumbHint = parsed.path;
+              }
+            }
+          }
+
           // Reuse existing categories for repeatable re-runs: unless `force`,
           // only send products that don't yet have a confident category (null
           // or "Uncategorized"). Already-categorized products are left
@@ -363,34 +410,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               sku: p.vendorSku,
               vendorCategory: extractVendorCategory(p.vendorData),
               vendorContext: extractVendorContext(p.vendorData),
+              walmartBreadcrumb: breadcrumbHint,
             });
           }
-
-          if (mpLower !== "walmart") continue;
-          const ld = p.liveData as Record<string, unknown> | null;
-          const parsed = parseWalmartCategoryPath(ld?.categoryPath);
-          if (!parsed) continue;
-          if (implausibleWalmartCategory(p.name, parsed.path)) { walmartRejected++; continue; }
-          walmartCategoryById.set(p.id, parsed);
-          // productType is present when the Seller API was the match source.
-          const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
-          if (pt) walmartSpecTypeById.set(p.id, pt);
         }
       }
     }
-    if (walmartRejected) {
+    if (walmartRejected || walmartSpecRejected) {
       console.log(
-        `[categorize] rejected ${walmartRejected} Walmart categories as implausible ` +
-          `for the product — those fall through to the AI`,
+        `[categorize] Walmart live-data validation: ${walmartRejected} breadcrumbs ` +
+          `are not item-taxonomy paths (passed to the AI as hints), ` +
+          `${walmartSpecRejected} spec types rejected as off-list`,
       );
     }
 
     let productInputs = productInputsAll;
 
-    // Apply Walmart's own categories first. These are authoritative for a
-    // Walmart export, so they are written straight through and skip the AI
-    // entirely — which also makes the run faster the more products verified
-    // successfully.
+    // Apply Walmart's own categories first — only breadcrumbs that validated
+    // as exact item-taxonomy paths above, so writing them straight through can
+    // never store an off-list value. They skip the AI entirely, which also
+    // makes the run faster the more products verified successfully.
     const fromWalmart = productInputs
       .filter((p) => walmartCategoryById.has(p.id))
       .map((p) => {
