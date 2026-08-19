@@ -29,6 +29,26 @@ describe("extractPackInfo", () => {
   it("defaults to a single unit when nothing is stated", () => {
     expect(extractPackInfo("Ceramic Mug")).toEqual({ qty: 1, strong: false, explicit: false });
   });
+
+  it("lets a real count beat a '(Pack of 1)' ship-pack suffix", () => {
+    // Vendor feeds append "(Pack of N)" ship quantity to every row; with N=1
+    // it must not mask the product's intrinsic count — this vetoed correct
+    // UPC matches and reported live Amazon products as Not Found.
+    expect(extractPackInfo("PENCIL DEEP REACH 5CT (Pack of 1)"))
+      .toEqual({ qty: 5, strong: true, explicit: true });
+    expect(extractPackInfo("STAPLE ARROW T50 15PK(Pack of 1)"))
+      .toEqual({ qty: 15, strong: true, explicit: true });
+  });
+
+  it("keeps a '(Pack of N)' suffix authoritative when N > 1", () => {
+    expect(extractPackInfo("AUST TMBR AMBRWD WF QT (Pack of 4)"))
+      .toEqual({ qty: 4, strong: true, explicit: true });
+  });
+
+  it("still reads a bare '(Pack of 1)' as a single unit", () => {
+    expect(extractPackInfo("BATTRY ALKLN DURA 9V CD2 (Pack of 1)"))
+      .toEqual({ qty: 1, strong: true, explicit: true });
+  });
 });
 
 describe("extractPackQty", () => {

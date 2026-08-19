@@ -2,7 +2,8 @@ import type { Product } from "@prisma/client";
 import type { KeepaProduct } from "@/lib/keepa/types";
 import { ASIN_RE, barcodeVariants, toDisplayBarcode, toGtin14 } from "@/lib/barcode";
 import {
-  getCachedCodeLookups, getCachedProducts, cacheCodeLookup, cacheCodeLookups,
+  getCachedCodeLookups, getCachedCascadeFailures, getCachedProducts,
+  cacheCodeLookup, cacheCodeLookups,
   cacheProducts, newCacheStats, logCacheStats,
 } from "@/lib/keepa/cache";
 
@@ -536,6 +537,12 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
   // (which may be stored as EAN-13) can be matched back to the originating product.
   const upcResults = new Map<string, VerifyResult>();
   const upcNotFound: Product[] = [];
+  // UPC-confirmed candidates set aside because every ASIN failed the pack
+  // filter. If keyword search later finds nothing better, this match — shown
+  // with its pack difference — is still the truthful answer; "not found" is
+  // not (the client verified these UPCs live on amazon.com by hand).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const upcPackIncompatible = new Map<string, any>();
   if (withUpcOnly.length) {
     const codeToProduct = new Map<string, Product>();
     for (const p of withUpcOnly) {
@@ -683,13 +690,22 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
         continue;
       }
 
-      // Cached "Amazon doesn't carry this barcode" — the answer is already
-      // known, so skip both the rescue call and the keyword cascade.
+      // Cached "Keepa doesn't map this barcode". That is a fact about KEEPA'S
+      // COVERAGE, not about Amazon — so skip only the pointless Keepa rescue,
+      // and still give Synccentric and the keyword cascade their chance
+      // instead of declaring the product missing outright.
       if (!candidates.length) {
         const g = toGtin14(resolvedUpc(p));
         if (g && cachedAbsent.has(g)) {
-          upcResults.set(p.id, notFound(p.id));
-          continue;
+          if (!sync.synccentricPrimary() && sync.synccentricConfigured()) {
+            const fb = await sync.searchByCode(barcodeVariants(resolvedUpc(p)));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            candidates = (normalizeMany(fb.products, 1) as any[]).filter(Boolean);
+          }
+          if (!candidates.length) {
+            upcNotFound.push(p);
+            continue;
+          }
         }
       }
 
@@ -711,35 +727,36 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
               rescuePending = fb.failedCodes;
             }
             let rescueFailed: string[] = [];
+            let keepaRescueAsins: string[] = [];
             if (rescuePending.length) {
               const kp = await getProductsByCode(KEEPA_DOMAIN, rescuePending, { stats: 1 });
               if (kp.products.length) await cacheProducts(KEEPA_DOMAIN, kp.products);
               rescueAll = [...rescueAll, ...kp.products];
               rescueFailed = kp.failedCodes;
+              keepaRescueAsins = [...new Set(
+                kp.products.map((r) => r.asin as string).filter(Boolean),
+              )];
             }
-            // Fallback mode: Synccentric rescues what Keepa never answered.
-            // rescueFailed keeps Keepa's value so a Synccentric answer is
-            // never recorded as a Keepa code lookup below.
-            if (rescueFailed.length && !sync.synccentricPrimary() && sync.synccentricConfigured()) {
-              const fb = await sync.searchByCode(rescueFailed);
+            // Record Keepa's own verdict when it answered every code — taken
+            // BEFORE Synccentric products are mixed in, so a Synccentric
+            // mapping is never cached as a Keepa fact. Caching an empty
+            // verdict is safe now: it only skips this rescue call next time,
+            // it no longer terminates verification (see cachedAbsent above).
+            if (!sync.synccentricPrimary() && !rescueFailed.length) {
+              const g = toGtin14(resolvedUpc(p));
+              if (g) await cacheCodeLookup(KEEPA_DOMAIN, g, keepaRescueAsins, "rescue");
+            }
+            // Fallback mode: Synccentric rescues what Keepa never answered —
+            // and what Keepa answered EMPTY. Keepa not mapping a barcode is a
+            // coverage gap, not proof the product is off Amazon (the client
+            // hand-verified UPCs from this bucket live on amazon.com).
+            if ((rescueFailed.length || !rescueAll.length) && !sync.synccentricPrimary() && sync.synccentricConfigured()) {
+              const fb = await sync.searchByCode(rescueFailed.length ? rescueFailed : rescueCodes);
               if (fb.products.length) rescueAll = [...rescueAll, ...fb.products];
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const rescueNorm = normalizeMany(rescueAll, 1) as any[];
             candidates = rescueNorm.filter(Boolean);
-            // Only record when Keepa itself answered every code — a failed
-            // rescue says nothing about whether the product exists, and a
-            // Synccentric-sourced mapping must not be cached as a Keepa fact.
-            if (!sync.synccentricPrimary() && !rescueFailed.length) {
-              const g = toGtin14(resolvedUpc(p));
-              if (g) {
-                await cacheCodeLookup(
-                  KEEPA_DOMAIN, g,
-                  candidates.map((c) => c?.asin as string).filter(Boolean),
-                  "rescue",
-                );
-              }
-            }
           } catch { /* fall through to upcNotFound */ }
         }
       }
@@ -755,6 +772,10 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       // can find the single-unit listing (often under a different UPC).
       const packCompatible = filterPackCompatible(p.name, candidates);
       if (!packCompatible.length) {
+        // Remember the best UPC-confirmed candidate before handing the
+        // product to keyword search: if no pack-compatible listing exists
+        // either, this match (pack difference visible) is the fallback.
+        upcPackIncompatible.set(p.id, pickBestCandidate(p, candidates));
         upcNotFound.push(p);
         continue;
       }
@@ -805,19 +826,41 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
   //  (b) products whose UPC Keepa couldn't match (upcNotFound fallback)
   const nameResults = new Map<string, VerifyResult>();
 
-  // A cached empty result means the full cascade already ran for this barcode
-  // and found nothing. Re-running it would spend ~8 searches to reach the same
-  // verdict, so answer from cache and keep them out of the pool entirely.
+  // When keyword search comes up empty for a product whose UPC DID match on
+  // Amazon (set aside above only because of pack quantity), report that match
+  // with the pack difference visible instead of "not found". A mismatch the
+  // reviewer can see beats a false negative — vendor feeds' "(Pack of N)"
+  // ship-pack suffixes made whole files of live products report Not Found.
+  const fallbackOrNotFound = (p: Product): VerifyResult => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const best: any = upcPackIncompatible.get(p.id);
+    if (!best) return notFound(p.id);
+    const result = compareToLive(
+      p, String(best.title ?? ""), (best.brand as string) ?? null, null,
+      best as Record<string, unknown>, "Amazon",
+    );
+    const resolved = resolvedUpc(p);
+    if (resolved && !p.upc) result.resolvedUpc = resolved;
+    return result;
+  };
+
+  // A cached KEYWORD-source empty means the full cascade already ran for this
+  // barcode and found nothing. Re-running it would spend ~8 searches to reach
+  // the same verdict, so answer from cache and keep them out of the pool.
+  // Batch/rescue empties don't qualify: they record a Keepa coverage gap and
+  // say nothing about what the search cascade would find — honoring them here
+  // also let rescue's own just-written negative skip the very cascade it was
+  // being sent to.
   const cascadeCodes = upcNotFound
     .map((p) => toGtin14(resolvedUpc(p)))
     .filter((g): g is string => !!g);
-  const knownAbsent = cascadeCodes.length
-    ? await getCachedCodeLookups(KEEPA_DOMAIN, cascadeCodes)
-    : new Map<string, string[]>();
+  const knownFailedCascade = cascadeCodes.length
+    ? await getCachedCascadeFailures(KEEPA_DOMAIN, cascadeCodes)
+    : new Set<string>();
   const stillUnknown = upcNotFound.filter((p) => {
     const g = toGtin14(resolvedUpc(p));
-    if (g && knownAbsent.get(g)?.length === 0) {
-      nameResults.set(p.id, notFound(p.id));
+    if (g && knownFailedCascade.has(g)) {
+      nameResults.set(p.id, fallbackOrNotFound(p));
       stats.codeHits++;
       return false;
     }
@@ -834,7 +877,13 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
         `[keepa-tokens] only ${tokenInfo.tokensLeft} left (need 200) — ` +
           `skipping keyword search for ${keywordPool.length} product${keywordPool.length === 1 ? "" : "s"}`,
       );
-      for (const p of keywordPool) nameResults.set(p.id, { productId: p.id, status: "skipped", fields: [], liveData: {} });
+      // Products with a set-aside UPC match still get that truthful answer —
+      // token exhaustion is no reason to discard a confirmed barcode hit.
+      for (const p of keywordPool) {
+        nameResults.set(p.id, upcPackIncompatible.has(p.id)
+          ? fallbackOrNotFound(p)
+          : { productId: p.id, status: "skipped", fields: [], liveData: {} });
+      }
       logCacheStats(stats);
       logTokenUsage();
       return [...discontinuedResults, ...activeProducts.map((p) =>
@@ -930,7 +979,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
           // Need at least one searchable word
           const nameWords = productName.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 2);
           if (!nameWords.length) {
-            for (const p of group) nameResults.set(p.id, notFound(p.id));
+            for (const p of group) nameResults.set(p.id, fallbackOrNotFound(p));
             return;
           }
 
@@ -1004,13 +1053,16 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
           if (!match) match = await searchAndPick(productName, 0.3);
 
           if (!match) {
-            for (const p of group) nameResults.set(p.id, notFound(p.id));
+            for (const p of group) nameResults.set(p.id, fallbackOrNotFound(p));
             // The full strategy cascade ran and found nothing. That verdict cost
             // ~8 searches to reach, so remember it — otherwise every re-upload of
             // the same file pays for the same cascade to reach the same answer.
             // (The catch below is deliberately not cached: an error means we
-            // never got a verdict.)
+            // never got a verdict. Products answered by their set-aside UPC
+            // match aren't cached either — their code DOES resolve, and an
+            // empty write would only be dropped by cacheCodeLookup's guard.)
             for (const p of group) {
+              if (upcPackIncompatible.has(p.id)) continue;
               const g = toGtin14(resolvedUpc(p));
               if (g) await cacheCodeLookup(KEEPA_DOMAIN, g, [], "keyword");
             }
@@ -1036,7 +1088,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
             }
           }
         } catch {
-          for (const p of group) nameResults.set(p.id, notFound(p.id));
+          for (const p of group) nameResults.set(p.id, fallbackOrNotFound(p));
         }
       }));
     }
@@ -1048,7 +1100,9 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
   // their previous DB state rather than overwriting with not_found.
   const activeResults = activeProducts.map((p) =>
     asinResults.get(p.id) ?? upcResults.get(p.id) ?? nameResults.get(p.id)
-    ?? { productId: p.id, status: "skipped" as const, fields: [] as FieldResult[], liveData: {} }
+    ?? (upcPackIncompatible.has(p.id)
+      ? fallbackOrNotFound(p)
+      : { productId: p.id, status: "skipped" as const, fields: [] as FieldResult[], liveData: {} })
   );
   logCacheStats(stats);
   logTokenUsage();
@@ -2376,9 +2430,14 @@ export function extractPackInfo(
 ): { qty: number; strong: boolean; explicit: boolean } {
   const sources = [title, description].filter(Boolean).map((s) => s.toLowerCase());
 
+  // "Pack of N" is matched apart from the other strong patterns: vendor feeds
+  // routinely append a "(Pack of 1)" ship-quantity suffix to every row, which
+  // would otherwise mask the product's real count ("5CT", "15PK") and veto the
+  // correct Amazon match. A "pack of 1" therefore yields to any other strong
+  // count in the same source; "pack of N>1" still wins outright, since that
+  // suffix genuinely describes a multipack.
+  const PACK_OF = /pack[- ]?of[- ]?(\d+)/;   // "pack of 6", "(Pack-of-6)", "pack of5"
   const STRONG: RegExp[] = [
-    /pack[- ]?of[- ]?(\d+)/,             // "pack of 6", "pack-of-6", "pack of5"
-    /\(\s*pack[- ]?of[- ]?(\d+)\s*\)/,   // "(Pack of 5)"
     /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
     /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
     /set[- ]?of[- ]?(\d+)/,              // "set of 3", "set of3"
@@ -2399,10 +2458,18 @@ export function extractPackInfo(
   // consulted: an explicit "Pack of 4" in the description is more reliable
   // than a "4-piece" in the title.
   for (const t of sources) {
+    const packOf = t.match(PACK_OF);
+    let other: RegExpMatchArray | null = null;
     for (const re of STRONG) {
       const m = t.match(re);
-      if (m) return { qty: parseInt(m[1]!, 10), strong: true, explicit: true };
+      if (m) { other = m; break; }
     }
+    if (packOf) {
+      const q = parseInt(packOf[1]!, 10);
+      if (q === 1 && other) return { qty: parseInt(other[1]!, 10), strong: true, explicit: true };
+      return { qty: q, strong: true, explicit: true };
+    }
+    if (other) return { qty: parseInt(other[1]!, 10), strong: true, explicit: true };
   }
   for (const t of sources) {
     for (const re of WEAK) {

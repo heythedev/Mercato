@@ -65,6 +65,12 @@ export async function getCachedCodeLookups(
 
   const out = new Map<string, string[]>();
   for (const r of rows) {
+    // An empty keyword row records "the search cascade failed once", NOT
+    // "Amazon doesn't carry this barcode" — a fuzzy search finding nothing is
+    // no evidence about a barcode. Treating it as an absence made re-verifies
+    // report live products as not_found after one bad cascade. These rows are
+    // only meaningful to getCachedCascadeFailures below.
+    if (r.source === "keyword" && !r.asins.length) continue;
     // A remembered "not on Amazon" is only good for so long.
     if (!r.asins.length && !isFresh(r.fetchedAt, NEGATIVE_TTL_MS)) continue;
     // Keyword matches were never authoritative — re-confirm them periodically.
@@ -72,6 +78,27 @@ export async function getCachedCodeLookups(
     out.set(r.code, r.asins);
   }
   return out;
+}
+
+/**
+ * Codes whose keyword-search cascade already ran to completion and found
+ * nothing (within the keyword TTL). Deliberately source-scoped: an empty
+ * batch/rescue row means "Keepa doesn't map this barcode", which says nothing
+ * about what a keyword search would find — only a keyword-source empty proves
+ * the cascade itself came up dry, so only those may skip a re-run.
+ */
+export async function getCachedCascadeFailures(
+  domain: number,
+  codes: string[],
+): Promise<Set<string>> {
+  if (CACHE_DISABLED) return new Set();
+  const keys = [...new Set(codes.map(toGtin14).filter((c): c is string => !!c))];
+  if (!keys.length) return new Set();
+
+  const rows = await prisma.keepaCodeLookup.findMany({
+    where: { domain, code: { in: keys }, source: "keyword", asins: { isEmpty: true } },
+  });
+  return new Set(rows.filter((r) => isFresh(r.fetchedAt, KEYWORD_TTL_MS)).map((r) => r.code));
 }
 
 /**
@@ -91,6 +118,20 @@ export async function cacheCodeLookup(
   if (!code) return;
   const data = { asins, source, fetchedAt: new Date() };
   try {
+    if (source === "keyword" && !asins.length) {
+      // A cascade failure must never overwrite a real code→ASIN mapping: the
+      // batch/rescue row shares this primary key, and clobbering it turned
+      // UPCs Keepa knows into permanent not_founds. Insert the memo only when
+      // there is no better fact already stored.
+      await prisma.$executeRaw`
+        INSERT INTO "KeepaCodeLookup" ("code", "domain", "asins", "source", "fetchedAt")
+        VALUES (${code}, ${domain}, ${asins}::text[], ${source}, NOW())
+        ON CONFLICT ("code", "domain") DO UPDATE
+          SET "source" = EXCLUDED."source",
+              "fetchedAt" = EXCLUDED."fetchedAt"
+          WHERE "KeepaCodeLookup"."asins" = '{}'::text[]`;
+      return;
+    }
     await prisma.keepaCodeLookup.upsert({
       where: { code_domain: { code, domain } },
       create: { code, domain, ...data },
