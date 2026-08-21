@@ -158,13 +158,22 @@ export async function GET() {
   const { user, response } = await authGuard();
   if (response) return response;
 
-  await recoverStaleProjects({ userId: user!.id });
+  try {
+    await recoverStaleProjects({ userId: user!.id });
 
-  const projects = await prisma.project.findMany({
-    where: { userId: user!.id },
-    include: { _count: { select: { products: true } } },
-    orderBy: { updatedAt: "desc" },
-  });
+    const projects = await prisma.project.findMany({
+      where: { userId: user!.id },
+      include: { _count: { select: { products: true } } },
+      orderBy: { updatedAt: "desc" },
+    });
 
-  return NextResponse.json(projects);
+    return NextResponse.json(projects);
+  } catch (err) {
+    // Surface the DB error instead of crashing into an empty-body 500 — the
+    // message names the failure (pool exhaustion, timeout, …), which platform
+    // logs on cold instances routinely swallow.
+    const msg = err instanceof Error ? err.message : "Failed to load projects";
+    console.error("[projects] GET failed:", msg);
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }
