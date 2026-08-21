@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// The app is self-hosted (`next start`), so this is our own ceiling rather than
-// a platform limit. A 10k-product Walmart run is the sizing target; 15 minutes
-// leaves headroom above the ~10 minute expected duration without letting a
-// genuinely stuck run hold a connection indefinitely.
-export const maxDuration = 900;
+// Vercel's Hobby-plan ceiling (Pro allows 800). A full 10k-product run takes
+// ~10 minutes, so it no longer fits one request — the time budget below stops
+// cleanly before the ceiling and the caller resumes, taking a few round-trips
+// per run instead of one.
+export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
