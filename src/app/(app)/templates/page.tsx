@@ -20,6 +20,8 @@ export default async function TemplatesPage() {
   const adminIds = adminUsers.map((u) => u.id);
   const adminIdSet = new Set(adminIds);
 
+  // Exclude fileData (BYTEA blob) — the raw workbook can't be serialized into
+  // the page payload and the client only needs the column definitions.
   const rawTemplates = await prisma.exportTemplate.findMany({
     where: {
       OR: [
@@ -28,6 +30,7 @@ export default async function TemplatesPage() {
         ...(adminIds.length > 0 ? [{ userId: { in: adminIds } }] : []),
       ],
     },
+    omit: { fileData: true },
     orderBy: { createdAt: "desc" },
   });
 

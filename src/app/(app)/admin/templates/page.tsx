@@ -6,7 +6,10 @@ import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 export default async function AdminTemplatesPage() {
   await requireAdmin();
 
+  // Exclude fileData (BYTEA blob) — the raw workbook can't be serialized into
+  // the page payload and the client only needs the column definitions.
   const templates = await prisma.exportTemplate.findMany({
+    omit: { fileData: true },
     orderBy: { createdAt: "desc" },
   });
 
