@@ -111,6 +111,57 @@ export async function readBodyCapped(res: Response, cap: number): Promise<Uint8A
   return out;
 }
 
+// ── Vision-upload compression ─────────────────────────────────────────────────
+// Moonshot bills vision input by image resolution, so a 2000px catalog original
+// costs several times the tokens of the same photo at 768px while telling the
+// model nothing extra for a same-product check. Downscaling before upload also
+// shrinks the request body and what the per-run cache pins in memory.
+
+// Longest side after compression. 768px keeps text/logos on packaging legible
+// while cutting a 1280–2000px original to a fraction of its vision tokens.
+const VISION_MAX_DIM = 768;
+// Images already at most this many bytes AND within the dimension cap are sent
+// as-is — recompressing a small JPEG only burns CPU to save pennies.
+const COMPRESS_SKIP_BYTES = 100 * 1024;
+const JPEG_QUALITY = 78;
+
+// sharp is a native module; load it lazily and treat a load failure as "no
+// compression available" so a broken binary degrades to uncompressed uploads
+// instead of taking the whole verify pipeline down with it.
+let sharpPromise: Promise<typeof import("sharp").default | null> | null = null;
+function loadSharp(): Promise<typeof import("sharp").default | null> {
+  sharpPromise ??= import("sharp").then((m) => m.default).catch(() => null);
+  return sharpPromise;
+}
+
+/**
+ * Downscale + re-encode an image for the vision model: longest side capped at
+ * 768px, JPEG output (first frame only for animated GIFs — the model looks at
+ * one frame anyway). Returns the ORIGINAL image untouched when it is already
+ * small, when re-encoding would grow it, or when sharp fails for any reason —
+ * compression must never be the reason a comparison breaks.
+ */
+export async function compressForVision(img: FetchedImage): Promise<FetchedImage> {
+  try {
+    const sharp = await loadSharp();
+    if (!sharp) return img;
+    const src = sharp(img.data, { failOn: "none" });
+    const meta = await src.metadata();
+    const longest = Math.max(meta.width ?? 0, meta.height ?? 0);
+    if (longest <= VISION_MAX_DIM && img.data.length <= COMPRESS_SKIP_BYTES) return img;
+    const out = await src
+      .rotate() // apply EXIF orientation before re-encoding strips it
+      .resize({ width: VISION_MAX_DIM, height: VISION_MAX_DIM, fit: "inside", withoutEnlargement: true })
+      .flatten({ background: "#ffffff" }) // JPEG has no alpha channel
+      .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
+      .toBuffer();
+    if (out.length >= img.data.length) return img;
+    return { data: new Uint8Array(out), mimeType: "image/jpeg" };
+  } catch {
+    return img;
+  }
+}
+
 async function fetchImage(url: string): Promise<FetchedImage | null> {
   if (!url?.startsWith("http")) return null;
 
@@ -129,7 +180,8 @@ async function fetchImage(url: string): Promise<FetchedImage | null> {
       if (!SUPPORTED_MIME.test(normMime)) continue;
       const buf = await readBodyCapped(res, MAX_IMAGE_BYTES);
       if (!buf || buf.length < 512) continue;
-      return { data: buf, mimeType: normMime };
+      // Compress BEFORE returning so the per-run cache stores the small bytes.
+      return compressForVision({ data: buf, mimeType: normMime });
     } catch {
       // timeout, network error — try next candidate
     }

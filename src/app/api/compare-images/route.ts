@@ -36,7 +36,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
 import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
-import { readBodyCapped } from "@/lib/ai/compare-images";
+import { readBodyCapped, compressForVision } from "@/lib/ai/compare-images";
 
 // Moonshot (OpenAI-compatible) supports jpeg, png, gif, webp — NOT avif.
 const ALLOWED_MIME = /^image\/(jpeg|jpg|png|gif|webp)$/i;
@@ -179,10 +179,14 @@ async function fetchImageAsBlock(url: string, signal: AbortSignal): Promise<Fetc
       if (buf === null) continue;
       if (buf.length < 512) continue; // probably an error body
 
+      // Downscale to ≤768px JPEG before the bytes go anywhere — cuts the
+      // vision tokens Moonshot bills for and the memory this handler holds.
+      const compressed = await compressForVision({ data: buf, mimeType: normMime });
+
       const via = fetchUrl === url ? "direct" : fetchUrl.includes("corsproxy") ? "corsproxy" : "allorigins";
-      console.log(`[compare-images] fetched ${buf.length}b as ${normMime} via ${via}`);
+      console.log(`[compare-images] fetched ${buf.length}b as ${normMime} via ${via} → sending ${compressed.data.length}b ${compressed.mimeType}`);
       return {
-        block: { type: "image", image: buf, mediaType: normMime as "image/jpeg" | "image/png" | "image/gif" | "image/webp" },
+        block: { type: "image", image: compressed.data, mediaType: compressed.mimeType as ImgBlock["mediaType"] },
         dead: false,
       };
     } catch {
@@ -264,10 +268,16 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
     if (liveB64!.some(b => b.length > MAX_B64_LEN)) {
       return NextResponse.json({ error: "Live image too large" }, { status: 413 });
     }
-    liveBlocks = liveB64!
-      .slice(0, 3)
-      .map((b64, i) => b64ToBlock(b64, liveMime?.[i] ?? "image/jpeg"))
-      .filter((b): b is ImgBlock => b !== null);
+    liveBlocks = await Promise.all(
+      liveB64!
+        .slice(0, 3)
+        .map((b64, i) => b64ToBlock(b64, liveMime?.[i] ?? "image/jpeg"))
+        .filter((b): b is ImgBlock => b !== null)
+        .map(async (b) => {
+          const compressed = await compressForVision({ data: b.image, mimeType: b.mediaType });
+          return { ...b, image: compressed.data, mediaType: compressed.mimeType as ImgBlock["mediaType"] };
+        }),
+    );
   }
 
   if (!liveBlocks.length) {
