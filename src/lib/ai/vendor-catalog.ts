@@ -13,7 +13,11 @@
  *   3. Digit-core + series letter — "54304" preceded by "T"; unique digit cores resolve cleanly
  *
  * The index is cached in-memory and refreshed daily.
+ *
+ * Non-Shopify vendors with their own resolvers (Vickerman) are delegated to from
+ * resolveSkuFromCatalog / hasCatalogVendor below, so callers keep a single entry point.
  */
+import { isVickermanSku, resolveVickermanSku } from "./vickerman";
 
 export type CatalogEntry = {
   sku: string;
@@ -344,6 +348,14 @@ async function fetchCanonicalCategory(domain: string, handle: string): Promise<s
  * When a match is found, also enriches it with the vendor's canonical breadcrumb category.
  */
 export async function resolveSkuFromCatalog(sku: string): Promise<CatalogEntry | null> {
+  // Vickerman is not Shopify — it has its own sitemap/search-based resolver.
+  if (isVickermanSku(sku)) {
+    try {
+      return await resolveVickermanSku(sku);
+    } catch {
+      return null;
+    }
+  }
   const vendor = VENDORS.find((v) => v.matches(sku));
   if (!vendor) return null;
   try {
@@ -362,5 +374,5 @@ export async function resolveSkuFromCatalog(sku: string): Promise<CatalogEntry |
 
 /** True when some registered vendor recognizes this SKU (so the caller can skip generic web search). */
 export function hasCatalogVendor(sku: string): boolean {
-  return VENDORS.some((v) => v.matches(sku));
+  return isVickermanSku(sku) || VENDORS.some((v) => v.matches(sku));
 }

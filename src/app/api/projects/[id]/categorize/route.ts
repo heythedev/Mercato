@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 
 export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
@@ -76,30 +76,91 @@ async function bulkUpdateCategories(
 }
 
 // ── GET /api/projects/[id]/categorize?jobId=… ─────────────────────────────────
-// Poll a background categorization job started by POST. Returns the current
-// phase while running, the summary once done, or the error message on failure.
+// Poll a background categorization job started by POST. The in-memory job store
+// answers when the poll lands on the instance that runs the job; on Vercel most
+// polls DON'T (multiple instances behind one URL), and that used to 404 as "Job
+// not found or expired" mid-run, killing the client's tracking of a healthy run.
+// A store miss now falls back to reconstructing the state from the database,
+// which every instance shares.
+
+/** No category writes and no heartbeat for this long ⇒ the background run is dead. */
+const STALLED_AFTER_MS = 3 * 60 * 1000;
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { response } = await authGuard();
+  const { user, response } = await authGuard();
   if (response) return response;
-  await params; // id not needed — the jobId is unique per run
+  const { id } = await params;
 
   const jobId = req.nextUrl.searchParams.get("jobId");
   if (!jobId) return NextResponse.json({ error: "jobId required" }, { status: 400 });
 
   const job = getCategorizeJob(jobId);
-  if (!job) return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
+  if (job) {
+    if (job.status === "processing") {
+      return NextResponse.json({
+        status: "processing",
+        phase: job.phase ?? "Preparing…",
+        updatedAt: job.updatedAt,
+      });
+    }
+    if (job.status === "error") {
+      return NextResponse.json({ status: "error", error: job.error }, { status: 500 });
+    }
+    return NextResponse.json({ status: "done", ...job.result });
+  }
 
-  if (job.status === "processing") {
+  // ── DB fallback: this instance never saw the job ────────────────────────────
+  const project = await prisma.project.findUnique({
+    where: { id },
+    select: { userId: true, status: true, marketplace: true, categorizeCompletedAt: true, updatedAt: true },
+  });
+  if (!project || project.userId !== user!.id) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  const [total, matched, lastWrite] = await Promise.all([
+    prisma.product.count({ where: { projectId: id } }),
+    prisma.product.count({
+      where: { projectId: id, marketplaceCategory: { not: null }, NOT: { marketplaceCategory: "Uncategorized" } },
+    }),
+    prisma.product.aggregate({ where: { projectId: id }, _max: { categorizedAt: true } }),
+  ]);
+  const unmatched = total - matched;
+
+  if (project.status === "categorizing") {
+    const lastActivity = Math.max(
+      lastWrite._max.categorizedAt?.getTime() ?? 0,
+      project.updatedAt.getTime(),
+    );
+    if (Date.now() - lastActivity < STALLED_AFTER_MS) {
+      // Alive on another instance: category writes / the run's heartbeat are still
+      // advancing the DB. The changing count keeps the client's stall detector fed
+      // even though this instance can't see the real phase text.
+      return NextResponse.json({
+        status: "processing",
+        phase: `Categorizing… (${matched} categorized so far)`,
+        updatedAt: lastActivity,
+      });
+    }
+    // Run died (instance recycled mid-run). Repair the status so the project is
+    // not stuck "categorizing" forever, hand back what finished, and let the
+    // client resume with another POST — completed rows are already persisted.
+    await prisma.project
+      .update({ where: { id }, data: { status: preCategorizeStatus(project.marketplace) } })
+      .catch(() => {});
     return NextResponse.json({
-      status: "processing",
-      phase: job.phase ?? "Preparing…",
-      updatedAt: job.updatedAt,
+      status: "done", partial: true, interrupted: true,
+      categorized: total, matched, unmatched,
     });
   }
-  if (job.status === "error") {
-    return NextResponse.json({ status: "error", error: job.error }, { status: 500 });
+
+  if (project.categorizeCompletedAt) {
+    // The run finished (on another instance) — report the completed summary.
+    return NextResponse.json({ status: "done", categorized: total, matched, unmatched });
   }
-  return NextResponse.json({ status: "done", ...job.result });
+  // Ended without completing: a clean out-of-budget partial stop (or an error
+  // rollback) recorded on another instance. Either way, resuming is the fix.
+  return NextResponse.json({ status: "done", partial: true, categorized: total, matched, unmatched });
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -254,26 +315,56 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Uncategorized / never categorized — so repeat runs give stable, repeatable results.
   const body = await req.json().catch(() => ({}));
   const force: boolean = body?.force === true;
+  // A run that hits the serverless time budget stops cleanly and reports
+  // { partial, resumeFrom }; the client POSTs again echoing resumeFrom (the
+  // logical run's start). Rows whose categorizedAt is at/after that instant were
+  // already processed by this logical run — including ones the gate forced to
+  // Uncategorized — and are skipped, so the resumed invocation continues with the
+  // untouched tail instead of re-churning. Both sides of the comparison are
+  // server-generated timestamps, so client clock skew is irrelevant.
+  const resumeFrom: number | null =
+    typeof body?.resumeFrom === "number" && Number.isFinite(body.resumeFrom) ? body.resumeFrom : null;
 
   // Lightweight check — ownership only, no heavy product data loaded yet.
   const projectMeta = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, userId: true, marketplace: true },
+    select: { id: true, userId: true, marketplace: true, categorizeMs: true },
   });
   if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const jobId = `${id}_${Date.now()}`;
   const startedAt = Date.now();
+  const logicalRunStart = resumeFrom ?? startedAt;
+  const baseCategorizeMs = resumeFrom ? (projectMeta.categorizeMs ?? 0) : 0;
   createCategorizeJob(jobId);
-  // Clear prior timing on start — each categorize run is a full re-run.
+  // Clear prior timing on a fresh start; a resumed run keeps accumulating.
   await prisma.project.update({
     where: { id },
-    data: { status: "categorizing", categorizeMs: 0, categorizeCompletedAt: null },
+    data: resumeFrom
+      ? { status: "categorizing", categorizeCompletedAt: null }
+      : { status: "categorizing", categorizeMs: 0, categorizeCompletedAt: null },
   });
 
-  // Heavy work runs here; the HTTP response returns the jobId below.
-  void (async () => {
+  // Heavy work runs inside after(): Vercel formally keeps the function alive for
+  // post-response work up to maxDuration. The old fire-and-forget `void (async …)`
+  // had NO such guarantee — the instance could be frozen right after the response
+  // flushed, which is how runs died silently leaving projects stuck "categorizing".
+  after(async () => {
+   // Heartbeat: enrichment can run minutes without a single category write, which
+   // the GET fallback would read as a dead run. Bump the project row periodically
+   // so updatedAt keeps proving liveness; the promise is awaited before the final
+   // status write so a stale beat can never overwrite it.
+   let lastBeat = Date.now();
+   let beatPromise: Promise<unknown> = Promise.resolve();
+   let runFinished = false;
+   const heartbeat = () => {
+     if (runFinished || Date.now() - lastBeat < 45_000) return;
+     lastBeat = Date.now();
+     beatPromise = prisma.project
+       .update({ where: { id }, data: { status: "categorizing" } })
+       .catch(() => {});
+   };
    try {
     // Temu & Best Buy share temu_categories.csv; Mathis uses mathis_categories.csv.
     // These CSV taxonomy sheets drive categorization inside categorizeProducts (not template names).
@@ -354,6 +445,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             description: true,
             vendorSku: true,
             marketplaceCategory: true,
+            categorizedAt: true,
             vendorData: true,
             // Verification stores the matched marketplace listing here, which
             // includes Walmart's own category path for the product.
@@ -400,8 +492,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           // Reuse existing categories for repeatable re-runs: unless `force`,
           // only send products that don't yet have a confident category (null
           // or "Uncategorized"). Already-categorized products are left
-          // untouched, so their result never changes.
-          if (force || !p.marketplaceCategory || p.marketplaceCategory === "Uncategorized") {
+          // untouched, so their result never changes. On a resume, rows already
+          // written by this logical run (categorizedAt ≥ resumeFrom) are skipped
+          // regardless of outcome, so only the untouched tail continues.
+          const untouchedThisRun =
+            !resumeFrom || !p.categorizedAt || p.categorizedAt.getTime() < resumeFrom;
+          const needsRun = force
+            ? untouchedThisRun
+            : untouchedThisRun && (!p.marketplaceCategory || p.marketplaceCategory === "Uncategorized");
+          if (needsRun) {
             productInputsAll.push({
               id: p.id,
               name: p.name,
@@ -460,26 +559,66 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     let enrichedCount = 0;
 
-    if (productInputs.length > 0) {
+    // ── Serverless time budget ────────────────────────────────────────────────
+    // after() keeps this work alive only up to maxDuration; a large run cannot
+    // finish in one invocation. Process the inputs in slices, each fully
+    // persisted (enrichment writes + gated category writes) before the next
+    // starts, and stop cleanly while there is still time — the job result then
+    // carries { partial, resumeFrom } and the client immediately POSTs a resume,
+    // which skips everything this logical run already wrote.
+    const TIME_BUDGET_MS = (maxDuration - 30) * 1000;
+    const SLICE_SIZE = 100;
+    const totalToProcess = productInputs.length;
+    let processed = 0;
+    let partial = false;
+    let sliceMsTotal = 0;
+    let sliceCount = 0;
+
+    // Bulletproofing thresholds (used per-slice below): route uncertain products
+    // to review instead of guessing. It is always safer to mark a product
+    // "Uncategorized" (excluded from export, surfaced for manual review) than to
+    // assign a wrong category.
+    //   1. Unresolved SKU — the name is still a raw vendor code (catalog + web both
+    //      failed), so the AI had nothing real to categorize. Never trust that guess.
+    //   2. Low confidence — the AI itself signalled uncertainty below the threshold.
+    // For constrained-taxonomy marketplaces (Temu, BestBuy, Mathis, Walmart) the AI
+    // can ONLY return valid paths from a fixed list, so hallucinated names are already
+    // rejected; a low floor (0.2) lets legitimate niche matches survive while a truly
+    // random guess ("Acid Brush" → Home Theater at 0.05) is excluded.
+    const isConstrainedTaxonomy = ["temu", "bestbuy", "sears", "mathis", "walmart"].includes(mpLower);
+    const MIN_CONFIDENCE = Number(process.env.CATEGORIZE_MIN_CONFIDENCE ?? 0.6);
+    const CONSTRAINED_MIN_CONFIDENCE = Number(process.env.CATEGORIZE_CONSTRAINED_MIN_CONFIDENCE ?? 0.2);
+
+    for (let sliceStart = 0; sliceStart < productInputs.length; sliceStart += SLICE_SIZE) {
+      // Stop BEFORE a slice that likely won't fit in the remaining budget, so the
+      // slice in flight is never cut off mid-write by the platform.
+      const avgSliceMs = sliceCount > 0 ? sliceMsTotal / sliceCount : 0;
+      if (sliceStart > 0 && Date.now() - startedAt + avgSliceMs * 1.25 > TIME_BUDGET_MS) {
+        partial = true;
+        break;
+      }
+      const sliceBegan = Date.now();
+      let slice = productInputs.slice(sliceStart, sliceStart + SLICE_SIZE);
+
       // SKU-only sheets (common for Mathis): resolve codes like TOVF-TOVL54566 → real
-      // product titles (vendor catalog first, then web search) before asking Claude to
-      // categorize. Enrichment is a PER-PRODUCT NETWORK CALL (Shopify catalog + product
-      // page fetch), so it must run ONLY for products that actually need it — a product
-      // that already has a real title has nothing to gain and would just add ~1s of
-      // network latency each. Running it for all 2000 products (because they carried a
-      // catalog-vendor SKU) took ~28 min and stalled the run. Trigger only when the
-      // name is still a raw code.
-      const skuOnly = productInputs.filter((p) => looksLikeSkuName(p.name, p.sku));
+      // product titles (vendor catalog / Vickerman resolver, then web search) before
+      // asking the model to categorize. Enrichment is a PER-PRODUCT NETWORK CALL, so
+      // it runs ONLY for products whose name is still a raw code — a product with a
+      // real title has nothing to gain and would just add network latency.
+      const skuOnly = slice.filter((p) => looksLikeSkuName(p.name, p.sku));
       if (skuOnly.length > 0) {
-        setCategorizeJobPhase(jobId, `Resolving ${skuOnly.length} SKU-only products…`);
+        setCategorizeJobPhase(jobId, `Resolving SKU-only products (${processed}/${totalToProcess} done)…`);
         const { products: enriched, enrichments } = await enrichSkuOnlyProducts(
           skuOnly,
-          (done, total) => setCategorizeJobPhase(jobId, `Resolving SKU-only products ${done}/${total}…`),
+          (done, total) => {
+            heartbeat();
+            setCategorizeJobPhase(jobId, `Resolving SKU-only products ${done}/${total} (${processed}/${totalToProcess} done)…`);
+          },
         );
-        // Fold the enriched rows back into the full input list by id.
+        // Fold the enriched rows back into this slice by id.
         const enrichedById = new Map(enriched.map((e) => [e.id, e]));
-        productInputs = productInputs.map((p) => enrichedById.get(p.id) ?? p);
-        enrichedCount = enrichments.length;
+        slice = slice.map((p) => enrichedById.get(p.id) ?? p);
+        enrichedCount += enrichments.length;
         if (enrichments.length > 0) {
           // Merge catalog attributes (Size/Color/images/weight) INTO the existing
           // vendorData so the export template can fill those columns — the vendor sheet
@@ -515,68 +654,39 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         }
       }
 
-      setCategorizeJobPhase(jobId, `Assigning categories to ${productInputs.length} products…`);
+      setCategorizeJobPhase(jobId, `Assigning categories ${processed}/${totalToProcess}…`);
       const results = await categorizeProducts(
         projectMeta.marketplace,
-        productInputs,
+        slice,
         undefined,
         // Live progress → job.updatedAt advances every wave, so the client sees a slow
-        // run as alive rather than stalled. Throttled to whole-percent changes so we
-        // don't rewrite the phase on every batch.
+        // run as alive rather than stalled. Counters are offset to the whole logical
+        // run so the user sees 320/852, not a per-slice 20/100.
         (done, total, note) => {
-          const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+          heartbeat();
+          const globalDone = processed + Math.min(done, slice.length);
+          const pct = totalToProcess > 0 ? Math.floor((globalDone / totalToProcess) * 100) : 0;
           // `note` marks a refinement pass (off-list retry, web-search rescue,
           // forced-choice), which runs AFTER every product already has a result
-          // and reports its own much smaller totals. Labelling those
-          // "Categorizing 4/33" alongside a saturated 7,021/7,021 counter reads
-          // as a stuck run, so name the pass instead.
+          // and reports its own much smaller totals — name the pass instead.
           setCategorizeJobPhase(
             jobId,
             note
               ? `${note.charAt(0).toUpperCase()}${note.slice(1)} ${done}/${total}`
-              : `Categorizing ${done}/${total} (${pct}%)…`,
+              : `Categorizing ${globalDone}/${totalToProcess} (${pct}%)…`,
           );
         },
-        // Stream each wave's verdicts to the DB as soon as they land — same
-        // "show finished results while the rest keeps running" pattern used for
-        // verification, instead of a blank spinner for the whole (multi-minute) run.
-        // These are provisional: the bulletproofing gate below may still downgrade a
-        // low-confidence or unresolved-SKU result to Uncategorized once the full run
-        // settles, and that corrected value overwrites this one in the final write.
+        // Stream each wave's verdicts to the DB as soon as they land — the client
+        // shows finished results while the rest keeps running. Provisional: the
+        // gate below may downgrade a result, and the authoritative slice write
+        // overwrites it.
         async (wave) => {
-          // Bulk-write the wave rather than one round-trip per product: with a
-          // remote database (~280ms RTT) and 32 waves in flight, per-row writes
-          // here both slow the run and monopolise the connection pool.
-          // A transient failure is not fatal — the final write below is authoritative.
           await bulkUpdateCategories(wave).catch(() => {});
         },
       );
 
-      // ── Bulletproofing: route uncertain products to review instead of guessing ──
-      // Correctness-first policy — it is always safer to mark a product "Uncategorized"
-      // (excluded from export, surfaced for manual review) than to assign a wrong category.
-      // Two gates:
-      //   1. Unresolved SKU — the name is still a raw vendor code (catalog + web both failed),
-      //      so the AI had nothing real to categorize. Never trust that guess.
-      //   2. Low confidence — the AI itself signalled uncertainty below the threshold.
-      //
-      // For constrained-taxonomy marketplaces (Temu, BestBuy, Mathis, Walmart) the AI
-      // can ONLY return valid paths from a fixed list, so hallucinated names are already
-      // rejected. A "nearest valid match" at moderate confidence is generally better than
-      // Uncategorized — but a truly random guess at very low confidence is NOT.
-      // Example: "Acid Brush" landing in "TV & Home Theater > Home Theater in a Box"
-      // at confidence 0.05 should be Uncategorized, not exported in the wrong category.
-      //
-      // Two-tier threshold:
-      //   - Non-constrained (open-ended AI categories): use MIN_CONFIDENCE (default 0.6)
-      //   - Constrained (fixed CSV taxonomy): use a low floor (0.2) so legitimate
-      //     niche matches (crowns, kippot, tarboosh hats at 0.25–0.3) survive while
-      //     clearly wrong random guesses (tools → Home Theater at 0.05) are excluded.
-      const isConstrainedTaxonomy = ["temu", "bestbuy", "sears", "mathis", "walmart"].includes(mpLower);
-      const MIN_CONFIDENCE = Number(process.env.CATEGORIZE_MIN_CONFIDENCE ?? 0.6);
-      const CONSTRAINED_MIN_CONFIDENCE = Number(process.env.CATEGORIZE_CONSTRAINED_MIN_CONFIDENCE ?? 0.2);
-      const inputById = new Map(productInputs.map((p) => [p.id, p]));
-
+      // Bulletproofing gate (thresholds documented above the slice loop).
+      const inputById = new Map(slice.map((p) => [p.id, p]));
       for (const r of results) {
         const input = inputById.get(r.productId);
         // Only treat as unresolved if the name is still a raw code AND there's no
@@ -593,15 +703,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         }
       }
 
-      // Bulk write. Each row gets distinct values, which Prisma cannot express
-      // (`updateMany` applies ONE payload to every match), so this issues an
-      // UPDATE ... FROM (VALUES ...) per chunk instead of one round-trip per row.
-      //
-      // This matters far more than it looks: the database is remote and a single
-      // round-trip measures ~280ms from here, so 7k per-row updates at 10
-      // concurrent is ~3+ minutes of pure waiting AFTER every product already
-      // shows a category — the "still saving" tail at the end of a run. The same
-      // fix is applied to verification's persist path for the same reason.
+      // Authoritative bulk write for this slice (UPDATE ... FROM (VALUES ...) per
+      // chunk — the remote DB makes per-row round-trips minutes of pure waiting).
+      // Persisting per-slice is what makes the out-of-budget stop safe: everything
+      // before the break is fully durable, nothing in flight is lost.
       await bulkUpdateCategories(results, (saved, total) =>
         setCategorizeJobPhase(jobId, `Saving results ${saved}/${total}`),
       );
@@ -609,6 +714,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // Fold new results into the existing-category map so the response counts
       // reflect the full project (kept + newly categorized).
       for (const r of results) existingCatById.set(r.productId, r.category);
+
+      processed += slice.length;
+      sliceMsTotal += Date.now() - sliceBegan;
+      sliceCount++;
     }
 
     // Walmart: for products that didn't get a Spec Product Type from live Seller API
@@ -617,7 +726,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     let specTypesRequested = 0;
     let specTypesAssigned = 0;
     let specTypeError: string | undefined;
-    if (mpLower === "walmart") {
+    // Skipped on a partial stop — the resumed invocation reaches it once the
+    // whole catalog is processed.
+    if (mpLower === "walmart" && !partial) {
       // All products (including those that went through the Walmart category path)
       // need a spec type. Use all project products minus those already assigned from
       // live data. Paged back out of the DB — the streaming load above kept no
@@ -681,13 +792,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
 
+    // All heartbeat writes must land before the final status write so a stale
+    // beat can never flip the project back to "categorizing".
+    runFinished = true;
+    await beatPromise;
+
     await prisma.project.update({
       where: { id },
-      data: {
-        status: "categorized",
-        categorizeMs: Date.now() - startedAt,
-        categorizeCompletedAt: new Date(),
-      },
+      data: partial
+        ? {
+            // Clean out-of-budget stop: back to the pre-categorize status so
+            // nothing is ever stuck "categorizing" if the client vanishes, with
+            // the elapsed time banked for the resumed invocation to add to.
+            status: preCategorizeStatus(projectMeta.marketplace),
+            categorizeMs: baseCategorizeMs + (Date.now() - startedAt),
+          }
+        : {
+            status: "categorized",
+            categorizeMs: baseCategorizeMs + (Date.now() - startedAt),
+            categorizeCompletedAt: new Date(),
+          },
     });
 
     const allCats = [...existingCatById.values()];
@@ -698,7 +822,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       categorized: allCats.length,
       matched,
       unmatched,
-      reprocessed: productInputs.length,
+      ...(partial
+        ? { partial: true, remaining: totalToProcess - processed, resumeFrom: logicalRunStart }
+        : {}),
+      reprocessed: processed,
       enrichedFromSku: enrichedCount,
       ...(mpLower === "walmart"
         ? { specTypesRequested, specTypesAssigned, ...(specTypeError ? { specTypeError } : {}) }
@@ -718,6 +845,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Roll back to the step BEFORE Categorize. For skip-verify marketplaces
     // (Temu, Best Buy, …) that is "uploaded", not "verified" — otherwise a
     // failed categorization leaves a Temu project wrongly showing "Verified".
+    runFinished = true;
+    await beatPromise.catch(() => {});
     await prisma.project
       .update({ where: { id }, data: { status: preCategorizeStatus(projectMeta.marketplace) } })
       .catch(() => {});
@@ -725,7 +854,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     console.error("[categorize] background job failed:", msg);
     rejectCategorizeJob(jobId, msg);
    }
-  })();
+  });
 
-  return NextResponse.json({ jobId });
+  return NextResponse.json({ jobId, startedAt: logicalRunStart });
 }

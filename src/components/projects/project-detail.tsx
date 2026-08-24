@@ -461,96 +461,179 @@ export function ProjectDetail({ project: initial, productCount }: {
       // Categorization is a background job (large catalogs make dozens of model
       // round-trips and run well past the request timeout). POST returns a jobId
       // immediately; poll GET until done/error rather than holding one long request.
-      const startRes = await fetch(`/api/projects/${project.id}/categorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force }),
-      });
-      if (!startRes.ok) {
-        const data = await startRes.json().catch(() => ({ error: "Categorization failed" }));
-        toast.error(data.error ?? "Categorization failed");
-        return;
-      }
-      const { jobId } = (await startRes.json()) as { jobId: string };
+      //
+      // One serverless invocation is time-budgeted (~4.5 min of work), so a large
+      // catalog completes as a CHAIN of invocations: a run that stops early reports
+      // { partial, resumeFrom } and this loop immediately POSTs a resume echoing
+      // resumeFrom, which skips every row the logical run already persisted. The
+      // same path also revives a run whose instance died mid-flight (interrupted).
+      const MAX_RESUMES = 40;
+      let resumeFrom: number | null = null;
+      let resumes = 0;
+      // A resume must move something — more products matched, or fewer remaining.
+      // Two consecutive resumes with no movement means the server is stopping
+      // without progressing (e.g. crashing on the same slice); bail instead of
+      // spinning forever.
+      let lastMatched = -1;
+      let lastRemaining = Number.MAX_SAFE_INTEGER;
+      let noProgressResumes = 0;
 
-      // Give up only when the server stops making progress, not on a fixed clock —
-      // a slow-but-alive run (thousands of products) must not be cut off.
-      const STALL_LIMIT_MS = 5 * 60 * 1000;
-      const HARD_LIMIT_MS = 30 * 60 * 1000;
-      const startedAt = Date.now();
-      let lastProgressAt = Date.now();
-      let lastPhase = "";
-      let lastUpdatedAt = 0;
+      for (;;) {
+        const startRes = await fetch(`/api/projects/${project.id}/categorize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(resumeFrom !== null ? { force, resumeFrom } : { force }),
+        });
+        if (!startRes.ok) {
+          const startData = await startRes.json().catch(() => ({ error: "Categorization failed" }));
+          toast.error(startData.error ?? "Categorization failed");
+          return;
+        }
+        const { jobId, startedAt: logicalRunStart } =
+          (await startRes.json()) as { jobId: string; startedAt?: number };
+        // The server timestamps the logical run; every later resume echoes it so
+        // rows written anywhere in the chain are skipped, not re-churned.
+        if (resumeFrom === null && typeof logicalRunStart === "number") resumeFrom = logicalRunStart;
 
-      while (Date.now() - startedAt < HARD_LIMIT_MS) {
-        // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
-        // return) — keeps the job-completion check alive without burning CPU or
-        // requests while the user works elsewhere.
-        await sleepForPoll(2500);
+        // Give up only when the server stops making progress, not on a fixed clock —
+        // a slow-but-alive run must not be cut off. One invocation is server-capped
+        // at 5 minutes, so 12 minutes without a verdict means it is simply gone.
+        const STALL_LIMIT_MS = 5 * 60 * 1000;
+        const INVOCATION_LIMIT_MS = 12 * 60 * 1000;
+        const pollStartedAt = Date.now();
+        let lastProgressAt = Date.now();
+        let lastPhase = "";
+        let lastUpdatedAt = 0;
+        // Poll failures are TRANSIENT (deploy rotation, network blip) — the run
+        // itself lives server-side, so only give up after several in a row. The
+        // old code treated the first non-OK poll as fatal, which is exactly how
+        // healthy runs died with "Job not found or expired".
+        let pollFailures = 0;
 
-        const pollRes = await fetch(
-          `/api/projects/${project.id}/categorize?jobId=${encodeURIComponent(jobId)}`,
-        );
-        const data = await pollRes.json().catch(() => ({ status: "error", error: "Categorization failed" })) as {
+        type PollData = {
           status: string; error?: string; phase?: string; updatedAt?: number;
           matched?: number; unmatched?: number; categorized?: number;
+          partial?: boolean; interrupted?: boolean; remaining?: number; resumeFrom?: number;
           specTypesRequested?: number; specTypesAssigned?: number; specTypeError?: string;
         };
+        let verdict: PollData | null = null;
 
-        if (!pollRes.ok || data.status === "error") {
-          toast.error(data.error ?? "Categorization failed");
-          return;
-        }
+        while (Date.now() - pollStartedAt < INVOCATION_LIMIT_MS) {
+          // Polls every 2.5s while visible, 10s while hidden (wakes instantly on
+          // return) — keeps the job-completion check alive without burning CPU or
+          // requests while the user works elsewhere.
+          await sleepForPoll(2500);
 
-        if (data.status === "done") {
-          const matched = typeof data.matched === "number" ? data.matched : (data.categorized ?? 0);
-          const unmatched = typeof data.unmatched === "number" ? data.unmatched : 0;
-          if (matched === 0 && unmatched > 0) {
-            toast.warning(`No category match for ${unmatched} product${unmatched === 1 ? "" : "s"}`);
-          } else if (unmatched > 0) {
-            toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"} (${unmatched} unmatched)`);
-          } else {
-            toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"}`);
+          let pollRes: Response;
+          try {
+            pollRes = await fetch(
+              `/api/projects/${project.id}/categorize?jobId=${encodeURIComponent(jobId)}`,
+            );
+          } catch {
+            if (++pollFailures >= 5) {
+              toast.error("Lost connection to the categorization run — please try again.");
+              return;
+            }
+            continue;
           }
-          // Walmart spec product types are a separate AI pass; a run where it
-          // failed or fell short used to look identical to a clean run, and the
-          // gap only surfaced as wrong values in the exported template.
-          if (data.specTypeError) {
-            toast.error(`Spec product types could not be assigned (${data.specTypeError}) — re-run Categorize before exporting.`);
-          } else if (
-            typeof data.specTypesRequested === "number" && data.specTypesRequested > 0 &&
-            (data.specTypesAssigned ?? 0) < data.specTypesRequested
-          ) {
-            toast.warning(`Spec product types: ${data.specTypesAssigned ?? 0} of ${data.specTypesRequested} assigned — re-run Categorize to fill the rest.`);
+          const data = (await pollRes.json().catch(() => null)) as PollData | null;
+
+          // An explicit error verdict from the job itself is fatal.
+          if (data?.status === "error") {
+            toast.error(data.error ?? "Categorization failed");
+            return;
           }
-          await refreshProject();
-          setActiveStep(2);
+          if (!pollRes.ok || !data) {
+            if (++pollFailures >= 5) {
+              toast.error("Lost connection to the categorization run — please try again.");
+              return;
+            }
+            continue;
+          }
+          pollFailures = 0;
+
+          if (data.status === "done") {
+            verdict = data;
+            break;
+          }
+
+          // Any forward progress resets the stall window: a changed phase string OR a
+          // newer server-side updatedAt (the job store bumps it on every batch, so even
+          // a repeated phase still counts as a live run).
+          if (data.phase && data.phase !== lastPhase) {
+            lastPhase = data.phase;
+            lastProgressAt = Date.now();
+            // Surface it: after the streaming writes land, every product has a
+            // category row and the "N / total" counter saturates, but refinement
+            // passes are still running. The phase is the only honest progress
+            // signal left at that point.
+            setCategorizePhase(data.phase);
+          }
+          if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAt) {
+            lastUpdatedAt = data.updatedAt;
+            lastProgressAt = Date.now();
+          }
+          if (Date.now() - lastProgressAt > STALL_LIMIT_MS) {
+            toast.error("Categorization stalled — no progress from the server. Please try again.");
+            return;
+          }
+        }
+
+        if (!verdict) {
+          toast.error("Categorization timed out — please try again");
           return;
         }
 
-        // Any forward progress resets the stall window: a changed phase string OR a
-        // newer server-side updatedAt (the job store bumps it on every batch, so even
-        // a repeated phase still counts as a live run).
-        if (data.phase && data.phase !== lastPhase) {
-          lastPhase = data.phase;
-          lastProgressAt = Date.now();
-          // Surface it: after the streaming writes land, every product has a
-          // category row and the "N / total" counter saturates, but refinement
-          // passes are still running. The phase is the only honest progress
-          // signal left at that point.
-          setCategorizePhase(data.phase);
+        const matched = typeof verdict.matched === "number" ? verdict.matched : (verdict.categorized ?? 0);
+        const unmatched = typeof verdict.unmatched === "number" ? verdict.unmatched : 0;
+
+        if (verdict.partial) {
+          // Out-of-budget stop (or a dead instance the GET fallback repaired) —
+          // resume where the server left off.
+          const remaining = typeof verdict.remaining === "number" ? verdict.remaining : Number.MAX_SAFE_INTEGER;
+          const progressed = matched > lastMatched || remaining < lastRemaining;
+          lastMatched = Math.max(lastMatched, matched);
+          lastRemaining = Math.min(lastRemaining, remaining);
+          noProgressResumes = progressed ? 0 : noProgressResumes + 1;
+          if (noProgressResumes >= 2) {
+            toast.error("Categorization keeps stopping without progress — please try again later.");
+            return;
+          }
+          if (++resumes > MAX_RESUMES) {
+            toast.error("Categorization needs too many rounds — please run it again to continue.");
+            return;
+          }
+          if (typeof verdict.resumeFrom === "number") resumeFrom = verdict.resumeFrom;
+          setCategorizePhase(
+            verdict.interrupted
+              ? `Run was interrupted — resuming… (${matched} categorized so far)`
+              : `Resuming… (${matched} categorized so far)`,
+          );
+          continue;
         }
-        if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAt) {
-          lastUpdatedAt = data.updatedAt;
-          lastProgressAt = Date.now();
+
+        if (matched === 0 && unmatched > 0) {
+          toast.warning(`No category match for ${unmatched} product${unmatched === 1 ? "" : "s"}`);
+        } else if (unmatched > 0) {
+          toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"} (${unmatched} unmatched)`);
+        } else {
+          toast.success(`Categorized ${matched} product${matched === 1 ? "" : "s"}`);
         }
-        if (Date.now() - lastProgressAt > STALL_LIMIT_MS) {
-          toast.error("Categorization stalled — no progress from the server. Please try again.");
-          return;
+        // Walmart spec product types are a separate AI pass; a run where it
+        // failed or fell short used to look identical to a clean run, and the
+        // gap only surfaced as wrong values in the exported template.
+        if (verdict.specTypeError) {
+          toast.error(`Spec product types could not be assigned (${verdict.specTypeError}) — re-run Categorize before exporting.`);
+        } else if (
+          typeof verdict.specTypesRequested === "number" && verdict.specTypesRequested > 0 &&
+          (verdict.specTypesAssigned ?? 0) < verdict.specTypesRequested
+        ) {
+          toast.warning(`Spec product types: ${verdict.specTypesAssigned ?? 0} of ${verdict.specTypesRequested} assigned — re-run Categorize to fill the rest.`);
         }
+        await refreshProject();
+        setActiveStep(2);
+        return;
       }
-
-      toast.error("Categorization timed out — please try again");
     } catch (e) {
       console.error("Categorize error:", e);
       toast.error("Categorization failed — check the server console for details.");
