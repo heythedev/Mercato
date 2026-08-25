@@ -66,6 +66,35 @@ describe("extractPackInfo", () => {
       .toEqual({ qty: 10, strong: true, explicit: true });
   });
 
+  it("reads slash-form pack counts from live titles", () => {
+    // Real stored EMRY liveData rows the parser used to read as singles.
+    expect(extractPackInfo("24/Pack 3M Scotch-Blue 2090-48A 1.88IN X 60YD Painters Tape BL"))
+      .toEqual({ qty: 24, strong: true, explicit: true });
+    expect(extractPackInfo("Scotch 209048EVP Painter's Tape, 1.88-Inch x 60yds, 3-Inch Core, Blue, 3/Pack"))
+      .toEqual({ qty: 3, strong: true, explicit: true });
+    expect(extractPackInfo('Hillman Split Lock Washer 5/16 " Hot Dip Galvanized 100/Box'))
+      .toEqual({ qty: 100, strong: true, explicit: true });
+    expect(extractPackInfo("3M Scotch Sure Start Shipping Packaging Tape (00051141914558) (12/Each)"))
+      .toEqual({ qty: 12, strong: true, explicit: true });
+  });
+
+  it("keeps fractional sizes out of the slash-form patterns", () => {
+    expect(extractPackInfo('Hillman Hex Cap Screw 1/4 " - 20 X 1 " Zinc Dichromate Grade 8'))
+      .toEqual({ qty: 1, strong: false, explicit: false });
+  });
+
+  it("reads 'N per box' and distributor 'NBx' shorthand", () => {
+    expect(extractPackInfo("Split Lock Washer, 100 per box"))
+      .toEqual({ qty: 100, strong: true, explicit: true });
+    expect(extractPackInfo('King Safety Products 70112 Staple Insul 9/16" 100Bx'))
+      .toEqual({ qty: 100, strong: true, explicit: true });
+  });
+
+  it("lets a slash-form count beat the '(Pack of 1)' ship-pack suffix", () => {
+    expect(extractPackInfo("MASKNG TAPE 24/Pack (Pack of 1)"))
+      .toEqual({ qty: 24, strong: true, explicit: true });
+  });
+
   it("reads a bare trailing '(N)' as a weak count", () => {
     // Some Amazon multipack listings end with just "(5)" and no pack word.
     expect(extractPackInfo("Farmhouse Coir Doormat, Natural (5)"))
@@ -123,6 +152,16 @@ describe("stripPackPhrases", () => {
       .toBe("Howard RF4016 Restor-A-Finish, Pint, Dark Oak");
     expect(stripPackPhrases("Kitchen Towels (Pack of 6)")).toBe("Kitchen Towels");
     expect(stripPackPhrases("Welcome Doormat (5)")).toBe("Welcome Doormat");
+  });
+
+  it("removes slash-form and per-box pack phrasings", () => {
+    expect(stripPackPhrases("24/Pack 3M Scotch-Blue 2090-48A Painters Tape"))
+      .toBe("3M Scotch-Blue 2090-48A Painters Tape");
+    expect(stripPackPhrases("Hillman Split Lock Washer 100/Box"))
+      .toBe("Hillman Split Lock Washer");
+    expect(stripPackPhrases("Machine Screw Nut, 100 per box"))
+      .toBe("Machine Screw Nut");
+    expect(stripPackPhrases('Staple Insul 9/16" 100Bx')).toBe('Staple Insul 9/16"');
   });
 
   it("leaves titles without pack phrasing untouched", () => {

@@ -448,11 +448,28 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
   const resolvedUpc = (p: Product): string | null =>
     toDisplayBarcode(p.upc) ?? extractVendorUpc(p);
 
-  const withAsin     = activeProducts.filter((p) => p.asin && ASIN_RE.test(p.asin));
+  // A stored ASIN is identity truth only when the vendor FILE supplied it. Any
+  // other stored ASIN is a previous run's own match verdict being fed back as
+  // input: trusting it would pin every re-verify to whatever picker logic ran
+  // first, so no matcher fix could ever correct an old pick (the ASIN twin of
+  // the vendor-price echo). Those products re-derive their match from UPC/name
+  // instead — the code-lookup cache keeps the re-pick cheap.
+  const vendorSuppliedAsin = (p: Product): boolean => {
+    const vd = p.vendorData as Record<string, unknown> | null;
+    if (!vd || typeof vd !== "object") return false;
+    for (const [k, v] of Object.entries(vd)) {
+      if (/asin/i.test(k) && ASIN_RE.test(String(v ?? "").trim().toUpperCase())) return true;
+    }
+    return false;
+  };
+  const trustedAsin = (p: Product): boolean =>
+    !!p.asin && ASIN_RE.test(p.asin) && vendorSuppliedAsin(p);
+
+  const withAsin     = activeProducts.filter(trustedAsin);
   const asinInvalid  = activeProducts.filter((p) => p.asin && !ASIN_RE.test(p.asin));
   // A product "has UPC" if p.upc normalizes OR vendorData contains a barcode
-  const withUpcOnly  = activeProducts.filter((p) => (!p.asin || !ASIN_RE.test(p.asin ?? "")) && !!resolvedUpc(p));
-  const withNameOnly = activeProducts.filter((p) => (!p.asin || !ASIN_RE.test(p.asin ?? "")) && !resolvedUpc(p));
+  const withUpcOnly  = activeProducts.filter((p) => !trustedAsin(p) && !!resolvedUpc(p));
+  const withNameOnly = activeProducts.filter((p) => !trustedAsin(p) && !resolvedUpc(p));
 
   // Fetch by ASIN
   const asinResults = new Map<string, VerifyResult>();
@@ -2404,6 +2421,9 @@ export function livePackQty(c: any): number {
 export function stripPackPhrases(title: string): string {
   return title
     .replace(/[([]?\s*(?:pack|pkg|package|case|set|box|bag|carton)\s+of\s+\d+\s*[)\]]?/gi, " ")
+    .replace(/[([]?\s*\d+\s*\/\s*(?:pack|pk|pkg|box|bx|case|cs|carton|each|ea)\b\.?\s*[)\]]?/gi, " ")
+    .replace(/\b\d+\s+per\s+(?:pack|box|case|carton|bag)\b/gi, " ")
+    .replace(/\b\d+[- ]?bx\b/gi, " ")
     .replace(/[([]?\s*\d+\s*[-–]?\s*(?:pack|pk|count|ct|pcs|pieces|units)\b\.?\s*[)\]]?/gi, " ")
     .replace(/[,\s–-]*\bquantity\s*[:\s]\s*\d+\b/gi, " ")
     .replace(/\(\s*\d{1,2}\s*\)\s*$/g, " ")
@@ -2704,6 +2724,12 @@ export function extractPackInfo(
   const PACK_OF = /(?:pack|pkg|package)[- ]?of[- ]?(\d+)/; // "pack of 6", "(Pack-of-6)", "Pkg of 5", "package of 2"
   const STRONG: RegExp[] = [
     /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
+    // Slash-form counts — "24/Pack 3M Scotch-Blue…", "…Tape, 3/Pack",
+    // "Washer … 100/Box", "(12/Each)". Fractional sizes ("5/16\"", "1/4 x 2")
+    // never match: the token after the slash must be a packaging word.
+    /(\d+)\s*\/\s*(?:pack|pk|pkg|box|bx|case|cs|carton|each|ea)\b/,
+    /(\d+)\s+per\s+(?:pack|box|case|carton|bag)\b/, // "100 per box"
+    /(\d+)[- ]?bx\b/,                    // "100Bx" — distributor shorthand for a 100-per-box listing
     /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
     /carton[- ]?of[- ]?(\d+)/,           // "Carton of 10" — live listings use it like "case of"
     /set[- ]?of[- ]?(\d+)/,              // "set of 3", "set of3"
