@@ -520,7 +520,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       const result = compareToLive(p, lp.title as string, lp.brand as string ?? null, null, liveDataForCompare as Record<string, unknown>, "Amazon");
       // Downgrade mismatch → warning for ASIN-confirmed products (title abbreviation ≠ wrong product),
       // but keep pack-quantity mismatches hard — ASIN may still be a multipack listing.
-      const packMismatch = extractPackQty(p.name) !== extractPackQty(String(lp.title ?? ""));
+      const packMismatch = extractPackQty(p.name) !== livePackQty(lp);
       if (result.status === "mismatch" && !packMismatch) {
         result.status = "warning";
         result.fields = result.fields.map((f) =>
@@ -794,7 +794,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       if (resolved && !p.upc) result.resolvedUpc = resolved;
       // UPC-confirmed: soft-downgrade abbreviation mismatches → warning.
       // Pack-qty mismatches stay hard (should be rare after filterPackCompatible).
-      const packMismatch = extractPackQty(p.name) !== extractPackQty(String(best.title ?? ""));
+      const packMismatch = extractPackQty(p.name) !== livePackQty(best);
       if (result.status === "mismatch" && !packMismatch) {
         result.status = "warning";
         result.fields = result.fields.map((f) =>
@@ -970,7 +970,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
             // and still reject explicit multipacks when the catalog is a single unit.
             if (!packMatched.length) {
               const vendorQty = extractPackQty(productName);
-              const liveQty = extractPackQty(String(best.title ?? ""));
+              const liveQty = livePackQty(best);
               if (vendorQty !== liveQty) return null;
             }
             return bestSim >= minSim ? { best, bestSim } : null;
@@ -1602,7 +1602,16 @@ function compareToLive(
   const vendorDesc = String((p.vendorData as Record<string,unknown> | null)?.description ?? p.description ?? "");
   const liveDesc = String(liveData.description ?? liveData.shortDescription ?? liveData.longDescription ?? "");
   const vendorPack = extractPackInfo(p.name, vendorDesc);
-  const livePack = extractPackInfo(liveTitle, liveDesc);
+  // The provider's structured packageQuantity outranks title text on the live
+  // side: multipack listings often carry no pack wording at all, and a
+  // structured count > 1 is packaging stated explicitly by the marketplace.
+  // When both speak, the larger multipack claim wins (see livePackQty).
+  const livePackFromText = extractPackInfo(liveTitle, liveDesc);
+  const liveStructuredQty = structuredPackQty(liveData);
+  const livePack =
+    liveStructuredQty != null && liveStructuredQty > 1
+      ? { qty: Math.max(liveStructuredQty, livePackFromText.qty), strong: true, explicit: true }
+      : livePackFromText;
   const vendorQty = vendorPack.qty;
   const liveQty = livePack.qty;
   // A quantity difference only counts as a pack mismatch when the signal is
@@ -2190,7 +2199,7 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
   const score = (c: any): number => {
     let s = 0;
     const liveTitle = String(c.title ?? "");
-    const liveQty = extractPackQty(liveTitle);
+    const liveQty = livePackQty(c);
 
     // Pack qty is hard: huge penalty so multipacks never beat single-unit peers.
     if (vendorQty !== liveQty) {
@@ -2264,7 +2273,36 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function filterPackCompatible(vendorTitle: string, candidates: any[]): any[] {
   const vendorQty = extractPackQty(vendorTitle);
-  return candidates.filter((c) => extractPackQty(String(c?.title ?? "")) === vendorQty);
+  return candidates.filter((c) => livePackQty(c) === vendorQty);
+}
+
+/**
+ * The provider's structured units-per-package for a live candidate, when it
+ * supplied one: Keepa's `packageQuantity`/`numberOfItems`, Synccentric's
+ * package-quantity field — both normalize to `packageQuantity`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function structuredPackQty(c: any): number | null {
+  const v = Number(c?.packageQuantity);
+  return Number.isFinite(v) && v >= 1 ? Math.round(v) : null;
+}
+
+/**
+ * Live-side pack quantity for match/compare decisions.
+ *
+ * Title text alone is not enough: Amazon reuses one manufacturer UPC across
+ * single and multipack listings, and many multipack titles carry no pack
+ * wording at all ("… Air Freshener, Linen" with packageQuantity 10). The
+ * structured field alone is not enough either — listings exist where it says 1
+ * while the title says the truth ("… Doormat (5)"). Whichever side claims the
+ * larger count wins: the cost of missing a multipack (client ships 1, buyer
+ * expected 5) far exceeds the cost of a visible pack warning on a single.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function livePackQty(c: any): number {
+  const structured = structuredPackQty(c);
+  const fromTitle = extractPackQty(String(c?.title ?? ""));
+  return Math.max(structured ?? 1, fromTitle);
 }
 
 // ── Pack-quantity helpers ─────────────────────────────────────────────────────
@@ -2436,7 +2474,7 @@ export function extractPackInfo(
   // correct Amazon match. A "pack of 1" therefore yields to any other strong
   // count in the same source; "pack of N>1" still wins outright, since that
   // suffix genuinely describes a multipack.
-  const PACK_OF = /pack[- ]?of[- ]?(\d+)/;   // "pack of 6", "(Pack-of-6)", "pack of5"
+  const PACK_OF = /(?:pack|pkg|package)[- ]?of[- ]?(\d+)/; // "pack of 6", "(Pack-of-6)", "Pkg of 5", "package of 2"
   const STRONG: RegExp[] = [
     /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
     /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
@@ -2447,6 +2485,7 @@ export function extractPackInfo(
     /bundle[- ]?of[- ]?(\d+)/,           // "bundle of 4", "bundle of4"
     /multipack[- ]?of[- ]?(\d+)/,        // "multipack of 3"
     /qty[: ]+(\d+)/,                     // "qty: 6"
+    /\bquantity[-: ]?(\d+)\b/,           // "Quantity 10", "quantity: 10"
     /\((\d+)\s*(?:pack|count|ct|pk|pcs?|pieces?)\)/, // "(6 pack)", "(12 ct)", "(3 pcs)"
   ];
   const WEAK: RegExp[] = [
@@ -2476,6 +2515,17 @@ export function extractPackInfo(
       const m = t.match(re);
       if (m) return { qty: parseInt(m[1]!, 10), strong: false, explicit: true };
     }
+  }
+  // A bare trailing "(N)" — "Farmhouse Doormat (5)" — is how some Amazon
+  // multipack listings state their count with no pack word at all. Title only,
+  // bounded to 2–99, and graded WEAK: a small trailing number is usually a
+  // count, but "(120)" on a string-light title is the number of LEDs, and a
+  // weak signal on one side alone never flags a mismatch — the vendor feed's
+  // explicit "(Pack of N)" suffix is what makes the pair comparable.
+  const trailing = title.toLowerCase().match(/\((\d{1,2})\)\s*$/);
+  if (trailing) {
+    const q = parseInt(trailing[1]!, 10);
+    if (q >= 2) return { qty: q, strong: false, explicit: true };
   }
   return { qty: 1, strong: false, explicit: false };
 }

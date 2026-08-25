@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractPackInfo, extractPackQty } from "./verify";
+import { extractPackInfo, extractPackQty, filterPackCompatible, livePackQty } from "./verify";
 
 describe("extractPackInfo", () => {
   it("treats explicit packaging terms as strong signals", () => {
@@ -48,6 +48,58 @@ describe("extractPackInfo", () => {
   it("still reads a bare '(Pack of 1)' as a single unit", () => {
     expect(extractPackInfo("BATTRY ALKLN DURA 9V CD2 (Pack of 1)"))
       .toEqual({ qty: 1, strong: true, explicit: true });
+  });
+
+  it("reads 'Pkg of N' / 'Package of N' like 'Pack of N'", () => {
+    expect(extractPackInfo("Design Imports Kitchen Towel, Pkg of 5"))
+      .toEqual({ qty: 5, strong: true, explicit: true });
+    expect(extractPackInfo("Wall Hooks Package of 2"))
+      .toEqual({ qty: 2, strong: true, explicit: true });
+  });
+
+  it("reads 'Quantity N' as a strong signal", () => {
+    expect(extractPackInfo("Air Freshener Refill, Linen Scent, Quantity 10"))
+      .toEqual({ qty: 10, strong: true, explicit: true });
+  });
+
+  it("reads a bare trailing '(N)' as a weak count", () => {
+    // Some Amazon multipack listings end with just "(5)" and no pack word.
+    expect(extractPackInfo("Farmhouse Coir Doormat, Natural (5)"))
+      .toEqual({ qty: 5, strong: false, explicit: true });
+    // Weak so that a mismatch needs the other side to be explicit too;
+    // a 3-digit trailing number (LED counts, model numbers) never matches.
+    expect(extractPackInfo("String Lights Warm White (120)"))
+      .toEqual({ qty: 1, strong: false, explicit: false });
+    // Mid-title parentheses are not a trailing count.
+    expect(extractPackInfo("Widget (5) Deluxe Edition"))
+      .toEqual({ qty: 1, strong: false, explicit: false });
+  });
+});
+
+describe("livePackQty", () => {
+  it("trusts the structured packageQuantity when the title says nothing", () => {
+    // The client's real failure: UPC shared across pack sizes, multipack
+    // listing with a pack-wordless title, packageQuantity 5 stored but ignored.
+    expect(livePackQty({ title: "Empire Level Magnetic Torpedo Level", packageQuantity: 5 })).toBe(5);
+  });
+
+  it("lets the title win when it claims more than the structured field", () => {
+    // packageQuantity 1 but the title's "(5)" is the truth.
+    expect(livePackQty({ title: "Coir Doormat, Natural (5)", packageQuantity: 1 })).toBe(5);
+  });
+
+  it("falls back to title text when no structured field exists", () => {
+    expect(livePackQty({ title: "Kitchen Towels Pack of 6" })).toBe(6);
+    expect(livePackQty({ title: "Ceramic Mug" })).toBe(1);
+  });
+});
+
+describe("filterPackCompatible", () => {
+  it("rejects a multipack candidate by structured qty even when its title has no pack wording", () => {
+    const single = { title: "Torpedo Level 9 in", packageQuantity: 1 };
+    const fivePack = { title: "Torpedo Level 9 in", packageQuantity: 5 };
+    expect(filterPackCompatible("TORPEDO LEVEL 9IN (Pack of 1)", [fivePack, single]))
+      .toEqual([single]);
   });
 });
 
