@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractPackInfo, extractPackQty, filterPackCompatible, livePackQty } from "./verify";
+import { extractPackInfo, extractPackQty, filterPackCompatible, livePackQty, stripPackPhrases } from "./verify";
 
 describe("extractPackInfo", () => {
   it("treats explicit packaging terms as strong signals", () => {
@@ -7,6 +7,10 @@ describe("extractPackInfo", () => {
     expect(extractPackInfo("Coasters Set of 4")).toEqual({ qty: 4, strong: true, explicit: true });
     expect(extractPackInfo("Trivets 12 ct")).toEqual({ qty: 12, strong: true, explicit: true });
     expect(extractPackInfo("Wholesale CASE of 10 Pot Holders")).toEqual({ qty: 10, strong: true, explicit: true });
+    // Live Amazon listings use "Carton of N" the way others use "Case of N" —
+    // it was invisible, letting a 10-carton pass as a single unit.
+    expect(extractPackInfo("Air Vent Automatic Foundation Vents (Carton of 10) (Black)"))
+      .toEqual({ qty: 10, strong: true, explicit: true });
   });
 
   it("treats counting words as weak signals", () => {
@@ -108,5 +112,21 @@ describe("extractPackQty", () => {
     expect(extractPackQty("Kitchen Towels Pack of 6")).toBe(6);
     expect(extractPackQty("3-Piece Sectional Sofa")).toBe(3);
     expect(extractPackQty("Ceramic Mug")).toBe(1);
+  });
+});
+
+describe("stripPackPhrases", () => {
+  it("removes the pack phrasings seen on live Amazon multipack titles", () => {
+    expect(stripPackPhrases("Air Vent RAGR Automatic Foundation Vent, Bi-Metal Coil - Quantity 10"))
+      .toBe("Air Vent RAGR Automatic Foundation Vent, Bi-Metal Coil");
+    expect(stripPackPhrases("Howard RF4016 Restor-A-Finish, Pint, Dark Oak (Pkg of 5)"))
+      .toBe("Howard RF4016 Restor-A-Finish, Pint, Dark Oak");
+    expect(stripPackPhrases("Kitchen Towels (Pack of 6)")).toBe("Kitchen Towels");
+    expect(stripPackPhrases("Welcome Doormat (5)")).toBe("Welcome Doormat");
+  });
+
+  it("leaves titles without pack phrasing untouched", () => {
+    expect(stripPackPhrases("3-Piece Sectional Sofa")).toBe("3-Piece Sectional Sofa");
+    expect(stripPackPhrases("Ceramic Mug")).toBe("Ceramic Mug");
   });
 });

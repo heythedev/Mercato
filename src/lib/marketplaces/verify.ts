@@ -844,6 +844,45 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     return result;
   };
 
+  // ── Pack-sibling rescue ──────────────────────────────────────────────────────
+  // A set-aside match is the RIGHT product with the WRONG pack count (the barcode
+  // confirmed identity; Amazon just reuses it across pack sizes). The correct-pack
+  // listing is usually a sibling in the same variation family, or surfaces when
+  // searching Amazon for the match's own full title — the vendor's abbreviated
+  // name ("AUTO FOUND VENT 8X16 GRY") often can't find what Amazon's own words
+  // can. Runs BEFORE the failed-cascade cache check: that cache records what the
+  // vendor-name cascade found, not what the family walk can find.
+  {
+    const rescued = new Set<string>();
+    for (const p of upcNotFound) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const setAside: any = upcPackIncompatible.get(p.id);
+      if (!setAside?.asin) continue;
+      const left = getLastTokenInfo()?.tokensLeft;
+      if (left != null && left < 300) break;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const sibling: any = await findPackSibling(p, setAside);
+        if (!sibling) continue;
+        const result = compareToLive(
+          p, String(sibling.title ?? ""), (sibling.brand as string) ?? null, null,
+          sibling as Record<string, unknown>, "Amazon",
+        );
+        const resolved = resolvedUpc(p);
+        if (resolved && !p.upc) result.resolvedUpc = resolved;
+        nameResults.set(p.id, result);
+        rescued.add(p.id);
+        if (sibling.asin) {
+          const g = toGtin14(resolvedUpc(p));
+          if (g) await cacheCodeLookup(KEEPA_DOMAIN, g, [sibling.asin as string], "keyword");
+        }
+      } catch { /* leave for the normal cascade */ }
+    }
+    for (let i = upcNotFound.length - 1; i >= 0; i--) {
+      if (rescued.has(upcNotFound[i].id)) upcNotFound.splice(i, 1);
+    }
+  }
+
   // A cached KEYWORD-source empty means the full cascade already ran for this
   // barcode and found nothing. Re-running it would spend ~8 searches to reach
   // the same verdict, so answer from cache and keep them out of the pool.
@@ -2305,6 +2344,136 @@ export function livePackQty(c: any): number {
   return Math.max(structured ?? 1, fromTitle);
 }
 
+/**
+ * Remove pack-count phrasing from a title so it can be used as a search term or
+ * compared across pack sizes: "… Bi-Metal Coil - Quantity 10" → "… Bi-Metal Coil".
+ */
+export function stripPackPhrases(title: string): string {
+  return title
+    .replace(/[([]?\s*(?:pack|pkg|package|case|set|box|bag|carton)\s+of\s+\d+\s*[)\]]?/gi, " ")
+    .replace(/[([]?\s*\d+\s*[-–]?\s*(?:pack|pk|count|ct|pcs|pieces|units)\b\.?\s*[)\]]?/gi, " ")
+    .replace(/[,\s–-]*\bquantity\s*[:\s]\s*\d+\b/gi, " ")
+    .replace(/\(\s*\d{1,2}\s*\)\s*$/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/[\s,;:–-]+$/g, "")
+    .trim();
+}
+
+/**
+ * Given a barcode-confirmed match whose pack count is wrong for the catalog
+ * product, find the listing with the RIGHT pack count. Identity is already
+ * settled by the barcode — this only hunts for the correct pack size of the
+ * same product:
+ *
+ *  1. Variation family — pack sizes are usually siblings under one parent ASIN.
+ *     A sibling with the wanted count inherits the identity outright.
+ *  2. Keyword search for the match's own title (pack phrasing stripped) — the
+ *     single-unit listing often lives under a different UPC the vendor file
+ *     doesn't have, but Amazon's own wording for the product finds it. Accepted
+ *     only with the same brand and near-identical title (or a shared model/part
+ *     number), so "same product line, different product" stays out.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function findPackSibling(p: Product, setAside: any): Promise<any | null> {
+  const { getProducts, keywordSearch, normalizeMany } = await import("@/lib/keepa");
+  const wantQty = extractPackQty(p.name);
+  const cleanedTitle = stripPackPhrases(String(setAside.title ?? ""));
+  const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const setAsideModels = [setAside.model, setAside.partNumber]
+    .filter((m: unknown): m is string => typeof m === "string" && !!m.trim())
+    .map(modelNorm);
+  // Pack variants usually share the base model number, sometimes with a pack
+  // suffix ("RAGR" vs "RAGR-10"). Exact equality is identity on its own;
+  // prefix containment is supporting evidence that still needs title agreement.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const modelStrength = (c: any): "exact" | "prefix" | null => {
+    const candModels = [c.model, c.partNumber]
+      .filter((m: unknown): m is string => typeof m === "string" && !!m.trim())
+      .map(modelNorm);
+    let strength: "exact" | "prefix" | null = null;
+    for (const sm of setAsideModels) {
+      if (sm.length < 4) continue;
+      for (const cm of candModels) {
+        if (cm === sm) return "exact";
+        if (cm.startsWith(sm) || sm.startsWith(cm)) strength = "prefix";
+      }
+    }
+    return strength;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pickBySim = (pool: any[]): { best: any; sim: number } | null => {
+    let best = null; let sim = 0;
+    for (const c of pool) {
+      const s = titleSim(cleanedTitle, stripPackPhrases(String(c.title ?? "")));
+      if (!best || s > sim) { best = c; sim = s; }
+    }
+    return best ? { best, sim } : null;
+  };
+
+  // 1 ─ Variation family walk.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const collect = (raw: any): string[] => [
+      ...(typeof raw?.variationCSV === "string" ? raw.variationCSV.split(",") : []),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...(Array.isArray(raw?.variations) ? raw.variations.map((v: any) => v?.asin) : []),
+    ].map((a) => String(a ?? "").trim()).filter(Boolean);
+    const [rawSelf] = await getProducts(1, [setAside.asin]);
+    let childAsins = collect(rawSelf);
+    if (!childAsins.length && rawSelf?.parentAsin) {
+      const [rawParent] = await getProducts(1, [rawSelf.parentAsin]);
+      childAsins = collect(rawParent);
+    }
+    const others = [...new Set(childAsins)].filter((a) => a !== setAside.asin).slice(0, 20);
+    if (others.length) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sibs = normalizeMany(await getProducts(1, others, { stats: 1 }), 1) as any[];
+      const packOk = sibs.filter((c) => livePackQty(c) === wantQty);
+      const picked = pickBySim(packOk);
+      if (picked) return picked.best; // family sibling — identity inherited from the barcode match
+    }
+  } catch { /* fall through to title search */ }
+
+  // 2 ─ Search Amazon for the match's own (pack-stripped) title, then for its
+  //     brand + part number. Third-party multipack listings often carry an
+  //     abbreviated title that finds nothing, but still state the manufacturer
+  //     model — "Howard RF4016" finds the real single where "RESTOR-A-FIN DK
+  //     OAK PT" cannot.
+  const searchTerms: string[] = [];
+  if (cleanedTitle.split(/\s+/).filter(Boolean).length >= 3) searchTerms.push(cleanedTitle);
+  const mpn = [setAside.model, setAside.partNumber].find(
+    (m: unknown): m is string => typeof m === "string" && m.trim().length >= 4);
+  if (mpn) {
+    const term = [setAside.brand, mpn].filter(Boolean).join(" ").trim();
+    if (term && !searchTerms.includes(term)) searchTerms.push(term);
+  }
+  for (const term of searchTerms) {
+    try {
+      const { asinList } = await keywordSearch(1, term);
+      if (!asinList.length) continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cands = normalizeMany(await getProducts(1, asinList.slice(0, 20), { stats: 1 }), 1) as any[];
+      const wantBrand = norm(setAside.brand);
+      const packOk = cands.filter((c) =>
+        c.asin !== setAside.asin &&
+        livePackQty(c) === wantQty &&
+        (!wantBrand || norm(c.brand) === wantBrand ||
+          norm(c.brand).includes(wantBrand) || wantBrand.includes(norm(c.brand))));
+      if (!packOk.length) continue;
+      // An exact model/part-number match wins outright — same identity standard
+      // the main cascade applies. Otherwise pick by title agreement.
+      const exact = packOk.filter((c) => modelStrength(c) === "exact");
+      const picked = pickBySim(exact.length ? exact : packOk);
+      if (!picked) continue;
+      const strength = modelStrength(picked.best);
+      if (strength === "exact") return picked.best;
+      if (strength === "prefix" && picked.sim >= 0.3) return picked.best;
+      if (picked.sim >= 0.55) return picked.best;
+    } catch { /* try the next term */ }
+  }
+  return null;
+}
+
 // ── Pack-quantity helpers ─────────────────────────────────────────────────────
 // Extracts the item-count / pack size from a product title.
 // No mention → treated as 1 (single unit). Used to flag qty mismatches between
@@ -2478,6 +2647,7 @@ export function extractPackInfo(
   const STRONG: RegExp[] = [
     /(\d+)[- ]?pack\b/,                  // "6-pack", "6 pack", "6pack"
     /(?:wholesale\s+)?case[- ]?of[- ]?(\d+)/, // "case of 10", "Wholesale CASE of 10"
+    /carton[- ]?of[- ]?(\d+)/,           // "Carton of 10" — live listings use it like "case of"
     /set[- ]?of[- ]?(\d+)/,              // "set of 3", "set of3"
     /(\d+)[- ]?(?:count|ct)\b/,          // "6 count", "6ct"
     /(\d+)[- ]?pk\b/,                    // "6pk", "6-pk"
