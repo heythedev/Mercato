@@ -1,4 +1,6 @@
 import type { CatalogEntry } from "./vendor-catalog";
+import { getProducts, keywordSearch } from "@/lib/keepa/client";
+import { normalizeMany } from "@/lib/keepa/product";
 
 /**
  * Vickerman catalog resolver (vickerman.com — ASP.NET storefront, NOT Shopify).
@@ -11,15 +13,23 @@ import type { CatalogEntry } from "./vendor-catalog";
  *      ("/p/vickerman-green-artificial-fittonia-bush-ftl2501"). The slug tail is the
  *      product FAMILY code; sheet codes are usually that family plus a size/color
  *      suffix (FTL250133UV → family FTL2501), so exact-tail + longest-prefix matching
- *      resolves most codes offline from one cached fetch.
- *   2. /search?q=<code> — server-rendered HTML whose result links are /p/ pages. The
- *      site's own search resolves family codes the sitemap prefix match misses. Every
- *      hit is guarded: its slug tail must be prefix-consistent with our code, or it is
- *      rejected (site search happily returns loose keyword matches).
+ *      resolves most codes offline from one cached fetch. Sheet codes with NUMERIC
+ *      suffixes (TN1703014) never prefix-match slug tails carrying LETTER color
+ *      suffixes (TN1702EG) — the family-ROOT index below bridges that by stripping
+ *      the tail's trailing letter run and accepting a 1–4 digit remainder.
+ *   2. /search?q=<code> — server-rendered HTML whose result links are /p/ pages.
+ *      Kept as a last-ditch on-site path, but the endpoint currently returns no
+ *      /p/ hits even for codes with live pages — hence the sitemap fetch retries
+ *      and the Amazon fallback below.
  *   3. /p/<slug> pages carry a <dt>/<dd> spec list (Product Type, Primary Material,
  *      Weight, Dimensions, UPC), feature bullets, and per-variant images named
  *      /images/<EXACTCODE>_1000.jpg — real data for categorization AND for the export
  *      template's attribute columns.
+ *
+ * Codes vickerman.com doesn't carry at all are looked up on Amazon via Keepa —
+ * accepted ONLY when the listing is Vickerman-branded AND its model/part number is
+ * consistent with our code. "COMBO…" codes are Mathis-internal bundles that exist in
+ * no catalog and are never searched.
  *
  * A code that can't be matched consistently stays unresolved on purpose — the
  * categorize gate then routes it to review instead of letting the model guess from
@@ -80,6 +90,13 @@ type SitemapIndex = {
   bySlugTail: Map<string, string>;
   /** All tail codes, for longest-prefix family matching. */
   tails: string[];
+  /**
+   * Family root (tail minus its trailing letter run, e.g. A1183G → A1183) → slug.
+   * Sheet codes append a numeric size suffix to the family root (A1183026), while
+   * site tails append a letter color suffix — so plain prefix matching can never
+   * connect them; this index can.
+   */
+  roots: Map<string, string>;
 };
 
 let sitemapCache: { index: SitemapIndex; fetchedAt: number } | null = null;
@@ -98,7 +115,11 @@ async function getSitemapIndex(): Promise<SitemapIndex | null> {
 
   sitemapInflight = (async () => {
     try {
-      const xml = await fetchText(`${SITE}/sitemap.xml`, 30000);
+      // Retry once: the sitemap is the resolver's backbone (site search is dead),
+      // so a transient fetch failure must not silently zero out a whole run.
+      const xml =
+        (await fetchText(`${SITE}/sitemap.xml`, 30000)) ??
+        (await fetchText(`${SITE}/sitemap.xml`, 45000));
       if (!xml) return sitemapCache?.index ?? null;
       const bySlugTail = new Map<string, string>();
       for (const m of xml.matchAll(/<loc>[^<]*\/p\/([^<]+)<\/loc>/g)) {
@@ -107,7 +128,24 @@ async function getSitemapIndex(): Promise<SitemapIndex | null> {
         if (tail) bySlugTail.set(tail, slug);
       }
       if (bySlugTail.size === 0) return sitemapCache?.index ?? null;
-      const index: SitemapIndex = { bySlugTail, tails: [...bySlugTail.keys()] };
+
+      // Family-root index: strip each tail's trailing letter run (the color code).
+      // Roots must keep a digit and ≥5 chars or they'd match across families.
+      // When several tails share a root, prefer the tail that IS the root (the
+      // family's base page), else the shortest tail (most generic variant).
+      const roots = new Map<string, string>();
+      const rootTail = new Map<string, string>();
+      for (const [tail, slug] of bySlugTail) {
+        const root = tail.replace(/[A-Z]+$/, "");
+        if (root.length < 5 || !/\d/.test(root)) continue;
+        const prev = rootTail.get(root);
+        if (!prev || (prev !== root && (tail === root || tail.length < prev.length))) {
+          rootTail.set(root, tail);
+          roots.set(root, slug);
+        }
+      }
+
+      const index: SitemapIndex = { bySlugTail, tails: [...bySlugTail.keys()], roots };
       sitemapCache = { index, fetchedAt: Date.now() };
       return index;
     } finally {
@@ -134,6 +172,25 @@ function familyMatch(index: SitemapIndex, code: string): string | null {
     if (familyConsistent(code, tail)) {
       best = index.bySlugTail.get(tail)!;
       bestLen = tail.length;
+    }
+  }
+  return best;
+}
+
+/**
+ * Longest family root R with code = R + numeric size suffix (1–4 digits).
+ * Catches sheet codes whose digits diverge from every tail's letter color suffix
+ * (A1183026 vs site pages A1183G/A1183SW), which familyMatch can never connect.
+ */
+function rootMatch(index: SitemapIndex, code: string): string | null {
+  let best: string | null = null;
+  let bestLen = 0;
+  for (const [root, slug] of index.roots) {
+    if (root.length <= bestLen || !code.startsWith(root)) continue;
+    const rem = code.slice(root.length);
+    if (rem.length >= 1 && rem.length <= 4 && /^\d+$/.test(rem)) {
+      best = slug;
+      bestLen = root.length;
     }
   }
   return best;
@@ -233,10 +290,72 @@ function dimensionAttributes(dims: string): Record<string, string> {
   };
 }
 
+// ── Amazon fallback (Keepa) ───────────────────────────────────────────────────
+
+const amazonCache = new Map<string, CatalogEntry | null>();
+
+/**
+ * Codes vickerman.com no longer lists (discontinued families) are often still sold
+ * by Vickerman on Amazon with the catalog code as the listing's model/part number.
+ * Double-guarded so this can enrich but never mislabel: the listing must be
+ * Vickerman-branded AND its model/part number (or title) must be consistent with
+ * our code. "COMBO…" codes are Mathis-built bundles that exist in no catalog —
+ * never searched, they stay unresolved for review.
+ */
+async function amazonFallback(code: string): Promise<CatalogEntry | null> {
+  if (!process.env.KEEPA_API_KEY) return null;
+  if (/^COMBO/i.test(code)) return null;
+  if (amazonCache.has(code)) return amazonCache.get(code)!;
+
+  let entry: CatalogEntry | null = null;
+  try {
+    const { asinList } = await keywordSearch(1, `Vickerman ${code}`);
+    if (asinList.length) {
+      const raw = await getProducts(1, asinList.slice(0, 10));
+      const norm = (s: unknown) =>
+        String(s ?? "")
+          .toUpperCase()
+          .replace(/[^A-Z0-9.]/g, "");
+      for (const c of normalizeMany(raw, 1)) {
+        if (!c.title) continue;
+        if (!/vickerman/i.test(`${c.brand ?? ""} ${c.title}`)) continue;
+        const ids = [c.model, c.partNumber].map(norm).filter((s) => s.length >= 5);
+        const codeConsistent =
+          ids.some((id) => id === code || code.startsWith(id) || id.startsWith(code)) ||
+          norm(c.title).includes(code);
+        if (!codeConsistent) continue;
+        const options: Record<string, string> = {};
+        if (c.upc) options["UPC"] = String(c.upc);
+        entry = {
+          sku: code,
+          title: c.title.trim(),
+          brand: "Vickerman",
+          description: c.description ?? null,
+          image: c.image ?? c.images[0] ?? null,
+          handle: `amazon:${c.asin}`,
+          tags: c.category ? [c.category] : [],
+          category: c.category ?? null,
+          images: c.images,
+          options,
+          grams: typeof c.weightG === "number" && c.weightG > 0 ? Math.round(c.weightG) : null,
+        };
+        break;
+      }
+    }
+  } catch {
+    // Keepa outage/quota — leave unresolved rather than caching a hard failure state.
+    return null;
+  }
+
+  amazonCache.set(code, entry);
+  return entry;
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /**
- * Resolve a "VICK-…" sheet code to a CatalogEntry via vickerman.com.
+ * Resolve a "VICK-…" sheet code to a CatalogEntry via vickerman.com, falling back
+ * to a strictly-validated Amazon listing via Keepa when the site has no match.
  * Returns null when no family-consistent product can be found — never a loose guess.
  */
 export async function resolveVickermanSku(sku: string): Promise<CatalogEntry | null> {
@@ -247,11 +366,12 @@ export async function resolveVickermanSku(sku: string): Promise<CatalogEntry | n
   let slug = index?.bySlugTail.get(code) ?? null;
   const exact = !!slug;
   if (!slug && index) slug = familyMatch(index, code);
+  if (!slug && index) slug = rootMatch(index, code);
   if (!slug) slug = await searchSite(code);
-  if (!slug) return null;
+  if (!slug) return amazonFallback(code);
 
   const pdp = await fetchPdp(slug);
-  if (!pdp) return null;
+  if (!pdp) return amazonFallback(code);
 
   // Prefer the images whose filename carries OUR exact code (each size/color variant
   // has its own photos); fall back to the family page's images.
