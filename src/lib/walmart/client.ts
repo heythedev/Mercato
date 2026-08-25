@@ -8,6 +8,8 @@ export type WalmartItem = {
   upc?: string;
   name?: string;
   brandName?: string;
+  /** Manufacturer part/model number — an exact match here is an identity match. */
+  modelNumber?: string;
   salePrice?: number;
   msrp?: number;
   thumbnailImage?: string;

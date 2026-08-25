@@ -194,7 +194,13 @@ export async function getProductsByCode(
 
 export async function keywordSearch(domain: number, term: string): Promise<{ asinList: string[]; products?: KeepaProduct[] }> {
   const json = await call("search", { domain, type: "product", term });
-  return { asinList: (json.asinList as string[]) ?? [], products: json.products as KeepaProduct[] | undefined };
+  // Keepa's /search responses carry full product objects, NOT an asinList field —
+  // reading only json.asinList made every keyword search return empty. Derive the
+  // list from the products so both consumers (asinList and products) work.
+  const products = Array.isArray(json.products) ? (json.products as KeepaProduct[]) : undefined;
+  const fromField = Array.isArray(json.asinList) ? (json.asinList as string[]) : [];
+  const asinList = fromField.length ? fromField : (products?.map((p) => p.asin).filter(Boolean) ?? []);
+  return { asinList, products };
 }
 
 export async function searchCategories(domain: number, term: string): Promise<{ catId: number; name: string }[]> {

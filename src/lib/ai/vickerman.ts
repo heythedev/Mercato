@@ -1,6 +1,7 @@
 import type { CatalogEntry } from "./vendor-catalog";
 import { getProducts, keywordSearch } from "@/lib/keepa/client";
 import { normalizeMany } from "@/lib/keepa/product";
+import { searchWalmartCandidates } from "@/lib/walmart/client";
 
 /**
  * Vickerman catalog resolver (vickerman.com — ASP.NET storefront, NOT Shopify).
@@ -309,9 +310,15 @@ async function amazonFallback(code: string): Promise<CatalogEntry | null> {
 
   let entry: CatalogEntry | null = null;
   try {
-    const { asinList } = await keywordSearch(1, `Vickerman ${code}`);
-    if (asinList.length) {
-      const raw = await getProducts(1, asinList.slice(0, 10));
+    // Keepa's /search returns full product objects — use them directly and only
+    // pay for a /product call when a response carries bare ASINs.
+    const { asinList, products } = await keywordSearch(1, `Vickerman ${code}`);
+    const raw = products?.length
+      ? products.slice(0, 10)
+      : asinList.length
+        ? await getProducts(1, asinList.slice(0, 10))
+        : [];
+    if (raw.length) {
       const norm = (s: unknown) =>
         String(s ?? "")
           .toUpperCase()
@@ -351,12 +358,80 @@ async function amazonFallback(code: string): Promise<CatalogEntry | null> {
   return entry;
 }
 
+// ── Walmart fallback (affiliate API) ──────────────────────────────────────────
+
+const walmartCache = new Map<string, CatalogEntry | null>();
+
+/**
+ * Walmart carries much of the Vickerman Everyday line vickerman.com dropped, and
+ * its listings echo the manufacturer code as `modelNumber` — exact equality there
+ * is an identity match, not a guess. Anything less is rejected: Walmart's search
+ * happily pads results with unrelated same-brand items.
+ */
+async function walmartFallback(code: string): Promise<CatalogEntry | null> {
+  if (!process.env.WALMART_AFFILIATE_CONSUMER_ID || !process.env.WALMART_AFFILIATE_PRIVATE_KEY) {
+    return null;
+  }
+  if (/^COMBO/i.test(code)) return null;
+  if (walmartCache.has(code)) return walmartCache.get(code)!;
+
+  let entry: CatalogEntry | null = null;
+  try {
+    const items = await searchWalmartCandidates(`Vickerman ${code}`);
+    if (items === undefined) return null; // lookup failed — retryable, don't cache
+    const norm = (s: unknown) =>
+      String(s ?? "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9.]/g, "");
+    const stripTags = (s: string) => decodeEntities(s.replace(/<[^>]+>/g, " "));
+    for (const it of items) {
+      if (!it.name || norm(it.modelNumber) !== code) continue;
+      if (!/vickerman/i.test(`${it.brandName ?? ""} ${it.name}`)) continue;
+      const images = [it.largeImage, ...(it.imageEntities ?? []).map((e) => e.largeImage)]
+        .filter((u): u is string => !!u)
+        .filter((u, i, a) => a.indexOf(u) === i);
+      const category = it.categoryPath?.split("/").filter(Boolean).pop()?.trim() || null;
+      const options: Record<string, string> = {};
+      if (it.upc) options["UPC"] = it.upc;
+      entry = {
+        sku: code,
+        title: decodeEntities(it.name),
+        brand: "Vickerman",
+        description: it.longDescription
+          ? stripTags(it.longDescription)
+          : it.shortDescription
+            ? stripTags(it.shortDescription)
+            : null,
+        image: images[0] ?? null,
+        handle: `walmart:${it.itemId ?? code}`,
+        tags: category ? [category] : [],
+        category,
+        images,
+        options,
+        grams: null,
+      };
+      break;
+    }
+  } catch {
+    return null;
+  }
+
+  walmartCache.set(code, entry);
+  return entry;
+}
+
+/** Off-site resolution for codes vickerman.com doesn't carry: Amazon, then Walmart. */
+async function offSiteFallback(code: string): Promise<CatalogEntry | null> {
+  return (await amazonFallback(code)) ?? walmartFallback(code);
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /**
  * Resolve a "VICK-…" sheet code to a CatalogEntry via vickerman.com, falling back
- * to a strictly-validated Amazon listing via Keepa when the site has no match.
- * Returns null when no family-consistent product can be found — never a loose guess.
+ * to a strictly-validated Amazon (Keepa) or Walmart (affiliate) listing when the
+ * site has no match. Returns null when no identity-consistent product can be
+ * found — never a loose guess.
  */
 export async function resolveVickermanSku(sku: string): Promise<CatalogEntry | null> {
   const code = vickCode(sku);
@@ -368,10 +443,10 @@ export async function resolveVickermanSku(sku: string): Promise<CatalogEntry | n
   if (!slug && index) slug = familyMatch(index, code);
   if (!slug && index) slug = rootMatch(index, code);
   if (!slug) slug = await searchSite(code);
-  if (!slug) return amazonFallback(code);
+  if (!slug) return offSiteFallback(code);
 
   const pdp = await fetchPdp(slug);
-  if (!pdp) return amazonFallback(code);
+  if (!pdp) return offSiteFallback(code);
 
   // Prefer the images whose filename carries OUR exact code (each size/color variant
   // has its own photos); fall back to the family page's images.
