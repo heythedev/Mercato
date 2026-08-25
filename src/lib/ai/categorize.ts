@@ -516,8 +516,13 @@ export async function categorizeProducts(
   if (availableCategories?.length) {
     const allowed = new Set([...availableCategories, "Uncategorized"]);
 
-    // Retry products that landed off-list (AI hallucinated a category name)
-    const offListIds = new Set(allResults.filter((r) => !allowed.has(r.category)).map((r) => r.productId));
+    // Retry products that landed off-list (AI hallucinated a category name) AND
+    // products carrying a fallback stamp (confidence ≤ 0.1 — a failed batch or a
+    // product missing from the AI response, not a real judgment). Both deserve
+    // one clean attempt before the run settles them as Uncategorized.
+    const offListIds = new Set(
+      allResults.filter((r) => !allowed.has(r.category) || r.confidence <= 0.1).map((r) => r.productId),
+    );
     if (offListIds.size > 0) {
       const retryInputs = products.filter((p) => offListIds.has(p.id));
       // Concurrent: serial batches against a ~45s model made this correction
@@ -541,12 +546,19 @@ export async function categorizeProducts(
           } catch {
             for (const p of batch) {
               const idx = allResults.findIndex((a) => a.productId === p.id);
-              if (idx !== -1) { allResults[idx].category = "Uncategorized"; allResults[idx].path = "Uncategorized"; changed.push(allResults[idx]); }
+              if (idx !== -1) {
+                allResults[idx].category = "Uncategorized";
+                allResults[idx].path = "Uncategorized";
+                // Sentinel: this is a transient-failure stamp, so the DB layer
+                // knows not to let it overwrite a previously earned category.
+                allResults[idx].confidence = 0.1;
+                changed.push(allResults[idx]);
+              }
             }
           }
           // Keep the run visibly alive through the retry pass too.
           retryDone += batch.length;
-          onProgress?.(Math.min(retryDone, retryInputs.length), retryInputs.length, "correcting off-list results");
+          onProgress?.(Math.min(retryDone, retryInputs.length), retryInputs.length, "retrying failed and off-list results");
           if (changed.length) await onResults?.(changed);
         }));
       }

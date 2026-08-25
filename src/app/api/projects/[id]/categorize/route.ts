@@ -60,11 +60,19 @@ async function bulkUpdateCategories(
       tuples.push(`($${n + 1}::text, $${n + 2}::text, $${n + 3}::text, $${n + 4}::double precision)`);
     }
     params.push(new Date());
+    // Confidence ≤ 0.1 marks a fallback stamp (failed batch, product missing
+    // from the AI response, off-list after retry) — not a real judgment. Such a
+    // stamp must never overwrite a category the product already earned in an
+    // earlier run or resume; keep the existing values and only refresh
+    // categorizedAt so the run still counts the product as processed.
+    const downgrade = `v.confidence <= 0.1
+           AND coalesce(p."marketplaceCategory", '') NOT IN ('', 'Uncategorized')
+           AND coalesce(p."categoryConfidence", 1) > 0.1`;
     await prisma.$executeRawUnsafe(
       `UPDATE "Product" AS p
-       SET "marketplaceCategory" = v.category,
-           "categoryPath"        = v.path,
-           "categoryConfidence"  = v.confidence,
+       SET "marketplaceCategory" = CASE WHEN ${downgrade} THEN p."marketplaceCategory" ELSE v.category END,
+           "categoryPath"        = CASE WHEN ${downgrade} THEN p."categoryPath" ELSE v.path END,
+           "categoryConfidence"  = CASE WHEN ${downgrade} THEN p."categoryConfidence" ELSE v.confidence END,
            "categorizedAt"       = $${params.length}::timestamp
        FROM (VALUES ${tuples.join(",")}) AS v(id, category, path, confidence)
        WHERE p.id = v.id`,
