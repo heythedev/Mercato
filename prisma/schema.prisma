@@ -217,3 +217,26 @@ model ExportTemplate {
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
+
+// ── Export jobs ───────────────────────────────────────────────────────────────
+
+// Durable export-job state. Job progress AND the finished ZIP live here rather
+// than in a server instance's memory: on a serverless deployment a status poll
+// can land on any instance, and the instance that built the ZIP can be frozen
+// or recycled at any moment. Rows are pruned by createJob after 48h.
+model ExportJob {
+  id          String   @id // `${projectId}_${startedAtMs}` — minted by the export POST
+  projectId   String
+  userId      String   // owner — polls from other users are refused
+  status      String   @default("processing") // processing | done | error
+  phase       String?  // human-readable progress ("Building spreadsheet files…")
+  error       String?
+  zip         Bytes?   // finished payload (ZIP or bare spreadsheet), set when done
+  extension   String?  // zip | xlsx | csv
+  contentType String?
+  missingTemplateCategories Json? // string[] — Temu categories with no matching template
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) // heartbeat — bumped on every phase/touch
+
+  @@index([updatedAt])
+}

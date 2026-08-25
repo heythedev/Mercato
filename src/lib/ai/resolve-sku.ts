@@ -114,6 +114,15 @@ export async function fillCatalogAttributes(
     vendorData?: unknown;
   }>,
   onProgress?: (done: number, total: number) => void,
+  opts?: {
+    /**
+     * Absolute Date.now() timestamp to stop at. A SKU-only sheet can need
+     * hundreds of catalog scrapes; inside a time-limited serverless function
+     * the sweep must yield rather than outlive its host. Partial results are
+     * fine — callers persist fills, so the next run resumes where this stopped.
+     */
+    deadline?: number;
+  },
 ): Promise<Map<string, CatalogAttributeFill>> {
   const out = new Map<string, CatalogAttributeFill>();
 
@@ -135,6 +144,12 @@ export async function fillCatalogAttributes(
   const PARALLEL = Number(process.env.SKU_ENRICH_PARALLELISM ?? 10);
   let done = 0;
   for (let i = 0; i < needsFill.length; i += PARALLEL) {
+    if (opts?.deadline && Date.now() > opts.deadline) {
+      console.warn(
+        `[catalog] back-fill time budget hit at ${done}/${needsFill.length} — remaining products fill on the next run`,
+      );
+      break;
+    }
     const slice = needsFill.slice(i, i + PARALLEL);
     await Promise.all(
       slice.map(async (p) => {

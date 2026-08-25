@@ -1,12 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate, Prisma } from "@prisma/client";
 import { generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
-import { createJob, resolveJob, rejectJob, getJob, setJobPhase, touchJob } from "@/lib/export/job-store";
+import { createJob, resolveJob, rejectJob, getJobStatus, getJobZip, setJobPhase, touchJob } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
 
 export const maxDuration = 300;
+
+// The catalog image back-fill scrapes the vendor's site per SKU. A SKU-only
+// sheet where every product is missing an image (852 Vickerman rows) turns
+// that into a minutes-long network sweep that outlives the function — so it
+// gets a hard time budget instead. Fills are persisted, so each export run
+// picks up where the previous one stopped and the catalog heals incrementally.
+const BACKFILL_BUDGET_MS = 120_000;
 
 // Poll job status / download completed ZIP
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -17,8 +25,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const jobId = req.nextUrl.searchParams.get("jobId");
   if (!jobId) return NextResponse.json({ error: "jobId required" }, { status: 400 });
 
-  const job = getJob(jobId);
-  if (!job) return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
+  const job = await getJobStatus(jobId);
+  // A job belonging to someone else reads as absent rather than Forbidden —
+  // jobIds encode the project id, no need to confirm they exist to outsiders.
+  if (!job || job.userId !== user!.id) {
+    return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
+  }
 
   if (job.status === "processing") {
     // Echo the phase and a heartbeat so the client can show real progress and
@@ -36,10 +48,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   // Done — serve the ZIP under a human-readable name
   // ("mercato-Spring Catalog-mathis-23-07-2026.zip" rather than the raw project id).
-  const meta = await prisma.project.findUnique({
-    where: { id },
-    select: { name: true, marketplace: true },
-  });
+  // The payload is fetched only now, so the poll loop never drags the BYTEA
+  // column across the wire.
+  const [zip, meta] = await Promise.all([
+    getJobZip(jobId),
+    prisma.project.findUnique({
+      where: { id },
+      select: { name: true, marketplace: true },
+    }),
+  ]);
+  if (!zip) return NextResponse.json({ error: "Export payload missing — please run the export again" }, { status: 410 });
   // Single-file exports are served as the spreadsheet itself, so the extension
   // and MIME type follow whatever the job actually stored.
   const extension = job.extension ?? "zip";
@@ -50,8 +68,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     extension,
   });
 
-  const missing = job.missingTemplateCategories ?? [];
-  return new Response(job.zip as unknown as BodyInit, {
+  const missing = job.missingTemplateCategories;
+  return new Response(zip as unknown as BodyInit, {
     headers: {
       "Content-Type": contentType,
       "Content-Disposition": contentDisposition(filename),
@@ -88,11 +106,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const jobId = `${id}_${Date.now()}`;
-  createJob(jobId);
+  await createJob(jobId, id, user!.id);
 
-  // All heavy work (loading products JSON, loading template fileData BYTEA) runs here in background.
-  // The HTTP response returns the jobId above; client polls GET until done.
-  void (async () => {
+  // All heavy work (loading products JSON, loading template fileData BYTEA)
+  // runs after the response. `after()` matters on Vercel: a bare fire-and-forget
+  // promise has no guaranteed CPU once the response is sent — the instance can
+  // be frozen mid-query, which leaked pool connections until the next export
+  // died with "timeout exceeded when trying to connect". `after()` keeps the
+  // function alive (up to maxDuration) until the job finishes.
+  after(async () => {
     // Mark exporting inside the background job so the POST can return the jobId
     // immediately without a DB round-trip. Previously this was awaited in the
     // request handler — if the DB was slow or the connection pool was exhausted
@@ -101,7 +123,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Heartbeat: bump updatedAt every 20s for the whole job so long single
     // operations (the product load, one giant model batch) never look dead to
     // the client's stall detector even when the phase string is unchanged.
-    const heartbeat = setInterval(() => touchJob(jobId), 20_000);
+    const heartbeat = setInterval(() => { void touchJob(jobId); }, 20_000);
     try {
       const useAutoMatch = autoMatch || !!templateId;
       const useTemplateIds = !autoMatch && !templateId && templateIds.length > 0;
@@ -120,7 +142,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // Include fileData so category-zip exports can use fillTemplateXlsx and preserve
       // original template formatting, column widths, styles, and dropdown validations.
       // userId is included so we can prefer user-uploaded templates over admin/global ones.
-      setJobPhase(jobId, "Loading products…");
+      await setJobPhase(jobId, "Loading products…");
       const templateSelect = { id: true, name: true, marketplace: true, category: true, fileFormat: true, columns: true, fileData: true, userId: true };
       // Select only the columns the export actually reads. `include: products`
       // pulled every column, and `liveData` alone (Walmart's full listing
@@ -214,7 +236,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const { fillCatalogAttributes } = await import("@/lib/ai/resolve-sku");
         const fills = await fillCatalogAttributes(
           products,
-          (done, total) => setJobPhase(jobId, `Fetching product images ${done}/${total}…`),
+          (done, total) => { void setJobPhase(jobId, `Fetching product images ${done}/${total}…`); },
+          { deadline: Date.now() + BACKFILL_BUDGET_MS },
         );
         if (fills.size > 0) {
           products = products.map((p) => {
@@ -228,6 +251,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             };
           });
           const originalById = new Map(products.map((p) => [p.id, p]));
+          // Chunk size 5, not the default 10: the default equals the pg pool's
+          // max, and a write burst that owns every connection starves the
+          // status polls running concurrently on this same instance.
           await inChunks([...fills.keys()], (productId) => {
             const merged = originalById.get(productId);
             return prisma.product.update({
@@ -238,7 +264,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
                 vendorData: (merged?.vendorData ?? undefined) as any,
               },
             });
-          });
+          }, 5);
           console.log(`[export] catalog back-fill: images/attributes added for ${fills.size} products`);
         }
       } catch (err) {
@@ -249,14 +275,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // instead of copying vendor titles word-for-word. Falls back to vendor name on error.
       if (mpLower === "walmart" && products.length > 0) {
         try {
-          setJobPhase(jobId, `Generating optimised titles for ${products.length} products…`);
+          await setJobPhase(jobId, `Generating optimised titles for ${products.length} products…`);
           const { generateMarketplaceTitles } = await import("@/lib/ai/generate-title");
           // Per-batch progress: a 7k catalog makes ~470 title batches, and a
           // single static phase for all of them reads as a stalled export to
           // the client's 5-minute no-progress detector.
-          const titleMap = await generateMarketplaceTitles("walmart", products, (done, total) =>
-            setJobPhase(jobId, `Generating optimised titles ${done}/${total}…`),
-          );
+          const titleMap = await generateMarketplaceTitles("walmart", products, (done, total) => {
+            void setJobPhase(jobId, `Generating optimised titles ${done}/${total}…`);
+          });
           if (titleMap.size > 0) {
             products = products.map((p) =>
               titleMap.has(p.id) ? { ...p, name: titleMap.get(p.id)! } : p
@@ -329,7 +355,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // data at row 8) inside fillTemplateXlsx — see WAYFAIR_HEADER_PROFILE in zip.ts.
       const usesCategoryExport = isTemu || isBestBuy || isWalmart || isWayfair;
 
-      setJobPhase(jobId, "Building spreadsheet files…");
+      await setJobPhase(jobId, "Building spreadsheet files…");
 
       // Wayfair's class templates have a 7-row header block (data starts row 8) plus a
       // hidden validation engine — the shared fillTemplateXlsx would corrupt them. The
@@ -383,23 +409,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // A one-file export (Walmart always produces a single sheet) is delivered
       // as that spreadsheet rather than a ZIP the user has to unpack first.
       const payload = await unwrapSingleFileZip(zipBuffer as Buffer);
-      resolveJob(jobId, payload.buffer, {
+      // Status write BEFORE resolveJob, and best-effort: it used to run after,
+      // unguarded, so a transient DB error on this bookkeeping write threw the
+      // job into the catch below — which discarded an already-built ZIP and
+      // reported the export as failed.
+      await prisma.project.update({ where: { id }, data: { status: "done" } }).catch(() => {});
+      await resolveJob(jobId, payload.buffer, {
         extension: payload.extension,
         contentType: payload.contentType,
         missingTemplateCategories,
       });
-      await prisma.project.update({ where: { id }, data: { status: "done" } });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[export] background job failed:", msg);
-      rejectJob(jobId, msg);
+      await rejectJob(jobId, msg);
       await prisma.project.update({ where: { id }, data: { status: "categorized" } }).catch(() => {});
     } finally {
       // The heartbeat must stop with the job — touchJob is a no-op once the
       // job leaves "processing", but the interval itself would leak forever.
       clearInterval(heartbeat);
     }
-  })();
+  });
 
   return NextResponse.json({ jobId });
 }
