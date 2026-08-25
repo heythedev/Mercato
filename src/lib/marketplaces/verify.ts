@@ -2195,6 +2195,41 @@ function parseDims(s: string): [number, number, number] | null {
   return [nums[0], nums[1], nums[2]];
 }
 
+// ── Listing-quality signal ───────────────────────────────────────────────────
+// Amazon carries several interchangeable listings of one physical product: the
+// canonical listing plus reseller relists that share its UPC. The relists copy
+// the distributor's abbreviated feed title — the very text in our vendor files —
+// so a title-similarity contest systematically favors the WRONG listing
+// ("Mosquito Beater Area Repellent Granules4" over "Bonide Mosquito Beater
+// Granules, 1.3 lbs"). Sales rank and review count are what actually separate
+// the listing buyers see from the leftovers, so they carry real weight; a
+// "(Discontinued)" marker disqualifies a listing from representing the product.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function listingQuality(c: any): number {
+  let q = 0;
+  const rank = Number(c?.salesRank);
+  if (Number.isFinite(rank) && rank > 0) {
+    // Log-graded: rank 5k ≈ +8.6, 100k ≈ +5.1, 1M ≈ +2.6, none 0.
+    q += 18 * Math.max(0, 1 - Math.log10(rank) / 7);
+  }
+  const reviews = Number(c?.reviewCount);
+  if (Number.isFinite(reviews) && reviews > 0) {
+    // Log-graded: 50 reviews ≈ +8.5, 1k ≈ +15, 10k+ caps at +20. Reviews are
+    // shared across a variation family, so this only separates independent
+    // duplicate listings — exactly the case it exists for.
+    q += Math.min(20, Math.log10(reviews + 1) * 5);
+  }
+  // An active seller base marks the listing buyers actually land on; a stale
+  // duplicate typically has 0–1 offers. Only when the provider reported the
+  // field — missing data must not read as "no offers".
+  if (c?.offerCount != null) {
+    const offers = Number(c.offerCount);
+    if (Number.isFinite(offers)) q += offers >= 3 ? 3 : offers <= 1 ? -3 : 0;
+  }
+  if (/\bdiscontinued\b/i.test(String(c?.title ?? ""))) q -= 15;
+  return q;
+}
+
 // ── Multi-signal ASIN candidate picker ───────────────────────────────────────
 // When Keepa returns multiple ASINs for a single UPC, score each candidate
 // across signals and return the highest-scoring one.
@@ -2233,6 +2268,14 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
   })();
 
   const vendorQty = extractPackQty(p.name);
+
+  // Cheapest same-pack price in the pool — the reference for spotting reseller
+  // relists: a single priced at $60 when the canonical single sells for $12.
+  const sameQtyPrices = pool
+    .filter((c) => livePackQty(c) === vendorQty)
+    .map((c) => Number(c.price))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  const minSameQtyPrice = sameQtyPrices.length ? Math.min(...sameQtyPrices) : null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const score = (c: any): number => {
@@ -2291,10 +2334,20 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
       if (catWords.length > 0) s += (catHits / catWords.length) * 10;
     }
 
-    // 5. Availability / sales rank — weight 5 (prefer better-ranked singles)
-    const rank = c.salesRank as number ?? -1;
-    if (rank > 0 && rank < 1_000_000) s += 5;
-    else if (rank > 0 && rank < 5_000_000) s += 2;
+    // 5. Listing quality — among UPC-confirmed duplicates the client always
+    // expects the canonical listing (top rank, real review base, not a
+    // "(Discontinued)" leftover). Weighted to beat the small title-similarity
+    // and price-echo edges the junk duplicates get from copying the vendor feed.
+    s += listingQuality(c);
+
+    // A same-pack candidate priced far above the cheapest same-pack peer is a
+    // reseller relist, not the listing buyers actually see. The stored vendor
+    // price can't arbitrate here: re-uploaded working files carry the PREVIOUS
+    // match's price, so price proximity alone would lock in an old bad pick.
+    if (minSameQtyPrice != null && vendorQty === liveQty) {
+      const cp = Number(c.price);
+      if (Number.isFinite(cp) && cp > minSameQtyPrice * 2.5) s -= 12;
+    }
 
     return s;
   };
@@ -2400,12 +2453,17 @@ export async function findPackSibling(p: Product, setAside: any): Promise<any | 
     }
     return strength;
   };
+  // Rank by title agreement PLUS listing quality: duplicate listings of the
+  // wanted pack exist here too, and the discontinued/reseller copies must not
+  // win on wording alone. The reported sim stays the picked candidate's own,
+  // so the caller's acceptance thresholds keep their meaning.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pickBySim = (pool: any[]): { best: any; sim: number } | null => {
-    let best = null; let sim = 0;
+    let best = null; let sim = 0; let bestScore = -Infinity;
     for (const c of pool) {
       const s = titleSim(cleanedTitle, stripPackPhrases(String(c.title ?? "")));
-      if (!best || s > sim) { best = c; sim = s; }
+      const sc = s * 50 + listingQuality(c);
+      if (!best || sc > bestScore) { best = c; sim = s; bestScore = sc; }
     }
     return best ? { best, sim } : null;
   };
