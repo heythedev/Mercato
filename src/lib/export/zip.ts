@@ -219,10 +219,15 @@ export async function generateCategoryZip(
   const hasCatchAll = isGenericTemplate(fallback);
   const missingTemplateCategories: string[] = [];
   const byCategory = new Map<string, { template: TemplateRow; catLabel: string; products: Product[] }>();
+  // Uncategorized products never get a template — they are emitted as a
+  // standalone Uncategorized.csv after the template files (see below), so they
+  // can't masquerade as listing-ready rows inside a marketplace template.
+  let uncategorizedProducts: Product[] = [];
   for (const [catKey, { catLabel, isUncategorized, catProducts }] of grouped.entries()) {
     let tpl: TemplateRow;
     if (isUncategorized) {
-      tpl = fallback;
+      uncategorizedProducts = catProducts;
+      continue;
     } else {
       // 1) Category-path match against each template's coverage list.
       //    Coverage comes from embedded category sheets OR (for most templates)
@@ -288,17 +293,16 @@ export async function generateCategoryZip(
         continue;
       }
     }
-    console.log(`[export] Group "${catLabel || "(uncategorized)"}" → template "${tpl.name}"`);
-    byCategory.set(catKey, { template: tpl, catLabel: isUncategorized ? "" : catLabel, products: catProducts });
+    console.log(`[export] Group "${catLabel}" → template "${tpl.name}"`);
+    byCategory.set(catKey, { template: tpl, catLabel, products: catProducts });
   }
 
-  for (const [catKey, { template, catLabel, products: catProducts }] of byCategory.entries()) {
+  for (const { template, catLabel, products: catProducts } of byCategory.values()) {
     await new Promise<void>((r) => setImmediate(r)); // yield so HTTP polls can be served
 
     const columns = template.columns as Column[];
-    // Name the file after the category (e.g. "Baby & Kids.xlsx"), falling back to
-    // the template name for uncategorized products.
-    const fileName = catKey === "__uncategorized__" ? sanitize(template.name) : sanitize(catLabel);
+    // Name the file after the category (e.g. "Baby & Kids.xlsx").
+    const fileName = sanitize(catLabel);
 
     if (template.fileFormat === "csv") {
       zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns));
@@ -311,6 +315,11 @@ export async function generateCategoryZip(
       const buffer = await createXlsxFromScratch(catProducts, columns, catLabel || template.name);
       zipOut.file(`${fileName}.xlsx`, buffer);
     }
+  }
+
+  if (uncategorizedProducts.length > 0) {
+    console.log(`[export] ${uncategorizedProducts.length} uncategorized products → Uncategorized.csv (no template)`);
+    zipOut.file("Uncategorized.csv", generateUncategorizedCsv(uncategorizedProducts));
   }
 
   const zipBuffer = await (zipOut.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>);
@@ -1722,6 +1731,20 @@ ${ssArr.map((s) => `<si><t xml:space="preserve">${x(s)}</t></si>`).join("")}
 }
 
 // ── CSV ───────────────────────────────────────────────────────────────────────
+
+// Standalone review CSV for products with no category — deliberately NOT based
+// on any marketplace template. The empty Category column sits right after SKU so
+// the file can be filled in and re-imported on the Categorize step: that import
+// splits lines on bare commas, and only fields BEFORE a comma-containing cell
+// (descriptions, names) keep their column index.
+function generateUncategorizedCsv(products: Product[]): string {
+  const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const header = ["SKU", "Category", "Product Name", "Brand", "UPC", "Description", "Image URL"];
+  const rows = products.map((p) =>
+    [p.vendorSku, "", p.name, p.brand, toDisplayBarcode(p.upc), p.description, p.imageUrl].map(esc).join(","),
+  );
+  return [header.map(esc).join(","), ...rows].join("\n");
+}
 
 function generateCsv(products: Product[], columns: Column[]): string {
   const header = columns.map((c) => `"${c.label}"`).join(",");

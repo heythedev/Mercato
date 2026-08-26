@@ -638,11 +638,11 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
             <div>
               <p className="text-sm font-semibold text-orange-800">
-                {uncategorizedCount} product{uncategorizedCount !== 1 ? "s" : ""} {hasTemplates ? "will be added to the default template" : "will be excluded from the export"}
+                {uncategorizedCount} product{uncategorizedCount !== 1 ? "s" : ""} {hasTemplates ? "will be exported to a separate Uncategorized.csv" : "will be excluded from the export"}
               </p>
               <p className="text-xs text-orange-700 mt-1">
                 {hasTemplates
-                  ? `These products were marked "Uncategorized" and will be placed in the first available template. ${exportableCount} categorized product${exportableCount !== 1 ? "s" : ""} will be matched to their specific templates.`
+                  ? `These products were marked "Uncategorized" and will go into their own Uncategorized.csv for review — they are not placed into any template file. ${exportableCount} categorized product${exportableCount !== 1 ? "s" : ""} will be matched to their specific templates.`
                   : `These products were marked "Uncategorized" and don't match any available category. Only ${exportableCount} product${exportableCount !== 1 ? "s" : ""} will be included in the ZIP.`}
               </p>
             </div>
@@ -803,6 +803,19 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                       )}
                     </div>
                   ))}
+                  {hasTemplates && uncategorizedCount > 0 && (
+                    <div className="flex items-center gap-3 px-4 py-2.5">
+                      <FileSpreadsheet className="w-4 h-4 text-orange-500 shrink-0" />
+                      <span className="text-sm flex-1 truncate">Uncategorized.csv</span>
+                      <span className="flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400 font-medium shrink-0">
+                        <AlertTriangle className="w-3 h-3" />
+                        Needs review — no template
+                      </span>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {uncategorizedCount} product{uncategorizedCount !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             );
