@@ -90,6 +90,14 @@ export function catalogEntryToAttributes(entry: CatalogEntry): Record<string, st
 export type CatalogAttributeFill = {
   /** Main image for the product row (SILO / Image 1); null when the catalog has none. */
   imageUrl: string | null;
+  /**
+   * Real product title/brand/description from the vendor catalog. Callers apply these
+   * only to rows whose stored name is still a raw SKU code (see looksLikeSkuName) —
+   * a resolved human name must never be overwritten by a re-fetch.
+   */
+  title: string | null;
+  brand: string | null;
+  description: string | null;
   /** vendorData-style attributes (images, size, color, weight) — see catalogEntryToAttributes. */
   attributes: Record<string, string>;
 };
@@ -103,12 +111,14 @@ export type CatalogAttributeFill = {
  * export must not depend on that ordering: this fill runs right before the template is
  * written and back-fills anything a registered vendor catalog can provide.
  *
- * Only products that (a) carry a catalog-vendor SKU and (b) are missing an image are
- * touched — everything else passes through with zero network cost.
+ * Only products that carry a catalog-vendor SKU and are missing an image — or whose
+ * name is still the raw vendor code — are touched; everything else passes through with
+ * zero network cost.
  */
 export async function fillCatalogAttributes(
   products: Array<{
     id: string;
+    name?: string | null;
     vendorSku?: string | null;
     imageUrl?: string | null;
     vendorData?: unknown;
@@ -129,6 +139,9 @@ export async function fillCatalogAttributes(
   const needsFill = products.filter((p) => {
     const sku = p.vendorSku?.trim();
     if (!sku || !hasCatalogVendor(sku)) return false;
+    // A row whose name is still the raw vendor code needs the catalog even when its
+    // images are already filled — otherwise the exported Name column shows the code.
+    if (p.name && looksLikeSkuName(p.name, sku)) return true;
     if (p.imageUrl && String(p.imageUrl).startsWith("http")) {
       // Already has a main image — only re-fill if the numbered image columns are absent.
       const vd = (p.vendorData ?? {}) as Record<string, unknown>;
@@ -157,7 +170,13 @@ export async function fillCatalogAttributes(
           const entry = await resolveSkuFromCatalog(p.vendorSku!.trim());
           if (!entry) return;
           const attributes = catalogEntryToAttributes(entry);
-          out.set(p.id, { imageUrl: attributes["SILO Image"] ?? entry.image ?? null, attributes });
+          out.set(p.id, {
+            imageUrl: attributes["SILO Image"] ?? entry.image ?? null,
+            title: entry.title || null,
+            brand: entry.brand || null,
+            description: entry.description || null,
+            attributes,
+          });
         } catch { /* leave this product as-is */ }
       }),
     );

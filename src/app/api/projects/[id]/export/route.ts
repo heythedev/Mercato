@@ -224,27 +224,37 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         liveData: (liveById.get(p.id) ?? null) as Prisma.JsonValue,
       }));
 
-      // ── Catalog back-fill: images + attributes ────────────────────────────────
-      // SKU-only vendor sheets carry no images/size/color; those come from the vendor's
-      // own catalog (Modway/TOV). Categorize-time enrichment only runs for rows whose
-      // name is still a raw code, so a project categorized before attribute support was
-      // added would permanently miss its images. Filling here — right before the
-      // template is written — makes the export self-sufficient regardless of when (or
-      // whether) enrichment ran. Only products missing an image are touched; results
+      // ── Catalog back-fill: names + images + attributes ────────────────────────
+      // SKU-only vendor sheets carry no titles/images/size/color; those come from the
+      // vendor's own catalog (Modway/TOV/Vickerman). Categorize-time enrichment only
+      // runs for rows whose name is still a raw code, so a project categorized before
+      // attribute support was added would permanently miss its images. Filling here —
+      // right before the template is written — makes the export self-sufficient
+      // regardless of when (or whether) enrichment ran. Rows whose name is still the
+      // raw vendor code also take the catalog's real title/brand/description, so the
+      // exported Name column never shows a bare SKU the catalog can resolve. Results
       // are persisted so subsequent exports skip the network entirely.
       try {
-        const { fillCatalogAttributes } = await import("@/lib/ai/resolve-sku");
+        const { fillCatalogAttributes, looksLikeSkuName } = await import("@/lib/ai/resolve-sku");
         const fills = await fillCatalogAttributes(
           products,
           (done, total) => { void setJobPhase(jobId, `Fetching product images ${done}/${total}…`); },
           { deadline: Date.now() + BACKFILL_BUDGET_MS },
         );
         if (fills.size > 0) {
+          // Rows whose stored name is still a raw code get the catalog title; a name a
+          // human (or a prior run) already resolved is never overwritten.
+          const renamedIds = new Set<string>();
           products = products.map((p) => {
             const f = fills.get(p.id);
             if (!f) return p;
+            const takeTitle = !!f.title && looksLikeSkuName(p.name, p.vendorSku);
+            if (takeTitle) renamedIds.add(p.id);
             return {
               ...p,
+              name: takeTitle ? f.title! : p.name,
+              brand: takeTitle ? (p.brand || f.brand) : p.brand,
+              description: takeTitle ? (p.description || f.description) : p.description,
               imageUrl: p.imageUrl || f.imageUrl,
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               vendorData: { ...((p.vendorData ?? {}) as object), ...f.attributes } as any,
@@ -260,12 +270,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               where: { id: productId },
               data: {
                 ...(merged?.imageUrl ? { imageUrl: merged.imageUrl } : {}),
+                ...(merged && renamedIds.has(productId)
+                  ? {
+                      name: merged.name,
+                      ...(merged.brand ? { brand: merged.brand } : {}),
+                      ...(merged.description ? { description: merged.description } : {}),
+                    }
+                  : {}),
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 vendorData: (merged?.vendorData ?? undefined) as any,
               },
             });
           }, 5);
-          console.log(`[export] catalog back-fill: images/attributes added for ${fills.size} products`);
+          console.log(
+            `[export] catalog back-fill: images/attributes added for ${fills.size} products` +
+              (renamedIds.size ? `, ${renamedIds.size} SKU-code names resolved to real titles` : ""),
+          );
         }
       } catch (err) {
         console.warn("[export] catalog back-fill failed (continuing without):", err);
