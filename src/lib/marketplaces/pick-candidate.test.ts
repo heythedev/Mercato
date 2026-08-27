@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Product } from "@prisma/client";
-import { listingQuality, pickBestCandidate, pickWalmartCandidate } from "./verify";
+import { filterPackCompatible, listingQuality, pickBestCandidate, pickWalmartCandidate } from "./verify";
 
 type C = { name?: string; upc?: string };
 
@@ -196,6 +196,84 @@ describe("pickBestCandidate — duplicate same-UPC listings", () => {
       [multipack, single],
     );
     expect(picked.asin).toBe("SINGLE");
+  });
+});
+
+// EMRY-3060571: one UPC (024034668852), three listings — the canonical single,
+// a "(Pkg of 3)", and a 12-case whose title is the bare distributor feed text
+// with NO pack wording and whose provider row carried packageQuantity: null.
+// With zero pack evidence the case pack reads as a single and its feed-copied
+// title wins the similarity contest. Keepa's catalog attributes carry the real
+// count (12); enrichCandidatePackData patches it in before the pack filter.
+describe("pickBestCandidate — hidden case packs on a shared UPC", () => {
+  const vendor = product({
+    name: "FIXTURE JELLY JAR 1LT BL (Pack of 1)",
+    brand: "WESTINGHOUSE LIGHTING",
+  });
+  const single = {
+    asin: "B00002N5CR", title: "Westinghouse Angelo Brothers 66885 One-Light Jelly Jar, Black",
+    brand: "Westinghouse", model: "6688500", salesRank: 516275, reviewCount: 87, offerCount: 4,
+    packageQuantity: 1,
+  };
+  const threePack = {
+    asin: "B00QSC2K0C", title: "Westinghouse Lighting 66885 One-Light Jelly Jar Fixture (Pkg of 3)",
+    brand: "Westinghouse", partNumber: "66885", salesRank: 733000, reviewCount: 12, offerCount: 2,
+    packageQuantity: 3,
+  };
+  // The trap, exactly as the provider returned it: feed-copied title, no
+  // structured pack data.
+  const hiddenTwelvePack = {
+    asin: "B0044URDYI", title: "FIXTURE JELLY JAR 1LT BL",
+    brand: "Westinghouse", partNumber: "6688500", salesRank: 412000, reviewCount: 31, offerCount: 3,
+  };
+
+  it("documents the trap: without enrichment the pack-wordless case pack wins", () => {
+    // The feed-copied title scores ~1.0 similarity; the +10 confirmed-single
+    // nudge is deliberately too small to save this. Enrichment is load-bearing.
+    const picked = pickBestCandidate(vendor, [single, threePack, hiddenTwelvePack]);
+    expect(picked.asin).toBe("B0044URDYI");
+  });
+
+  it("excludes the case pack once enrichment fills its Keepa pack count", () => {
+    const enriched = { ...hiddenTwelvePack, packageQuantity: 12 };
+    const survivors = filterPackCompatible(vendor.name, [single, threePack, enriched]);
+    expect(survivors.map((c) => c.asin)).toEqual(["B00002N5CR"]);
+    const picked = pickBestCandidate(vendor, [single, threePack, enriched]);
+    expect(picked.asin).toBe("B00002N5CR");
+  });
+
+  it("breaks a dead-equal tie toward the provider-confirmed single", () => {
+    // Identical listings except one PROVES packageQuantity 1 and the other
+    // merely defaults to it. Unconfirmed listed first: strict-greater scoring
+    // means the confirmed one must actually outscore it to win.
+    const base = {
+      title: "Westinghouse 66885 One-Light Jelly Jar, Black",
+      brand: "Westinghouse", model: "6688500", salesRank: 516275, reviewCount: 87, offerCount: 4,
+    };
+    const unconfirmed = { ...base, asin: "UNCONFIRMED" };
+    const confirmed = { ...base, asin: "CONFIRMED", packageQuantity: 1 };
+    const picked = pickBestCandidate(
+      product({ name: "FIXTURE JELLY JAR 1LT BL (Pack of 1)", brand: "WESTINGHOUSE LIGHTING" }),
+      [unconfirmed, confirmed],
+    );
+    expect(picked.asin).toBe("CONFIRMED");
+  });
+
+  it("keeps the nudge below real quality signals so strong picks don't flip", () => {
+    // A weak confirmed single (deep rank, 3 reviews, one seller) must not beat
+    // the listing buyers actually use just because the latter lacks pack data.
+    const base = { title: "Westinghouse 66885 One-Light Jelly Jar, Black", brand: "Westinghouse", model: "6688500" };
+    const weakConfirmed = {
+      ...base, asin: "WEAK", salesRank: 900000, reviewCount: 3, offerCount: 1, packageQuantity: 1,
+    };
+    const strongUnknown = {
+      ...base, asin: "STRONG", salesRank: 5000, reviewCount: 2354, offerCount: 17,
+    };
+    const picked = pickBestCandidate(
+      product({ name: "FIXTURE JELLY JAR 1LT BL (Pack of 1)", brand: "WESTINGHOUSE LIGHTING" }),
+      [weakConfirmed, strongUnknown],
+    );
+    expect(picked.asin).toBe("STRONG");
   });
 });
 

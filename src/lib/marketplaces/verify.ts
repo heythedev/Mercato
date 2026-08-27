@@ -787,6 +787,10 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       // "Case of N" ASINs — even when they share the UPC (common Amazon multipack reuse).
       // Prefer pack-compatible candidates; if none, fall through to keyword search so we
       // can find the single-unit listing (often under a different UPC).
+      // With multiple listings on one barcode, first recover pack counts the
+      // provider omitted — a case pack with a pack-wordless title would
+      // otherwise pass this filter as a "single".
+      if (candidates.length > 1) await enrichCandidatePackData(candidates);
       const packCompatible = filterPackCompatible(p.name, candidates);
       if (!packCompatible.length) {
         // Remember the best UPC-confirmed candidate before handing the
@@ -2305,6 +2309,13 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
       s -= 100;
     } else if (vendorQty > 1) {
       s += 40; // explicit pack match — strong bonus
+    } else if (structuredPackQty(c) != null) {
+      // Both look like singles, but this one PROVES it. Among duplicate-UPC
+      // listings a row with no structured pack data can hide a case pack
+      // (pack-wordless title, provider returned null), so a confirmed single
+      // outranks an unknown that merely defaults to 1. Kept small: real
+      // quality signals (rank/reviews, up to ~41) must still dominate.
+      s += 10;
     }
 
     // 0. Title similarity — critical (weight 50)
@@ -2394,6 +2405,55 @@ export function filterPackCompatible(vendorTitle: string, candidates: any[]): an
 export function structuredPackQty(c: any): number | null {
   const v = Number(c?.packageQuantity);
   return Number.isFinite(v) && v >= 1 ? Math.round(v) : null;
+}
+
+/**
+ * Fill in structured pack quantities for duplicate-UPC candidates before pack
+ * filtering. Synccentric rows can carry packageQuantity: null while the listing
+ * is really a case pack whose title says nothing ("FIXTURE JELLY JAR 1LT BL" —
+ * a 12-pack per Amazon's own attributes); Keepa's catalog data exposes the real
+ * count. Candidates are patched in place (only where the provider gave nothing,
+ * never overriding an explicit value). Cache-first; a Keepa failure leaves the
+ * candidates untouched rather than failing the product.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function enrichCandidatePackData(candidates: any[]): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const blind = new Map<string, any[]>();
+  for (const c of candidates) {
+    const asin = typeof c?.asin === "string" ? c.asin.trim() : "";
+    if (!ASIN_RE.test(asin)) continue;
+    if (structuredPackQty(c) != null) continue;
+    if (!blind.has(asin)) blind.set(asin, []);
+    blind.get(asin)!.push(c);
+  }
+  if (!blind.size) return;
+  try {
+    // Cap mirrors the sibling walk: a UPC mapping to more listings than this is
+    // junk data, not a candidate set worth paying tokens for.
+    const asins = [...blind.keys()].slice(0, 10);
+    const cached = await getCachedProducts(KEEPA_DOMAIN, asins);
+    const missing = asins.filter((a) => !cached.has(a));
+    let fetched: KeepaProduct[] = [];
+    if (missing.length) {
+      const { getProducts } = await import("@/lib/keepa");
+      fetched = await getProducts(KEEPA_DOMAIN, missing);
+      if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
+    }
+    for (const raw of [...cached.values(), ...fetched]) {
+      const targets = raw?.asin ? blind.get(String(raw.asin)) : undefined;
+      if (!targets) continue;
+      // Keepa uses -1 for "unknown" — only counts >= 1 are facts.
+      const qty = [raw.packageQuantity, raw.numberOfItems]
+        .map(Number).find((v) => Number.isFinite(v) && v >= 1);
+      if (qty == null) continue;
+      for (const c of targets) {
+        if (structuredPackQty(c) == null) c.packageQuantity = Math.round(qty);
+      }
+    }
+  } catch (e) {
+    console.warn(`[verify] pack enrichment skipped: ${(e as Error).message}`);
+  }
 }
 
 /**
