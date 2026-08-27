@@ -383,13 +383,57 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
 // ── Amazon (Keepa) ────────────────────────────────────────────────────────────
 
 // Minimum Keepa balance to start (or continue) the keyword-search cascade,
-// and the bounds for waiting out a shallow shortfall instead of skipping:
-// wait at most TOKEN_WAIT_CAP_MS, never closer than TOKEN_WAIT_SAFETY_MS to
-// the caller's deadline, re-checking the balance every TOKEN_WAIT_POLL_MS.
+// the floor for barcode batch lookups (the Keepa client stops scheduling
+// batches under 100), and the bounds for waiting out a shallow shortfall
+// instead of skipping: wait at most TOKEN_WAIT_CAP_MS, never closer than
+// TOKEN_WAIT_SAFETY_MS to the caller's deadline, re-checking the balance
+// every TOKEN_WAIT_POLL_MS.
 const KEYWORD_MIN_TOKENS = 200;
+const CODE_MIN_TOKENS = 120;
 const TOKEN_WAIT_CAP_MS = 120_000;
 const TOKEN_WAIT_POLL_MS = 10_000;
 const TOKEN_WAIT_SAFETY_MS = 15_000;
+
+type KeepaTokenInfo = { tokensLeft: number; refillRate?: number | null } | null;
+
+/**
+ * Wait for the Keepa balance to refill to `minTokens` — tokens refill
+ * continuously, so a shallow shortfall self-heals in under a minute and is
+ * worth waiting out rather than stranding rows as "skipped" until a manual
+ * re-verify. Bounded by TOKEN_WAIT_CAP_MS and the caller's deadline; a
+ * shortfall too deep to cover in the time available returns immediately so
+ * the existing degrade paths (skip + resume banner) still apply.
+ */
+async function awaitTokenRefill(
+  refresh: () => Promise<KeepaTokenInfo>,
+  info: KeepaTokenInfo,
+  minTokens: number,
+  deadline: number | undefined,
+  label: string,
+): Promise<KeepaTokenInfo> {
+  if (info == null || info.tokensLeft >= minTokens) return info;
+  if (!(typeof info.refillRate === "number" && info.refillRate > 0)) return info;
+  const capMs = Math.min(
+    TOKEN_WAIT_CAP_MS,
+    (deadline ?? Number.MAX_SAFE_INTEGER) - Date.now() - TOKEN_WAIT_SAFETY_MS,
+  );
+  const neededMs = ((minTokens - info.tokensLeft) / info.refillRate) * 60_000 + 5_000;
+  if (neededMs > capMs) return info;
+  console.log(
+    `[keepa-tokens] ${info.tokensLeft} left, need ${minTokens} for ${label} — ` +
+      `waiting ~${Math.ceil(neededMs / 1000)}s for refill (${info.refillRate}/min)`,
+  );
+  const waitUntil = Date.now() + capMs;
+  let latest: KeepaTokenInfo = info;
+  while (Date.now() < waitUntil) {
+    await new Promise((r) =>
+      setTimeout(r, Math.min(TOKEN_WAIT_POLL_MS, waitUntil - Date.now())),
+    );
+    latest = await refresh();
+    if (latest == null || latest.tokensLeft >= minTokens) break;
+  }
+  return latest;
+}
 
 async function verifyAmazon(products: Product[], deadline?: number): Promise<VerifyResult[]> {
   const { getProducts, getProductsByCode, keywordSearch, getLastTokenInfo, normalizeMany } = await import("@/lib/keepa");
@@ -624,6 +668,16 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
     }
 
     if (failedCodes.length) {
+      // The Keepa client stops scheduling code batches under 100 tokens,
+      // stranding the rest as unresolved → "skipped". Give a shallow
+      // shortfall a bounded chance to refill first.
+      await awaitTokenRefill(
+        refreshTokens,
+        await refreshTokens(),
+        CODE_MIN_TOKENS,
+        deadline,
+        "barcode lookup",
+      );
       const kp = await getProductsByCode(KEEPA_DOMAIN, failedCodes, { stats: 1 });
       if (kp.products.length) await cacheProducts(KEEPA_DOMAIN, kp.products);
       fetchedProducts = [...fetchedProducts, ...kp.products];
@@ -719,11 +773,14 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       // Cached "Keepa doesn't map this barcode". That is a fact about KEEPA'S
       // COVERAGE, not about Amazon — so skip only the pointless Keepa rescue,
       // and still give Synccentric and the keyword cascade their chance
-      // instead of declaring the product missing outright.
+      // instead of declaring the product missing outright. Synccentric must be
+      // asked in BOTH source orders: cached-absent codes are excluded from the
+      // main batch (toFetch), so this is their only Synccentric lookup — in
+      // primary mode too, where "the batch already asked" does not hold.
       if (!candidates.length) {
         const g = toGtin14(resolvedUpc(p));
         if (g && cachedAbsent.has(g)) {
-          if (!sync.synccentricPrimary() && sync.synccentricConfigured()) {
+          if (sync.synccentricConfigured()) {
             const fb = await sync.searchByCode(barcodeVariants(resolvedUpc(p)));
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             candidates = (normalizeMany(fb.products, 1) as any[]).filter(Boolean);
@@ -938,40 +995,17 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
 
   const keywordPool = [...withNameOnly, ...stillUnknown];
   if (keywordPool.length) {
-    const { refreshKeepaTokens } = await import("@/lib/keepa/client");
-    let tokenInfo = await refreshKeepaTokens();
-
     // Keyword search is the one lookup Synccentric cannot cover (its API is
     // identifier-only), so a shallow Keepa shortfall is waited out rather than
-    // skipped — the balance refills continuously and a skip strands these rows
-    // until someone manually re-verifies. Deep shortfalls that can't refill
-    // within the request budget still take the skip path below.
-    if (
-      tokenInfo != null &&
-      tokenInfo.tokensLeft < KEYWORD_MIN_TOKENS &&
-      (tokenInfo.refillRate ?? 0) > 0
-    ) {
-      const capMs = Math.min(
-        TOKEN_WAIT_CAP_MS,
-        (deadline ?? Number.MAX_SAFE_INTEGER) - Date.now() - TOKEN_WAIT_SAFETY_MS,
-      );
-      const shortfall = KEYWORD_MIN_TOKENS - tokenInfo.tokensLeft;
-      const neededMs = (shortfall / tokenInfo.refillRate!) * 60_000 + 5_000;
-      if (neededMs <= capMs) {
-        console.log(
-          `[keepa-tokens] ${tokenInfo.tokensLeft} left, need ${KEYWORD_MIN_TOKENS} for keyword search — ` +
-            `waiting ~${Math.ceil(neededMs / 1000)}s for refill (${tokenInfo.refillRate}/min)`,
-        );
-        const waitUntil = Date.now() + capMs;
-        while (Date.now() < waitUntil) {
-          await new Promise((r) =>
-            setTimeout(r, Math.min(TOKEN_WAIT_POLL_MS, waitUntil - Date.now())),
-          );
-          tokenInfo = await refreshKeepaTokens();
-          if (tokenInfo == null || tokenInfo.tokensLeft >= KEYWORD_MIN_TOKENS) break;
-        }
-      }
-    }
+    // skipped. Deep shortfalls that can't refill within the request budget
+    // still take the skip path below.
+    const tokenInfo = await awaitTokenRefill(
+      refreshTokens,
+      await refreshTokens(),
+      KEYWORD_MIN_TOKENS,
+      deadline,
+      "keyword search",
+    );
 
     if (tokenInfo != null && tokenInfo.tokensLeft < KEYWORD_MIN_TOKENS) {
       // Tokens too low — skip keyword searches rather than crashing the whole batch
@@ -1006,7 +1040,19 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
     const entries = [...byTerm.entries()];
     for (let i = 0; i < entries.length; i += CONCURRENCY) {
       const left = getLastTokenInfo()?.tokensLeft;
-      if (left != null && left < KEYWORD_MIN_TOKENS) break;
+      if (left != null && left < KEYWORD_MIN_TOKENS) {
+        // Mid-cascade shortfall: same bounded wait as the phase entry — the
+        // earlier searches spent the balance down, but the refill usually
+        // covers the next group within seconds.
+        const refreshed = await awaitTokenRefill(
+          refreshTokens,
+          await refreshTokens(),
+          KEYWORD_MIN_TOKENS,
+          deadline,
+          "keyword search",
+        );
+        if (refreshed != null && refreshed.tokensLeft < KEYWORD_MIN_TOKENS) break;
+      }
 
       await Promise.all(entries.slice(i, i + CONCURRENCY).map(async ([_term, group]) => {
         try {
