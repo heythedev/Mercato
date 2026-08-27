@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { extractPackInfo, extractPackQty, filterPackCompatible, livePackQty, stripPackPhrases } from "./verify";
+import { extractPackInfo, extractPackQty, filterPackCompatible, livePackQty, resolveVendorPack, stripPackPhrases, vendorPackQty, vendorStructuredPackQty } from "./verify";
+import type { Product } from "@prisma/client";
 
 describe("extractPackInfo", () => {
   it("treats explicit packaging terms as strong signals", () => {
@@ -141,6 +142,89 @@ describe("extractPackQty", () => {
     expect(extractPackQty("Kitchen Towels Pack of 6")).toBe(6);
     expect(extractPackQty("3-Piece Sectional Sofa")).toBe(3);
     expect(extractPackQty("Ceramic Mug")).toBe(1);
+  });
+});
+
+describe("vendorStructuredPackQty", () => {
+  it("reads the vendor's Package Quantity column under its common names", () => {
+    expect(vendorStructuredPackQty({ "Package Quantity": "6" })).toBe(6);
+    expect(vendorStructuredPackQty({ "Package Quantity (Vendor Field)": "6" })).toBe(6);
+    expect(vendorStructuredPackQty({ "Pack Qty": "3" })).toBe(3);
+    expect(vendorStructuredPackQty({ pkg_qty: "2 EA" })).toBe(2);
+  });
+
+  it("never reads stock-count or shipping-box columns as a pack size", () => {
+    expect(vendorStructuredPackQty({ Quantity: "144" })).toBeNull();
+    expect(vendorStructuredPackQty({ Qty: "36" })).toBeNull();
+    expect(vendorStructuredPackQty({ "Master Pack Qty": "24" })).toBeNull();
+    expect(vendorStructuredPackQty({ "Carton Pack Quantity": "12" })).toBeNull();
+  });
+
+  it("rejects blank, zero, and non-numeric values", () => {
+    expect(vendorStructuredPackQty({ "Package Quantity": "" })).toBeNull();
+    expect(vendorStructuredPackQty({ "Package Quantity": "0" })).toBeNull();
+    expect(vendorStructuredPackQty({ "Package Quantity": "N/A" })).toBeNull();
+    expect(vendorStructuredPackQty(null)).toBeNull();
+  });
+});
+
+describe("resolveVendorPack", () => {
+  const product = (name: string, vendorData: Record<string, unknown>) =>
+    ({ id: "t", name, vendorData }) as unknown as Product;
+
+  it("falls back to the structured field when the title has no pack wording", () => {
+    // The Restor-A-Finish case: "RESTOR-A-FNSH DKOAK PT" says nothing about
+    // packaging; the vendor's Package Quantity column is the only pack signal.
+    const p = product("RESTOR-A-FNSH DKOAK PT", { "Package Quantity": "6" });
+    expect(resolveVendorPack(p, extractPackInfo(p.name)))
+      .toEqual({ qty: 6, strong: true, explicit: true, structuredQty: 6, conflict: false });
+    expect(vendorPackQty(p)).toBe(6);
+  });
+
+  it("covers digit-less pack phrases via the structured field (Twin Pack)", () => {
+    const p = product("CAULK GUN HD DRIP-FREE (Twin Pack)", { "Package Quantity": "2" });
+    expect(vendorPackQty(p)).toBe(2);
+  });
+
+  it("changes nothing when title and structured field agree", () => {
+    const p = product("MOSQUITO REPEL GRANUL 4K (Pack of 3)", { "Package Quantity": "3" });
+    expect(resolveVendorPack(p, extractPackInfo(p.name)))
+      .toEqual({ qty: 3, strong: true, explicit: true, structuredQty: 3, conflict: false });
+  });
+
+  it("flags a conflict when explicit title wording disagrees with the field", () => {
+    // The silicone-sealant case: "(Pack of 1)" vs Package Quantity 6 is vendor
+    // data disagreeing with itself. The title still decides the match, but the
+    // conflict must surface for manual review — never silently pick a side.
+    const p = product("SEALANT SILICONE CLR 10OZ (Pack of 1)", { "Package Quantity": "6" });
+    expect(resolveVendorPack(p, extractPackInfo(p.name)))
+      .toEqual({ qty: 1, strong: true, explicit: true, structuredQty: 6, conflict: true });
+  });
+
+  it("does not let the field override or conflict with a weak counting word", () => {
+    // "3-Piece" describes the sofa's parts; the field's 1 is not a conflict,
+    // and weak text keeps deciding as before.
+    const p = product("3-Piece Sectional Sofa", { "Package Quantity": "1" });
+    expect(resolveVendorPack(p, extractPackInfo(p.name)))
+      .toEqual({ qty: 3, strong: false, explicit: true, structuredQty: 1, conflict: false });
+  });
+
+  it("passes text through untouched when the feed has no pack column", () => {
+    const p = product("Kitchen Towels Pack of 6", {});
+    expect(resolveVendorPack(p, extractPackInfo(p.name)))
+      .toEqual({ qty: 6, strong: true, explicit: true, structuredQty: null, conflict: false });
+  });
+});
+
+describe("filterPackCompatible with an explicit vendor qty", () => {
+  it("filters by the structured-field count when the title says nothing", () => {
+    const single = { title: "Howard Restor-A-Finish Dark Oak Pint", packageQuantity: 1 };
+    const sixPack = { title: "Howard Restor-A-Finish Dark Oak Pint", packageQuantity: 6 };
+    expect(filterPackCompatible("RESTOR-A-FNSH DKOAK PT", [single, sixPack], 6))
+      .toEqual([sixPack]);
+    // Default (title-only) behavior unchanged: no wording → wants singles.
+    expect(filterPackCompatible("RESTOR-A-FNSH DKOAK PT", [single, sixPack]))
+      .toEqual([single]);
   });
 });
 

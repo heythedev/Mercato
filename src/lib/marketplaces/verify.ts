@@ -537,7 +537,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       const result = compareToLive(p, lp.title as string, lp.brand as string ?? null, null, liveDataForCompare as Record<string, unknown>, "Amazon");
       // Downgrade mismatch → warning for ASIN-confirmed products (title abbreviation ≠ wrong product),
       // but keep pack-quantity mismatches hard — ASIN may still be a multipack listing.
-      const packMismatch = extractPackQty(p.name) !== livePackQty(lp);
+      const packMismatch = vendorPackQty(p) !== livePackQty(lp);
       if (result.status === "mismatch" && !packMismatch) {
         result.status = "warning";
         result.fields = result.fields.map((f) =>
@@ -791,7 +791,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       // provider omitted — a case pack with a pack-wordless title would
       // otherwise pass this filter as a "single".
       if (candidates.length > 1) await enrichCandidatePackData(candidates);
-      const packCompatible = filterPackCompatible(p.name, candidates);
+      const packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
       if (!packCompatible.length) {
         // Remember the best UPC-confirmed candidate before handing the
         // product to keyword search: if no pack-compatible listing exists
@@ -815,7 +815,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
       if (resolved && !p.upc) result.resolvedUpc = resolved;
       // UPC-confirmed: soft-downgrade abbreviation mismatches → warning.
       // Pack-qty mismatches stay hard (should be rare after filterPackCompatible).
-      const packMismatch = extractPackQty(p.name) !== livePackQty(best);
+      const packMismatch = vendorPackQty(p) !== livePackQty(best);
       if (result.status === "mismatch" && !packMismatch) {
         result.status = "warning";
         result.fields = result.fields.map((f) =>
@@ -987,6 +987,9 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
           // Vendor model/part number — exact match against a candidate's model/MPN
           // is a definitive identity signal that overrides title similarity.
           const vendorModel = extractModelNumber(group[0].vendorData);
+          // Pack count for the whole group (identical brand+name ⇒ identical
+          // pack): title wording first, structured Package Quantity fallback.
+          const groupPackQty = vendorPackQty(group[0]);
 
           const searchAndPick = async (searchTerm: string, minSim = 0.4) => {
             const cacheKey = searchTerm.toLowerCase().trim();
@@ -1004,7 +1007,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
             if (!normed.length) return null;
 
             // Prefer candidates whose pack qty matches the catalog title (single ≠ Pack of N).
-            const packMatched = filterPackCompatible(productName, normed);
+            const packMatched = filterPackCompatible(productName, normed, groupPackQty);
             const pool = packMatched.length ? packMatched : normed;
 
             // Exact model/MPN match wins — but ONLY among pack-compatible candidates.
@@ -1029,7 +1032,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
             // If we had to fall back to pack-mismatched candidates, require a stronger title match
             // and still reject explicit multipacks when the catalog is a single unit.
             if (!packMatched.length) {
-              const vendorQty = extractPackQty(productName);
+              const vendorQty = groupPackQty;
               const liveQty = livePackQty(best);
               if (vendorQty !== liveQty) return null;
             }
@@ -1661,7 +1664,7 @@ function compareToLive(
   // (N > 1), or vice-versa, that is a definitive mismatch regardless of word similarity.
   const vendorDesc = String((p.vendorData as Record<string,unknown> | null)?.description ?? p.description ?? "");
   const liveDesc = String(liveData.description ?? liveData.shortDescription ?? liveData.longDescription ?? "");
-  const vendorPack = extractPackInfo(p.name, vendorDesc);
+  const vendorPack = resolveVendorPack(p, extractPackInfo(p.name, vendorDesc));
   // The provider's structured packageQuantity outranks title text on the live
   // side: multipack listings often carry no pack wording at all, and a
   // structured count > 1 is packaging stated explicitly by the marketplace.
@@ -1849,24 +1852,30 @@ function compareToLive(
         : {}),
   });
 
-  // Pack / Set quantity — extracted from title and description on both sides.
-  // The title check above already treats a pack-quantity difference as a hard
-  // mismatch (a single unit is not a 6-pack); this row exists so the report
-  // shows the two quantities side by side, which is what a reviewer needs to
-  // confirm the call.
+  // Pack / Set quantity — title/description text plus the vendor's structured
+  // Package Quantity column. The title check above already treats a
+  // pack-quantity difference as a hard mismatch (a single unit is not a
+  // 6-pack); this row shows the two quantities side by side, which is what a
+  // reviewer needs to confirm the call. A vendor-internal conflict (explicit
+  // title wording vs the structured column) marks this row mismatched even
+  // when the live listing agrees with the title: pack ∉ HARD_FIELDS, so the
+  // product rolls up to "warning" — flagged for review, never silently decided.
+  const packBad = (vendorQty !== liveQty && packComparable) || vendorPack.conflict;
   fields.push({
     field: "pack", label: "Pack / Set Qty",
     stored: String(vendorQty),
     live: String(liveQty),
-    match: vendorQty === liveQty || !packComparable,
-    severity: vendorQty === liveQty || !packComparable ? "ok" : "mismatch",
-    ...(vendorQty !== liveQty
-      ? {
-          note: packComparable
-            ? `Pack quantity differs: catalog ${vendorQty} vs ${marketplace} ${liveQty}`
-            : `Counting word on one side only ("${vendorQty !== 1 ? vendorQty : liveQty} piece/pcs/units") reads as product parts, not a multipack — not flagged.`,
-        }
-      : {}),
+    match: !packBad,
+    severity: packBad ? "mismatch" : "ok",
+    ...(vendorPack.conflict
+      ? { note: `Vendor data conflict: catalog wording says ${vendorQty}, vendor Package Quantity column says ${vendorPack.structuredQty} — flag for review` }
+      : vendorQty !== liveQty
+        ? {
+            note: packComparable
+              ? `Pack quantity differs: catalog ${vendorQty} vs ${marketplace} ${liveQty}`
+              : `Counting word on one side only ("${vendorQty !== 1 ? vendorQty : liveQty} piece/pcs/units") reads as product parts, not a multipack — not flagged.`,
+          }
+        : {}),
   });
 
   // Images — start as "warning" whenever a vendor image exists; the AI visual
@@ -2260,9 +2269,14 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
   if (!candidates.length) return null;
   if (candidates.length === 1) return candidates[0];
 
+  // Vendor pack count — title wording plus the structured Package Quantity
+  // column, so a pack-wordless title with a vendor field of 6 competes as a
+  // 6-pack rather than defaulting to single.
+  const vendorQty = vendorPackQty(p);
+
   // Prefer pack-compatible titles when available (caller should already filter,
   // but keep this as a safety net).
-  const packMatched = filterPackCompatible(p.name, candidates);
+  const packMatched = filterPackCompatible(p.name, candidates, vendorQty);
   const pool = packMatched.length ? packMatched : candidates;
 
   // Extract vendor price for price-range comparison
@@ -2287,8 +2301,6 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
     }
     return null;
   })();
-
-  const vendorQty = extractPackQty(p.name);
 
   // Cheapest same-pack price in the pool — the reference for spotting reseller
   // relists: a single priced at $60 when the canonical single sells for $12.
@@ -2389,11 +2401,66 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
   return best;
 }
 
-/** Keep only candidates whose pack/case qty matches the catalog title. */
+/** Keep only candidates whose pack/case qty matches the vendor's pack count
+ *  (derived from the title by default; callers with the full product pass the
+ *  structured-field-aware count from vendorPackQty). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function filterPackCompatible(vendorTitle: string, candidates: any[]): any[] {
-  const vendorQty = extractPackQty(vendorTitle);
+export function filterPackCompatible(vendorTitle: string, candidates: any[], vendorQty = extractPackQty(vendorTitle)): any[] {
   return candidates.filter((c) => livePackQty(c) === vendorQty);
+}
+
+/**
+ * The vendor's own structured units-per-package column ("Package Quantity",
+ * "Pack Qty", "Pkg Qty"), when the feed carries one. Bare "Quantity"/"Qty"
+ * columns are deliberately NOT read — vendor files use those for stock counts,
+ * not pack sizes — and master/carton/pallet counts describe the shipping box,
+ * not the sell unit.
+ */
+export function vendorStructuredPackQty(vendorData: unknown): number | null {
+  if (!vendorData || typeof vendorData !== "object") return null;
+  const STEMS = ["packagequantity", "packageqty", "packquantity", "packqty", "pkgquantity", "pkgqty", "unitsperpack", "itemsperpack"];
+  const EXCLUDE = ["master", "carton", "pallet", "expected"];
+  for (const [k, v] of Object.entries(vendorData as Record<string, unknown>)) {
+    const nk = k.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!STEMS.some((s) => nk.includes(s)) || EXCLUDE.some((s) => nk.includes(s))) continue;
+    const m = String(v ?? "").trim().match(/^(\d{1,4})(?:\s|$)/);
+    if (!m) continue;
+    const q = parseInt(m[1]!, 10);
+    if (q >= 1) return q;
+  }
+  return null;
+}
+
+/**
+ * Vendor-side pack resolution: the text signal (title/description) combined
+ * with the feed's structured Package Quantity column.
+ *
+ *  - Text says nothing → the structured field IS the pack signal
+ *    ("RESTOR-A-FNSH DKOAK PT" with Package Quantity 6 is a 6-pack, not a
+ *    default single).
+ *  - Both speak and agree → nothing changes.
+ *  - Explicit pack wording disagrees with the field ("(Pack of 1)" vs 6) → a
+ *    genuine vendor data conflict. The title keeps deciding the match (visible
+ *    wording beats a hidden column — silently picking the column would be a
+ *    coin flip), but `conflict` is surfaced so the row is flagged for manual
+ *    review rather than reported as a clean match.
+ *  - A weak counting word ("3-Piece Sofa") neither yields to nor conflicts
+ *    with the field: it describes the product's parts, not packaging, and a
+ *    weak signal must never flag.
+ */
+export function resolveVendorPack(
+  p: Product,
+  text: { qty: number; strong: boolean; explicit: boolean },
+): { qty: number; strong: boolean; explicit: boolean; structuredQty: number | null; conflict: boolean } {
+  const structuredQty = vendorStructuredPackQty(p.vendorData);
+  if (structuredQty == null) return { ...text, structuredQty: null, conflict: false };
+  if (!text.explicit) return { qty: structuredQty, strong: true, explicit: true, structuredQty, conflict: false };
+  return { ...text, structuredQty, conflict: text.strong && text.qty !== structuredQty };
+}
+
+/** Vendor-side pack quantity for match/filter decisions (title + structured field). */
+export function vendorPackQty(p: Product): number {
+  return resolveVendorPack(p, extractPackInfo(p.name)).qty;
 }
 
 /**
@@ -2509,7 +2576,7 @@ export function stripPackPhrases(title: string): string {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function findPackSibling(p: Product, setAside: any): Promise<any | null> {
   const { getProducts, keywordSearch, normalizeMany } = await import("@/lib/keepa");
-  const wantQty = extractPackQty(p.name);
+  const wantQty = vendorPackQty(p);
   const cleanedTitle = stripPackPhrases(String(setAside.title ?? ""));
   const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const setAsideModels = [setAside.model, setAside.partNumber]
