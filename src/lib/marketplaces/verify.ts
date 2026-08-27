@@ -92,14 +92,14 @@ type FieldResult = {
 export async function verifyProducts(
   marketplace: string,
   products: Product[],
-  options?: { skipAiPasses?: boolean },
+  options?: { skipAiPasses?: boolean; deadline?: number },
 ): Promise<VerifyResult[]> {
   let results: VerifyResult[];
   switch (marketplace) {
     case "amazon_us":
     case "amazon":
       try {
-        results = await verifyAmazon(products);
+        results = await verifyAmazon(products, options?.deadline);
       } catch (e) {
         // Surface what the failed attempt cost — a crashed run still spent
         // tokens, and that number is otherwise lost with the exception.
@@ -382,7 +382,16 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
 
 // ── Amazon (Keepa) ────────────────────────────────────────────────────────────
 
-async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
+// Minimum Keepa balance to start (or continue) the keyword-search cascade,
+// and the bounds for waiting out a shallow shortfall instead of skipping:
+// wait at most TOKEN_WAIT_CAP_MS, never closer than TOKEN_WAIT_SAFETY_MS to
+// the caller's deadline, re-checking the balance every TOKEN_WAIT_POLL_MS.
+const KEYWORD_MIN_TOKENS = 200;
+const TOKEN_WAIT_CAP_MS = 120_000;
+const TOKEN_WAIT_POLL_MS = 10_000;
+const TOKEN_WAIT_SAFETY_MS = 15_000;
+
+async function verifyAmazon(products: Product[], deadline?: number): Promise<VerifyResult[]> {
   const { getProducts, getProductsByCode, keywordSearch, getLastTokenInfo, normalizeMany } = await import("@/lib/keepa");
   const { refreshKeepaTokens: refreshTokens, tokensSpentMark, tokensSpentSince } =
     await import("@/lib/keepa/client");
@@ -930,11 +939,44 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
   const keywordPool = [...withNameOnly, ...stillUnknown];
   if (keywordPool.length) {
     const { refreshKeepaTokens } = await import("@/lib/keepa/client");
-    const tokenInfo = await refreshKeepaTokens();
-    if (tokenInfo != null && tokenInfo.tokensLeft < 200) {
+    let tokenInfo = await refreshKeepaTokens();
+
+    // Keyword search is the one lookup Synccentric cannot cover (its API is
+    // identifier-only), so a shallow Keepa shortfall is waited out rather than
+    // skipped — the balance refills continuously and a skip strands these rows
+    // until someone manually re-verifies. Deep shortfalls that can't refill
+    // within the request budget still take the skip path below.
+    if (
+      tokenInfo != null &&
+      tokenInfo.tokensLeft < KEYWORD_MIN_TOKENS &&
+      (tokenInfo.refillRate ?? 0) > 0
+    ) {
+      const capMs = Math.min(
+        TOKEN_WAIT_CAP_MS,
+        (deadline ?? Number.MAX_SAFE_INTEGER) - Date.now() - TOKEN_WAIT_SAFETY_MS,
+      );
+      const shortfall = KEYWORD_MIN_TOKENS - tokenInfo.tokensLeft;
+      const neededMs = (shortfall / tokenInfo.refillRate!) * 60_000 + 5_000;
+      if (neededMs <= capMs) {
+        console.log(
+          `[keepa-tokens] ${tokenInfo.tokensLeft} left, need ${KEYWORD_MIN_TOKENS} for keyword search — ` +
+            `waiting ~${Math.ceil(neededMs / 1000)}s for refill (${tokenInfo.refillRate}/min)`,
+        );
+        const waitUntil = Date.now() + capMs;
+        while (Date.now() < waitUntil) {
+          await new Promise((r) =>
+            setTimeout(r, Math.min(TOKEN_WAIT_POLL_MS, waitUntil - Date.now())),
+          );
+          tokenInfo = await refreshKeepaTokens();
+          if (tokenInfo == null || tokenInfo.tokensLeft >= KEYWORD_MIN_TOKENS) break;
+        }
+      }
+    }
+
+    if (tokenInfo != null && tokenInfo.tokensLeft < KEYWORD_MIN_TOKENS) {
       // Tokens too low — skip keyword searches rather than crashing the whole batch
       console.warn(
-        `[keepa-tokens] only ${tokenInfo.tokensLeft} left (need 200) — ` +
+        `[keepa-tokens] only ${tokenInfo.tokensLeft} left (need ${KEYWORD_MIN_TOKENS}) — ` +
           `skipping keyword search for ${keywordPool.length} product${keywordPool.length === 1 ? "" : "s"}`,
       );
       // Products with a set-aside UPC match still get that truthful answer —
@@ -964,7 +1006,7 @@ async function verifyAmazon(products: Product[]): Promise<VerifyResult[]> {
     const entries = [...byTerm.entries()];
     for (let i = 0; i < entries.length; i += CONCURRENCY) {
       const left = getLastTokenInfo()?.tokensLeft;
-      if (left != null && left < 200) break;
+      if (left != null && left < KEYWORD_MIN_TOKENS) break;
 
       await Promise.all(entries.slice(i, i + CONCURRENCY).map(async ([_term, group]) => {
         try {

@@ -477,11 +477,13 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         cursor = batch[batch.length - 1].id;
         attempted += batch.length;
 
-        // Skip AI passes here — they run over the flagged rows below.
+        // Skip AI passes here — they run over the flagged rows below. The
+        // deadline lets the verify library wait out a Keepa token refill
+        // without ever blowing this request's time budget.
         const results = await verifyProducts(
           project.marketplace,
           batch as Parameters<typeof verifyProducts>[1],
-          { skipAiPasses: true },
+          { skipAiPasses: true, deadline: startedAt + lookupBudgetMs },
         );
 
         const processed = results.filter((r) => r.status !== "skipped");

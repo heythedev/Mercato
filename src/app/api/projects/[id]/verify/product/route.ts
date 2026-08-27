@@ -12,6 +12,7 @@ import { verifyProducts, applyAiVerificationPasses } from "@/lib/marketplaces/ve
  * individual SKU without re-running the whole catalog.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const startedAt = Date.now();
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
@@ -54,10 +55,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   try {
     const [result] = await withImageCache(async () => {
+      // Leave the AI pass ~20s of the 60s budget; the deadline keeps any
+      // token-refill wait inside what remains.
       const results = await verifyProducts(
         project.marketplace,
         [product] as Parameters<typeof verifyProducts>[1],
-        { skipAiPasses: true },
+        { skipAiPasses: true, deadline: startedAt + (maxDuration - 20) * 1000 },
       );
       await applyAiVerificationPasses(
         results,
