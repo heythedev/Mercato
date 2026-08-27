@@ -2480,46 +2480,106 @@ export function structuredPackQty(c: any): number | null {
  * is really a case pack whose title says nothing ("FIXTURE JELLY JAR 1LT BL" —
  * a 12-pack per Amazon's own attributes); Keepa's catalog data exposes the real
  * count. Candidates are patched in place (only where the provider gave nothing,
- * never overriding an explicit value). Cache-first; a Keepa failure leaves the
- * candidates untouched rather than failing the product.
+ * never overriding an explicit value).
+ *
+ * Source order follows synccentricPrimary(): in primary mode Synccentric fills
+ * pack counts first (a search credit is far cheaper than Keepa tokens) and
+ * Keepa is consulted only for what remains; in fallback mode Keepa (cache-first)
+ * leads and Synccentric covers token-starved gaps. Keepa additionally patches
+ * the ranking signals Synccentric's database doesn't store (salesRank, reviews,
+ * offers, price) — with several listings on one barcode those signals are what
+ * keeps pickBestCandidate from handing the match to a reseller relist, so the
+ * ambiguous minority is worth Keepa tokens even in primary mode. A source
+ * failure leaves the candidates untouched rather than failing the product, and
+ * Synccentric answers are never written to the Keepa cache.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function enrichCandidatePackData(candidates: any[]): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const blind = new Map<string, any[]>();
+  const byAsin = new Map<string, any[]>();
   for (const c of candidates) {
     const asin = typeof c?.asin === "string" ? c.asin.trim() : "";
     if (!ASIN_RE.test(asin)) continue;
-    if (structuredPackQty(c) != null) continue;
-    if (!blind.has(asin)) blind.set(asin, []);
-    blind.get(asin)!.push(c);
+    if (!byAsin.has(asin)) byAsin.set(asin, []);
+    byAsin.get(asin)!.push(c);
   }
-  if (!blind.size) return;
-  try {
-    // Cap mirrors the sibling walk: a UPC mapping to more listings than this is
-    // junk data, not a candidate set worth paying tokens for.
-    const asins = [...blind.keys()].slice(0, 10);
-    const cached = await getCachedProducts(KEEPA_DOMAIN, asins);
-    const missing = asins.filter((a) => !cached.has(a));
-    let fetched: KeepaProduct[] = [];
-    if (missing.length) {
-      const { getProducts } = await import("@/lib/keepa");
-      fetched = await getProducts(KEEPA_DOMAIN, missing);
-      if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
+  const packBlind = (asin: string) =>
+    (byAsin.get(asin) ?? []).some((c) => structuredPackQty(c) == null);
+  const qualityBlind = (asin: string) =>
+    (byAsin.get(asin) ?? []).some((c) => c.salesRank == null && c.reviewCount == null);
+
+  // Cap mirrors the sibling walk: a UPC mapping to more listings than this is
+  // junk data, not a candidate set worth paying tokens for.
+  const asins = [...byAsin.keys()].slice(0, 10);
+  const fillPack = (asin: string, qty: number) => {
+    for (const c of byAsin.get(asin) ?? []) {
+      if (structuredPackQty(c) == null) c.packageQuantity = Math.round(qty);
     }
-    for (const raw of [...cached.values(), ...fetched]) {
-      const targets = raw?.asin ? blind.get(String(raw.asin)) : undefined;
-      if (!targets) continue;
-      // Keepa uses -1 for "unknown" — only counts >= 1 are facts.
-      const qty = [raw.packageQuantity, raw.numberOfItems]
-        .map(Number).find((v) => Number.isFinite(v) && v >= 1);
-      if (qty == null) continue;
-      for (const c of targets) {
-        if (structuredPackQty(c) == null) c.packageQuantity = Math.round(qty);
+  };
+
+  const syncPass = async (targets: string[]) => {
+    if (!targets.length) return;
+    try {
+      const sync = await import("@/lib/synccentric/client");
+      if (!sync.synccentricConfigured()) return;
+      const rows = await sync.searchByAsin(targets);
+      let filled = 0;
+      for (const row of rows) {
+        const qty = Number(row.packageQuantity);
+        if (!row.asin || !Number.isFinite(qty) || qty < 1) continue;
+        fillPack(String(row.asin), qty);
+        filled++;
       }
+      if (filled) {
+        console.log(`[synccentric] pack enrichment: ${targets.length} blind ASINs → ${filled} filled`);
+      }
+    } catch (e) {
+      console.warn(`[verify] synccentric pack enrichment failed: ${(e as Error).message}`);
     }
-  } catch (e) {
-    console.warn(`[verify] pack enrichment skipped: ${(e as Error).message}`);
+  };
+
+  const keepaPass = async (targets: string[]) => {
+    if (!targets.length) return;
+    try {
+      const cached = await getCachedProducts(KEEPA_DOMAIN, targets);
+      const missing = targets.filter((a) => !cached.has(a));
+      let fetched: KeepaProduct[] = [];
+      if (missing.length) {
+        const { getProducts } = await import("@/lib/keepa");
+        fetched = await getProducts(KEEPA_DOMAIN, missing);
+        if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
+      }
+      const raws = [...cached.values(), ...fetched];
+      for (const raw of raws) {
+        if (!raw?.asin) continue;
+        // Keepa uses -1 for "unknown" — only counts >= 1 are facts.
+        const qty = [raw.packageQuantity, raw.numberOfItems]
+          .map(Number).find((v) => Number.isFinite(v) && v >= 1);
+        if (qty != null) fillPack(String(raw.asin), qty);
+      }
+      if (raws.length) {
+        const { normalizeMany } = await import("@/lib/keepa");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const n of normalizeMany(raws, KEEPA_DOMAIN) as any[]) {
+          for (const c of byAsin.get(String(n?.asin)) ?? []) {
+            for (const f of ["salesRank", "reviewCount", "offerCount", "price"] as const) {
+              if (c[f] == null && n[f] != null) c[f] = n[f];
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[verify] keepa pack enrichment failed: ${(e as Error).message}`);
+    }
+  };
+
+  const { synccentricPrimary } = await import("@/lib/synccentric/client");
+  if (synccentricPrimary()) {
+    await syncPass(asins.filter(packBlind));
+    await keepaPass(asins.filter((a) => packBlind(a) || qualityBlind(a)));
+  } else {
+    if (asins.some(packBlind)) await keepaPass(asins.filter(packBlind));
+    await syncPass(asins.filter(packBlind));
   }
 }
 
