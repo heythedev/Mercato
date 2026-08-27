@@ -6,6 +6,7 @@ import { prisma, inChunks } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { categorizeProducts, type ProductInput } from "@/lib/ai/categorize";
 import { enrichSkuOnlyProducts, looksLikeSkuName } from "@/lib/ai/resolve-sku";
+import { inheritFamilyCategories, type FamilyRow } from "@/lib/ai/sku-family";
 import {
   createCategorizeJob,
   setCategorizeJobPhase,
@@ -800,6 +801,61 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
 
+    // SKU-family inheritance: a code that stayed Uncategorized because no
+    // resolver could identify it can still be typed by its own part-number
+    // family — when every resolved sibling of <family><digits> landed on one
+    // category, the unresolved variant is that product type too (deterministic,
+    // no AI; guardrails in sku-family.ts). Runs over the WHOLE project after
+    // the slice loop because slices of 100 can't see a family's siblings.
+    // Skipped on a partial stop — the resumed invocation reaches it at the end.
+    let familyInherited = 0;
+    if (!partial) {
+      const familyRows: FamilyRow[] = [];
+      let cursor: string | null = null;
+      for (;;) {
+        const where: Prisma.ProductWhereInput = cursor
+          ? { projectId: id, id: { gt: cursor } }
+          : { projectId: id };
+        const page = await prisma.product.findMany({
+          where,
+          orderBy: { id: "asc" },
+          take: PAGE_SIZE,
+          select: {
+            id: true,
+            name: true,
+            vendorSku: true,
+            marketplaceCategory: true,
+            categoryPath: true,
+            categoryConfidence: true,
+          },
+        });
+        if (page.length === 0) break;
+        cursor = page[page.length - 1].id;
+        for (const p of page) {
+          familyRows.push({
+            id: p.id,
+            sku: p.vendorSku,
+            name: p.name,
+            category: p.marketplaceCategory,
+            path: p.categoryPath,
+            confidence: p.categoryConfidence,
+          });
+        }
+      }
+      const inherited = inheritFamilyCategories(familyRows);
+      if (inherited.length > 0) {
+        setCategorizeJobPhase(jobId, `Inheriting ${inherited.length} categories from SKU families…`);
+        await bulkUpdateCategories(inherited);
+        for (const r of inherited) {
+          existingCatById.set(r.productId, r.category);
+          console.log(
+            `[categorize] ${r.productId} inherited "${r.category}" from family ${r.family} (${r.siblings} sibling${r.siblings === 1 ? "" : "s"})`,
+          );
+        }
+        familyInherited = inherited.length;
+      }
+    }
+
     // All heartbeat writes must land before the final status write so a stale
     // beat can never flip the project back to "categorizing".
     runFinished = true;
@@ -835,6 +891,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         : {}),
       reprocessed: processed,
       enrichedFromSku: enrichedCount,
+      ...(familyInherited > 0 ? { familyInherited } : {}),
       ...(mpLower === "walmart"
         ? { specTypesRequested, specTypesAssigned, ...(specTypeError ? { specTypeError } : {}) }
         : {}),
