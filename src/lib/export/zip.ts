@@ -29,6 +29,7 @@ type Product = Pick<
   | "liveData"
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
+import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, type DropdownQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
 import { applyWayfairEligibility } from "./wayfair-eligibility";
@@ -955,9 +956,43 @@ async function fillTemplateXlsx(
   // banners so sawRequiredBanner stays false and all mapped columns are exported.
   // (Do NOT guard on isNewListingTemplate — "Spec Product Type" in the display-
   //  label row normalises to the same key and would incorrectly set it to true.)
-  const exportEntries = sawRequiredBanner && requiredLetters.size
+  const bandedEntries = sawRequiredBanner && requiredLetters.size
     ? colEntries.filter((e) => requiredLetters.has(e.letter) || alwaysExport(e))
     : colEntries;
+
+  // ── Mathis: never fill the Mirakl OFFER block ──────────────────────────────
+  // Mathis templates end in a blue offer section (Offer SKU … Update/Delete)
+  // whose row-2 field codes are the standard Mirakl offer keys. The client
+  // imports offers separately and requires these columns EMPTY in the product
+  // feed, so they are excluded from the export entirely — the cells keep their
+  // template styling but never receive data. Codes and display labels are both
+  // matched because stored templates key columns either way.
+  const isMathis = marketplace.toLowerCase() === "mathis";
+  const MIRAKL_OFFER_KEYS = new Set([
+    // row-2 field codes            // row-1 display labels
+    "sku",                          "offersku",
+    "productid",                    "productidtype",
+    "description",                  "offerdescription",
+    "internaldescription",          "offerinternaldescription",
+    "price",                        "offerprice",
+    "priceadditionalinfo",          "offerpriceadditionalinfo",
+    "quantity",                     "offerquantity",
+    "minquantityalert",             "minimumquantityalert",
+    "state",                        "offerstate",
+    "availablestartdate",           "availabilitystartdate",
+    "availableenddate",             "availabilityenddate",
+    "logisticclass",                "discountprice",
+    "discountstartdate",            "discountenddate",
+    "leadtimetoship",               "updatedelete",
+  ]);
+  const isMiraklOfferEntry = (e: ColEntry): boolean => {
+    const header = colLetterToHeader.get(e.letter) ?? "";
+    return [e.col.key, e.col.label, header].some((s) =>
+      MIRAKL_OFFER_KEYS.has(normalizeKey(String(s ?? ""))));
+  };
+  const exportEntries = isMathis
+    ? bandedEntries.filter((e) => !isMiraklOfferEntry(e))
+    : bandedEntries;
 
   // ── Dropdown options from dataValidations ──────────────────────────────────
   // Parse ALL dataValidation blocks first, then filter to type="list".
@@ -1044,7 +1079,6 @@ async function fillTemplateXlsx(
   // name mismatch, encoding issue, etc.) seed it from the Mathis taxonomy CSV.
   // Only applies to Mathis exports — other marketplaces write category as plain
   // text and don't need a forced dropdown option list.
-  const isMathis = marketplace.toLowerCase() === "mathis";
   if (isMathis) {
     const catEntry = colEntries.find(({ col }) =>
       normalizeKey(col.key) === "category" || normalizeKey(col.label) === "category"
@@ -1267,6 +1301,17 @@ async function fillTemplateXlsx(
       // marketplaceCategory (a " > " path) which is wrong here; also covers the case
       // where no category was assigned (raw="") — both should default to "Normal product".
       if ((nk === "producttype" || nk === "goodstype" || nk === "skutype") && (raw.includes(" > ") || !raw.trim())) raw = "Normal product";
+    }
+
+    // Mathis dimension columns (DIMH/DIMW/DIMD) must carry bare decimals —
+    // catalog scrapes store the PDP text verbatim (`18"`, `7.5'`) and Mirakl
+    // rejects any value with a unit mark. Feet convert to inches.
+    if (isMathis && raw.trim()) {
+      const dimKeys = new Set(["dimh", "dimw", "dimd", "heightdimension", "widthdimension", "depthdimension"]);
+      const header = colLetterToHeader.get(letter) ?? "";
+      if ([col.key, col.label, header].some((s) => dimKeys.has(normalizeKey(String(s ?? ""))))) {
+        raw = toDecimalDimension(raw);
+      }
     }
 
     // Amazon listing-loader field coercions applied before dropdown matching.
@@ -2337,6 +2382,14 @@ function getProductField(p: Product, key: string): unknown {
     mpn: fromVendor("mpn", "mfr_part_number", "manufacturer_part_number", "model_number", "model_no", "part_number") ?? "",
     manufacturer_part_number: fromVendor("manufacturer_part_number", "mpn", "mfr_part_number", "part_number", "model_number") ?? "",
     mfr_part_number: fromVendor("mpn", "mfr_part_number", "manufacturer_part_number", "model_number") ?? "",
+    // "Manufacturer SKU" (Mathis field code manufacturerSKU — both the code and
+    // the display label normalize to this one key): an explicit vendor column
+    // wins; otherwise Mathis' vendor sku IS the manufacturer's code behind a
+    // distributor prefix (VICK-FZ190118 → Vickerman's own FZ190118), so strip
+    // it. Non-VICK skus stay blank rather than echoing the shop sku.
+    manufacturer_sku:
+      fromVendor("manufacturer_sku", "mfr_sku", "manufacturersku", "mpn", "manufacturer_part_number", "model_number", "part_number")
+      ?? (/^VICK-/i.test(String(skuId ?? "")) ? String(skuId).replace(/^VICK-/i, "") : ""),
     model_number: fromVendor("model_number", "model_no", "mpn", "model", "part_number") ?? "",
     model_name: fromVendor("model_name", "model", "model_number") ?? "",
 
