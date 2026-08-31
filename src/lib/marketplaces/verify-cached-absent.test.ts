@@ -90,7 +90,9 @@ const bonideRows = () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockedLookups.mockResolvedValue(new Map([[GTIN14, []]])); // cached absence
+  mockedLookups.mockResolvedValue(
+    new Map([[GTIN14, { asins: [], source: "batch" as const }]]), // cached absence
+  );
   mockedSearch.mockResolvedValue({ products: [], failedCodes: [] });
   mockedConfigured.mockReturnValue(true);
   mockedPrimary.mockReturnValue(true);

@@ -55,7 +55,7 @@ export async function cleanupCaches(
   // (the expensive ones to re-derive) survive far longer than keyword guesses.
   deleted.keepaCodeLookup_keyword = (
     await prisma.keepaCodeLookup.deleteMany({
-      where: { source: "keyword", fetchedAt: { lt: cutoff(policy.keepaCodeKeywordDays) } },
+      where: { source: { in: ["keyword", "sibling"] }, fetchedAt: { lt: cutoff(policy.keepaCodeKeywordDays) } },
     })
   ).count;
   deleted.keepaCodeLookup_authoritative = (

@@ -151,8 +151,10 @@ model KeepaCodeLookup {
   domain    Int // Keepa domain id (1 = amazon.com)
   asins     String[] // empty = confirmed absent from Amazon (negative cache)
   /// How the mapping was resolved. Keyword matches are fuzzy guesses rather
-  /// than authoritative barcode hits, so they expire sooner.
-  source    String // batch | rescue | keyword
+  /// than authoritative barcode hits, so they expire sooner. "sibling" = a
+  /// pack-sibling rescue pick whose ASIN legitimately carries a different
+  /// barcode than the code it answers for.
+  source    String // batch | rescue | keyword | sibling
   fetchedAt DateTime @default(now())
 
   @@id([code, domain])

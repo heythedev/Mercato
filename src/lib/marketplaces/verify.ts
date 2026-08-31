@@ -623,8 +623,16 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
     // Resolve what the cache already knows. Codes with a remembered answer —
     // including a remembered absence — never reach Keepa.
     const cachedLookups = await getCachedCodeLookups(KEEPA_DOMAIN, allCodes);
-    const cachedAsins = [...new Set([...cachedLookups.values()].flat())];
+    const cachedAsins = [...new Set([...cachedLookups.values()].flatMap((v) => v.asins))];
     const cachedProducts = await getCachedProducts(KEEPA_DOMAIN, cachedAsins);
+
+    // ASINs served from pack-sibling mappings: those legitimately carry a
+    // DIFFERENT barcode than the code they answer for (identity came from the
+    // original set-aside barcode match), so the poisoned-mapping filter below
+    // must let them through.
+    const siblingSourceAsins = new Set(
+      [...cachedLookups.values()].filter((v) => v.source === "sibling").flatMap((v) => v.asins),
+    );
 
     // A cached mapping is usable when every ASIN it names also has a cached
     // payload — otherwise we'd have an ASIN with no data behind it.
@@ -633,7 +641,7 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
     // resolved-with-data because `[].every()` is vacuously true, which would
     // otherwise class a negative as a satisfied lookup.
     const cachedAbsent = new Set<string>();
-    for (const [code, asins] of cachedLookups) {
+    for (const [code, { asins }] of cachedLookups) {
       if (!asins.length) cachedAbsent.add(code);
       else if (asins.every((a) => cachedProducts.has(a))) resolvedByCache.add(code);
     }
@@ -722,7 +730,7 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
     // Cached mappings resolve by ASIN, since a cached payload may not echo the
     // barcode back the way a fresh response does.
     for (const code of resolvedByCache) {
-      for (const asin of cachedLookups.get(code) ?? []) {
+      for (const asin of cachedLookups.get(code)?.asins ?? []) {
         const idx = rawProducts.findIndex((r) => r.asin === asin);
         const norm = idx >= 0 ? liveNorm[idx] : null;
         if (!norm) continue;
@@ -760,6 +768,31 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
         // Cache-resolved codes are keyed by GTIN-14, not by the raw variant.
         const g = toGtin14(v);
         if (g && g !== v) for (const c of (codeToLiveList.get(g) ?? [])) candidates.push(c);
+      }
+
+      // Self-heal poisoned mappings: a cached keyword GUESS is served under the
+      // very barcode it was guessed for — when the candidate's own barcodes
+      // contradict that code, the guess was wrong (the Bonide-granules →
+      // Repel-spray case) and re-serving it pins the bad ASIN for the cache
+      // TTL. Drop it so the product flows into the rescue paths, which ask
+      // Synccentric first and overwrite the bad entry with the real mapping.
+      // Fresh barcode-batch candidates always echo their own code, so this
+      // only ever bites poisoned cache entries; sibling-source mappings are
+      // exempt because their different barcode is legitimate.
+      if (candidates.length) {
+        const codeKeys = new Set(
+          barcodeVariants(resolvedUpc(p)).map(codeDigitsKey).filter(Boolean),
+        );
+        const kept = candidates.filter((c) =>
+          siblingSourceAsins.has(String(c.asin ?? "")) ||
+          !contradictsVendorBarcode(c, codeKeys, NO_BRANDS));
+        if (kept.length !== candidates.length) {
+          console.log(
+            `[verify] dropped ${candidates.length - kept.length} cached candidate(s) ` +
+              `whose barcodes contradict ${resolvedUpc(p)} — re-deriving the match`,
+          );
+          candidates = kept;
+        }
       }
 
       // The batch never completed for this product's codes — we don't know
@@ -1014,7 +1047,10 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
         rescued.add(p.id);
         if (sibling.asin) {
           const g = toGtin14(resolvedUpc(p));
-          if (g) await cacheCodeLookup(KEEPA_DOMAIN, g, [sibling.asin as string], "keyword");
+          // "sibling" (not "keyword"): the mapped ASIN legitimately carries a
+          // different barcode than g, and the poisoned-mapping filter must
+          // know to let it through on the next run.
+          if (g) await cacheCodeLookup(KEEPA_DOMAIN, g, [sibling.asin as string], "sibling");
         }
       } catch { /* leave for the normal cascade */ }
     }
@@ -2625,6 +2661,9 @@ export function resolveVendorPack(
 export function vendorPackQty(p: Product): number {
   return resolveVendorPack(p, extractPackInfo(p.name)).qty;
 }
+
+/** Empty brand-allowance set for contradiction checks with no sibling context. */
+const NO_BRANDS: ReadonlySet<string> = new Set();
 
 /** Digits-only with leading zeros stripped — barcode equality across the
  *  UPC-12 / EAN-13 / GTIN-14 zero-padding variants. */

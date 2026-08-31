@@ -19,8 +19,18 @@ import { prisma } from "@/lib/db";
 import { toGtin14 } from "@/lib/barcode";
 import type { KeepaProduct } from "./types";
 
-/** How a code→ASIN mapping was resolved. Keyword hits are fuzzy, so they expire. */
-export type LookupSource = "batch" | "rescue" | "keyword";
+/** How a code→ASIN mapping was resolved. Keyword hits are fuzzy, so they
+ *  expire. "sibling" marks a pack-sibling rescue pick: fuzzy like keyword
+ *  (same TTL) but its ASIN legitimately carries a DIFFERENT barcode than the
+ *  code it is stored under — identity came from the set-aside barcode match —
+ *  so consumers must exempt it from barcode-contradiction checks. */
+export type LookupSource = "batch" | "rescue" | "keyword" | "sibling";
+
+/** A cached code→ASIN mapping with the provenance the caller needs to judge it. */
+export type CachedCodeLookup = { asins: string[]; source: LookupSource };
+
+/** Sources that record a fuzzy (non-barcode) resolution — shorter TTL. */
+const FUZZY_SOURCES = new Set<string>(["keyword", "sibling"]);
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -54,7 +64,7 @@ const CACHE_DISABLED = process.env.CACHE_DISABLED === "true";
 export async function getCachedCodeLookups(
   domain: number,
   codes: string[],
-): Promise<Map<string, string[]>> {
+): Promise<Map<string, CachedCodeLookup>> {
   if (CACHE_DISABLED) return new Map();
   const keys = [...new Set(codes.map(toGtin14).filter((c): c is string => !!c))];
   if (!keys.length) return new Map();
@@ -63,7 +73,7 @@ export async function getCachedCodeLookups(
     where: { domain, code: { in: keys } },
   });
 
-  const out = new Map<string, string[]>();
+  const out = new Map<string, CachedCodeLookup>();
   for (const r of rows) {
     // An empty keyword row records "the search cascade failed once", NOT
     // "Amazon doesn't carry this barcode" — a fuzzy search finding nothing is
@@ -73,9 +83,10 @@ export async function getCachedCodeLookups(
     if (r.source === "keyword" && !r.asins.length) continue;
     // A remembered "not on Amazon" is only good for so long.
     if (!r.asins.length && !isFresh(r.fetchedAt, NEGATIVE_TTL_MS)) continue;
-    // Keyword matches were never authoritative — re-confirm them periodically.
-    if (r.source === "keyword" && !isFresh(r.fetchedAt, KEYWORD_TTL_MS)) continue;
-    out.set(r.code, r.asins);
+    // Fuzzy matches (keyword guess, pack sibling) were never authoritative —
+    // re-confirm them periodically.
+    if (FUZZY_SOURCES.has(r.source) && !isFresh(r.fetchedAt, KEYWORD_TTL_MS)) continue;
+    out.set(r.code, { asins: r.asins, source: r.source as LookupSource });
   }
   return out;
 }
