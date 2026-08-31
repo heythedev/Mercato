@@ -30,7 +30,7 @@ type Product = Pick<
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { toDecimalDimension } from "./dimensions";
-import { matchDropdownValues, dropdownKey, type DropdownQuery } from "../ai/match-dropdown";
+import { matchDropdownValues, dropdownKey, fillDropdownValues, type DropdownQuery, type DropdownFillQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
 import { applyWayfairEligibility } from "./wayfair-eligibility";
 import { ASIN_RE, toDisplayBarcode } from "../barcode";
@@ -60,6 +60,30 @@ export type ComplianceIssue = {
   category: string;
   missingRequired: string[];
 };
+
+// Colour words for deriving a mandatory Color / Finish Color cell from the
+// product's own title/description when the vendor supplied no colour column.
+// Longest-first so "navy blue" wins over "blue".
+const FILL_COLOUR_TERMS = [
+  "rose gold", "off white", "navy blue", "sky blue", "royal blue", "light blue",
+  "dark blue", "light grey", "dark grey", "light gray", "dark gray", "charcoal",
+  "black", "white", "grey", "gray", "silver", "gold", "bronze", "copper", "brass",
+  "chrome", "nickel", "red", "burgundy", "maroon", "pink", "magenta", "purple",
+  "violet", "lavender", "blue", "teal", "turquoise", "aqua", "green", "olive",
+  "lime", "mint", "sage", "yellow", "mustard", "orange", "peach", "coral",
+  "brown", "tan", "beige", "cream", "ivory", "khaki", "natural", "multicolor",
+].sort((a, b) => b.length - a.length);
+
+/** First colour word found in the text, Title-Cased; "" when none. */
+export function colourFromText(text: string): string {
+  const lo = text.toLowerCase();
+  for (const c of FILL_COLOUR_TERMS) {
+    if (new RegExp(`\\b${c}\\b`).test(lo)) {
+      return c.replace(/\b\w/g, (ch) => ch.toUpperCase());
+    }
+  }
+  return "";
+}
 
 export type TemplateRow = {
   id: string;
@@ -1283,6 +1307,58 @@ async function fillTemplateXlsx(
   }
   const aiMatches = aiQueries.length ? await matchDropdownValues(aiQueries) : new Map<string, string>();
 
+  // ── Mathis: mandatory-cell fill (pink cells must not ship EMPTY) ───────────
+  // The client's rule is absolute — a REQUIRED cell may not be blank — but
+  // vendor sheets rarely carry compliance/attribute columns. Three fill layers
+  // run for a REQUIRED cell that mapped to nothing, most trustworthy first:
+  //   1. deterministic derivations: Swatch = the product's main image, Finish
+  //      Color / Color from the vendor colour or the title/description text,
+  //      Assembly Yes/No translated to the template's own wording;
+  //   2. safe defaults for compliance columns (Made in USA "No", Prop-65 "No")
+  //      — what the operators enter by hand for imported decor when the
+  //      vendor is silent;
+  //   3. an AI pick from the column's OWN dropdown list (STYLE etc.) using the
+  //      product name/description — bounded to an option verbatim or nothing.
+  // Whatever still ends empty goes to Missing_Mandatory_Fields.csv as before.
+  const DETERMINISTIC_FILL_KEYS = new Set([
+    "swatchimage", "swatch", "casingfinishcolor", "finishcolor", "color", "colour",
+    "mpmadeinusa", "madeinusa", "prop65", "structassembly", "assemblyrequired",
+  ]);
+  const imageLetter = letterByNormKey("siloimage") ?? letterByNormKey("image1");
+  const colorLetter = letterByNormKey("color");
+  const fillNormKey = (col: Column, letter: string): string =>
+    normalizeKey(colLetterToHeader.get(letter) ?? col.label ?? col.key ?? "");
+
+  const requiredFallback = (
+    p: Product,
+    col: Column,
+    letter: string,
+    valueByLetter: Map<string, string>,
+  ): string => {
+    const nk = fillNormKey(col, letter);
+    const nk2 = normalizeKey(String(col.key ?? ""));
+    const is = (...names: string[]) => names.some((n) => nk === n || nk2 === n);
+    if (is("swatchimage", "swatch")) {
+      return (imageLetter ? valueByLetter.get(imageLetter) ?? "" : "") || String(p.imageUrl ?? "");
+    }
+    if (is("casingfinishcolor", "finishcolor")) {
+      return (colorLetter ? valueByLetter.get(colorLetter) ?? "" : "")
+        || colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
+    }
+    if (is("color", "colour")) {
+      return colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
+    }
+    if (is("mpmadeinusa", "madeinusa")) return "No";
+    if (is("prop65")) return "No";
+    if (is("structassembly", "assemblyrequired")) {
+      const v = String(getProductField(p, "assembly_required") ?? "").trim();
+      return /^(y|yes|true|req)/i.test(v) ? "Customer Assembly Required" : "Complete";
+    }
+    return "";
+  };
+
+  let filledRequiredCells = 0;
+
   const isTemu = marketplace.toLowerCase() === "temu";
   const isWalmart = marketplace.toLowerCase() === "walmart";
   const isAmazon = marketplace.toLowerCase() === "amazon" || marketplace.toLowerCase() === "amazon_us";
@@ -1527,6 +1603,39 @@ async function fillTemplateXlsx(
     return value;
   };
 
+  // AI layer of the mandatory fill: REQUIRED dropdown cells with no vendor
+  // value and no deterministic rule. Collected across all products up front so
+  // the model answers in a few batches instead of per row.
+  const aiFill = new Map<string, string>();
+  if (isMathis && reqMatrix) {
+    const fillQueries: DropdownFillQuery[] = [];
+    for (const p of products) {
+      const catKey = matrixCatKey(p);
+      if (!catKey) continue;
+      for (const { col, letter } of exportEntries) {
+        const options = dropdowns.get(letter);
+        if (!options?.length) continue;
+        if (statusesFor(col, letter)?.get(catKey) !== "REQUIRED") continue;
+        const nk = fillNormKey(col, letter);
+        if (nk === "category" || DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(normalizeKey(String(col.key ?? "")))) continue;
+        if (colVal(p, col, letter).trim()) continue; // vendor data covers it
+        fillQueries.push({
+          key: `${p.id}|${letter}`,
+          column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+          context: `${p.name ?? ""}${p.brand ? ` (brand: ${p.brand})` : ""}. ${String(p.description ?? "").slice(0, 220)}`.trim(),
+          options,
+        });
+      }
+    }
+    if (fillQueries.length) {
+      const filled = await fillDropdownValues(fillQueries);
+      for (const [k, v] of filled) aiFill.set(k, v);
+      console.log(
+        `[export] mandatory fill: ${fillQueries.length} empty pink dropdown cell(s) → AI filled ${filled.size}`,
+      );
+    }
+  }
+
   for (let i = 0; i < products.length; i++) {
     const p = products[i];
     const rn = firstDataRowNum + i;
@@ -1600,6 +1709,21 @@ async function fillTemplateXlsx(
           if (status === "NA") {
             if (val !== "") { valueByLetter.set(letter, ""); blankedNaCells++; }
           } else if (status === "REQUIRED" && val === "") {
+            // Fill layers before reporting: deterministic derivation/default,
+            // then the AI's pick from the column's own dropdown list. Every
+            // fill still has to clear the dropdown invariant — an off-list
+            // value is worse than an empty cell.
+            let fill = requiredFallback(p, col, letter, valueByLetter);
+            if (!fill) fill = aiFill.get(`${p.id}|${letter}`) ?? "";
+            if (fill) {
+              const options = dropdowns.get(letter);
+              const final = options ? (pickDropdownValue(fill, options) ?? "") : fill;
+              if (final) {
+                valueByLetter.set(letter, final);
+                filledRequiredCells++;
+                continue;
+              }
+            }
             missingRequired.push(colLetterToHeader.get(letter) || col.label || col.key);
           }
         }
@@ -1663,7 +1787,8 @@ async function fillTemplateXlsx(
     console.log(
       `[export] requirement matrix (${reqMatrix.categories.size} categories): ` +
       `${blankedNaCells} not-applicable (grey) cells kept empty; ` +
-      `${compliance?.length ?? 0} rows missing mandatory (pink) values`,
+      `${filledRequiredCells} mandatory (pink) cells filled by fallback/AI; ` +
+      `${compliance?.length ?? 0} rows still missing mandatory values`,
     );
     if (unknownMatrixCategories.size) {
       console.warn(

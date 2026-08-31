@@ -161,3 +161,130 @@ No other text.`,
 
   return out;
 }
+
+// ── Mandatory-cell fill (no vendor value at all) ──────────────────────────────
+
+export type DropdownFillQuery = {
+  /** Caller's correlation key (e.g. productId + column letter). */
+  key: string;
+  /** Template column header ("STYLE", "Assembly Required"). */
+  column: string;
+  /** Product identity: name, brand, description — what a human operator would read. */
+  context: string;
+  /** The column's allowed options, verbatim from the template. */
+  options: string[];
+};
+
+/**
+ * Choose a dropdown option for a product that has NO vendor value at all.
+ *
+ * matchDropdownValues above maps an EXISTING vendor value onto the list; this
+ * fills a mandatory cell the vendor left empty. For a dropdown column the true
+ * answer is by definition one of the client's own allowed options, so this is
+ * the same judgment call a human operator makes when completing the sheet
+ * ("STYLE: Contemporary" for a modern vase). The model may only answer with an
+ * option verbatim or an empty string (context genuinely uninformative);
+ * anything else is discarded. Never throws — missing entries simply stay empty
+ * and flow into the compliance report.
+ */
+export async function fillDropdownValues(
+  queries: DropdownFillQuery[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!queries.length) return out;
+  if (!moonshotConfigured()) {
+    console.error(
+      `[match-dropdown] MOONSHOT_KEY is not set — ${queries.length} mandatory dropdown ` +
+        `cell(s) cannot be filled and will land in the compliance report.`,
+    );
+    return out;
+  }
+
+  // Deduplicate identical (column, context, options) asks; fan the answer back
+  // out to every caller key that asked the same question.
+  const usable = queries.filter(
+    (q) => q.context.trim() && q.options.length && q.options.length <= MAX_OPTIONS,
+  );
+  const byAsk = new Map<string, { q: DropdownFillQuery; keys: string[] }>();
+  for (const q of usable) {
+    const askKey = `${q.column} ${q.context} ${q.options.join("")}`;
+    const cur = byAsk.get(askKey);
+    if (cur) cur.keys.push(q.key);
+    else byAsk.set(askKey, { q, keys: [q.key] });
+  }
+  if (!byAsk.size) return out;
+
+  const asks = [...byAsk.values()];
+  const batches: (typeof asks)[] = [];
+  for (let i = 0; i < asks.length; i += BATCH_SIZE) batches.push(asks.slice(i, i + BATCH_SIZE));
+
+  const runBatch = async (batch: typeof asks): Promise<void> => {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const items = batch
+          .map(({ q }, n) => {
+            const opts = q.options.map((o) => `    - ${o}`).join("\n");
+            return `${n + 1}. column: "${q.column}"\n   product: ${q.context}\n   allowed options:\n${opts}`;
+          })
+          .join("\n\n");
+
+        const { text } = await generateText({
+          model: moonshot(MODEL),
+          temperature: moonshotTemperature(MODEL, 0),
+          prompt: `You complete REQUIRED product-attribute dropdowns on a marketplace listing sheet. The vendor supplied no value, so choose from the product information the way a human operator would.
+
+For each item choose the single allowed option that best describes the product.
+
+Rules:
+- Copy the chosen option EXACTLY as written in its list (same spelling, casing, spacing, punctuation).
+- Choose from that item's OWN option list only — never an option from another item.
+- Commit to the best-fitting option; when several fit, pick the most typical for this kind of product.
+- Output an empty string after the colon ONLY when the product information says nothing usable for the column at all.
+
+Items:
+
+${items}
+
+Respond with one line per item, in order, formatted exactly as:
+<item number>: <chosen option or empty>
+No other text.`,
+        });
+
+        // Strip markdown ("**1:** Casual") the kimi models add despite "No other text".
+        for (const line of text.replace(/[*_`#]/g, "").split(/\r?\n/)) {
+          const m = line.match(/^\s*(\d+)\s*:\s*(.*)$/);
+          if (!m) continue;
+          const idx = parseInt(m[1], 10) - 1;
+          const picked = m[2].trim().replace(/^["']|["']$/g, "");
+          const ask = batch[idx];
+          if (!ask || !picked) continue;
+          // Only accept a verbatim option (case-insensitive compare, canonical casing stored).
+          const exact = ask.q.options.find((o) => o.toLowerCase() === picked.toLowerCase());
+          if (exact) for (const key of ask.keys) out.set(key, exact);
+        }
+        return;
+      } catch (err) {
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+          continue;
+        }
+        console.warn(
+          `[match-dropdown] giving up on a mandatory-fill batch of ${batch.length} after ` +
+            `${MAX_ATTEMPTS} attempts; those cells go to the compliance report:`, err,
+        );
+      }
+    }
+  };
+
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+      while (next < batches.length) {
+        const batch = batches[next++];
+        if (batch) await runBatch(batch);
+      }
+    }),
+  );
+
+  return out;
+}

@@ -34,8 +34,8 @@ async function buildTemplate(): Promise<Buffer> {
   const dataSheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <sheetData>
-${row(1, ["Category", "Shop SKU", "Name", "Color", "Fabric Color"], true)}
-${row(2, ["category", "shopSKU", "name", "color", "FABRIC_COLOR"], true)}
+${row(1, ["Category", "Shop SKU", "Name", "Color", "Fabric Color", "Made in USA"], true)}
+${row(2, ["category", "shopSKU", "name", "color", "FABRIC_COLOR", "MP_MADE_IN_USA"], true)}
 </sheetData>
 <dataValidations count="1"><dataValidation type="list" allowBlank="1" sqref="A3:A100"><formula1>"Mathis Home/Decor/Vases,Mathis Home/Decor/Pillows"</formula1></dataValidation></dataValidations>
 </worksheet>`;
@@ -49,6 +49,7 @@ ${row(3, ["shopSKU", "Shop SKU", null, null, "REQUIRED", "REQUIRED"])}
 ${row(4, ["name", "Name", null, null, "REQUIRED", "REQUIRED"])}
 ${row(5, ["color", "Color", null, null, "REQUIRED", null])}
 ${row(6, ["FABRIC_COLOR", "Fabric Color", null, null, "NA", "REQUIRED"])}
+${row(7, ["MP_MADE_IN_USA", "Made in USA", null, null, "REQUIRED", "REQUIRED"])}
 </sheetData>
 </worksheet>`;
 
@@ -147,7 +148,7 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
       name: "Decor",
       category: "Decor",
       fileFormat: "xlsx",
-      columns: ["Category", "Shop SKU", "Name", "Color", "Fabric Color"]
+      columns: ["Category", "Shop SKU", "Name", "Color", "Fabric Color", "Made in USA"]
         .map((key) => ({ key, label: key })),
       fileData,
     };
@@ -196,6 +197,13 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
     expect(dataRows.get(3)?.get("D")).toBe("Blue");
   });
 
+  it("fills compliance defaults into empty pink cells (Made in USA → No)", () => {
+    // REQUIRED for both categories, no vendor value anywhere — the deterministic
+    // fill layer supplies the operator default instead of shipping a blank.
+    expect(dataRows.get(3)?.get("F")).toBe("No");
+    expect(dataRows.get(4)?.get("F")).toBe("No");
+  });
+
   it("reports rows whose pink cells could not be filled", () => {
     expect(reportCsv).toBeTruthy();
     const lines = (reportCsv ?? "").split("\n");
@@ -203,6 +211,8 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
     expect(pillowLine).toContain("Fabric Color");
     // grey attributes never appear as "missing" — color is NA for Pillows
     expect(pillowLine).not.toContain("Color;");
+    // auto-filled columns are no longer "missing"
+    expect(pillowLine).not.toContain("Made in USA");
     // the vase filled everything its category requires — no report row
     expect(lines.some((l) => l.includes("VASE-1"))).toBe(false);
   });
