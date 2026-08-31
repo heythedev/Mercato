@@ -38,6 +38,29 @@ import { readXlsxGrid } from "../vendor/xlsx-lite";
 
 type Column = { key: string; label: string; required?: boolean };
 
+// ── Mirakl requirement matrix (Mathis) ───────────────────────────────────────
+// Every Mathis template ships a "Columns" sheet: one row per attribute, one
+// column per category path, each cell REQUIRED / RECOMMENDED / OPTIONAL / NA.
+// The Data sheet's colour coding is generated from this matrix — pink cells are
+// REQUIRED, grey cells are NA (not applicable: the client's import requires them
+// EMPTY) — and it differs per template AND per category, so it is the authority
+// on which cells may carry data.
+type ReqStatus = "REQUIRED" | "RECOMMENDED" | "OPTIONAL" | "NA";
+type RequirementMatrix = {
+  /** normalizeKey(field code | label) → (lowercased category path → status) */
+  byAttr: Map<string, Map<string, ReqStatus>>;
+  /** lowercased category paths the matrix has columns for */
+  categories: Set<string>;
+};
+
+/** One export row whose category demands a value (pink cell) we could not fill. */
+export type ComplianceIssue = {
+  sku: string;
+  name: string;
+  category: string;
+  missingRequired: string[];
+};
+
 export type TemplateRow = {
   id: string;
   name: string;
@@ -298,6 +321,7 @@ export async function generateCategoryZip(
     byCategory.set(catKey, { template: tpl, catLabel, products: catProducts });
   }
 
+  const complianceRows: (ComplianceIssue & { file: string })[] = [];
   for (const { template, catLabel, products: catProducts } of byCategory.values()) {
     await new Promise<void>((r) => setImmediate(r)); // yield so HTTP polls can be served
 
@@ -309,8 +333,10 @@ export async function generateCategoryZip(
       zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns));
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
-      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace);
+      const fileIssues: ComplianceIssue[] = [];
+      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues);
       zipOut.file(`${fileName}.xlsx`, buffer);
+      for (const issue of fileIssues) complianceRows.push({ ...issue, file: `${fileName}.xlsx` });
     } else {
       console.warn(`[export] Template "${template.name}" (${marketplace}) has NO fileData — plain workbook will be generated. Re-upload the template file to fix this.`);
       const buffer = await createXlsxFromScratch(catProducts, columns, catLabel || template.name);
@@ -321,6 +347,14 @@ export async function generateCategoryZip(
   if (uncategorizedProducts.length > 0) {
     console.log(`[export] ${uncategorizedProducts.length} uncategorized products → Uncategorized.csv (no template)`);
     zipOut.file("Uncategorized.csv", generateUncategorizedCsv(uncategorizedProducts));
+  }
+
+  // Rows where the template's requirement matrix marks a cell mandatory (pink)
+  // but no data was available. Values are never invented, so surface the gaps
+  // in a review file the client can fill before importing.
+  if (complianceRows.length > 0) {
+    console.log(`[export] ${complianceRows.length} rows missing mandatory template fields → Missing_Mandatory_Fields.csv`);
+    zipOut.file("Missing_Mandatory_Fields.csv", generateComplianceCsv(complianceRows));
   }
 
   const zipBuffer = await (zipOut.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>);
@@ -610,6 +644,7 @@ async function fillTemplateXlsx(
   columns: Column[],
   fileData: Buffer,
   marketplace = "",
+  compliance?: ComplianceIssue[],
 ): Promise<Buffer> {
   console.log(`[export] fillTemplateXlsx called: ${products.length} products, fileData=${fileData?.length ?? 0} bytes, marketplace=${marketplace}`);
   const tplZip = await JSZip.loadAsync(fileData);
@@ -994,6 +1029,29 @@ async function fillTemplateXlsx(
     ? bandedEntries.filter((e) => !isMiraklOfferEntry(e))
     : bandedEntries;
 
+  // ── Mathis: per-category requirement matrix (pink/grey enforcement) ────────
+  // Parsed from the template's own "Columns" sheet, so each template file (and
+  // each category inside it) carries its own rules. Enforced per ROW below:
+  // the same attribute can be REQUIRED (pink) for one row's category and NA
+  // (grey — must stay empty) for the next row's.
+  const reqMatrix = isMathis
+    ? await parseRequirementMatrix(tplZip, sheetNameToPath, ssArr)
+    : null;
+  const letterByNormKey = (nk: string): string | undefined =>
+    colEntries.find(({ col, letter }) => {
+      const header = colLetterToHeader.get(letter) ?? "";
+      return [col.key, col.label, header].some((s) => normalizeKey(String(s ?? "")) === nk);
+    })?.letter;
+  const categoryLetter = letterByNormKey("category");
+  const shopSkuLetter = letterByNormKey("shopsku");
+  // Requirement statuses for one mapped column, keyed by category path.
+  const statusesFor = (col: Column, letter: string): Map<string, ReqStatus> | undefined =>
+    reqMatrix?.byAttr.get(normalizeKey(colLetterToHeader.get(letter) ?? ""))
+    ?? reqMatrix?.byAttr.get(normalizeKey(String(col.key ?? "")))
+    ?? reqMatrix?.byAttr.get(normalizeKey(String(col.label ?? "")));
+  let blankedNaCells = 0;
+  const unknownMatrixCategories = new Set<string>();
+
   // ── Dropdown options from dataValidations ──────────────────────────────────
   // Parse ALL dataValidation blocks first, then filter to type="list".
   // The old regex required type= to precede sqref= in the attribute list —
@@ -1185,6 +1243,22 @@ async function fillTemplateXlsx(
           : raw.split(" > ").map(s => s.trim()).join("/"))
       : raw;
 
+  // A product's category key in the requirement matrix — the same "Mathis
+  // Home/…" path its category cell receives. Memoised per product: identical
+  // for every column of the row. Empty string = category not covered by this
+  // template's matrix, so no enforcement applies to that row.
+  const _matrixCatCache = new Map<string, string>();
+  const matrixCatKey = (p: Product): string => {
+    if (!reqMatrix) return "";
+    let k = _matrixCatCache.get(p.id);
+    if (k === undefined) {
+      k = toDropdownRaw(String(getProductField(p, "category") ?? "")).trim().toLowerCase();
+      if (!reqMatrix.categories.has(k)) k = "";
+      _matrixCatCache.set(p.id, k);
+    }
+    return k;
+  };
+
   // Pass 1 — collect values the deterministic matcher could not place.
   const aiQueries: DropdownQuery[] = [];
   for (const p of products) {
@@ -1195,6 +1269,10 @@ async function fillTemplateXlsx(
       if (!options) continue;
       // specproducttype is always written raw — no AI dropdown matching needed
       if (normalizeKey(String(col.key ?? "")) === "specproducttype") continue;
+      // Grey (NA) cells for this row's category never reach the sheet — don't
+      // spend AI calls resolving values the enforcement pass will blank.
+      const catKey = matrixCatKey(p);
+      if (catKey && statusesFor(col, letter)?.get(catKey) === "NA") continue;
       const raw = String(getProductField(p, col.key) ?? "");
       if (!raw.trim()) continue;
       const candidate = toDropdownRaw(raw);
@@ -1500,6 +1578,45 @@ async function fillTemplateXlsx(
       exportEntries.map(({ col, letter }) => [letter, colVal(p, col, letter)]),
     );
 
+    // ── Enforce the template's per-category requirements (pink/grey) ─────────
+    // Grey (NA) cells for THIS row's category must stay empty — the client's
+    // import rejects data there. Pink (REQUIRED) cells that end up blank can't
+    // be invented, so they are reported through the compliance collector for
+    // the Missing_Mandatory_Fields.csv review file instead.
+    if (reqMatrix) {
+      // Prefer the category actually written to the row (dropdown-matched);
+      // fall back to the value derived from the product when the cell is blank.
+      const written = (categoryLetter ? valueByLetter.get(categoryLetter) : "")?.trim() ?? "";
+      const catKey = reqMatrix.categories.has(written.toLowerCase())
+        ? written.toLowerCase()
+        : matrixCatKey(p);
+      if (catKey) {
+        const missingRequired: string[] = [];
+        for (const { col, letter } of exportEntries) {
+          if (letter === categoryLetter) continue;
+          const status = statusesFor(col, letter)?.get(catKey);
+          if (!status) continue;
+          const val = valueByLetter.get(letter) ?? "";
+          if (status === "NA") {
+            if (val !== "") { valueByLetter.set(letter, ""); blankedNaCells++; }
+          } else if (status === "REQUIRED" && val === "") {
+            missingRequired.push(colLetterToHeader.get(letter) || col.label || col.key);
+          }
+        }
+        if (missingRequired.length && compliance) {
+          compliance.push({
+            sku: (shopSkuLetter ? valueByLetter.get(shopSkuLetter) : "") || p.vendorSku || p.id,
+            name: p.name ?? "",
+            category: written || catKey,
+            missingRequired,
+          });
+        }
+      } else {
+        const raw = written || String(getProductField(p, "category") ?? "");
+        if (raw.trim()) unknownMatrixCategories.add(raw.trim());
+      }
+    }
+
     const cells = ordered.map((letter) => {
       const ref = `${letter}${rn}`;
       const sAttr = styleFor(letter);
@@ -1540,6 +1657,20 @@ async function fillTemplateXlsx(
       .replace(/\s*\bt="[^"]*"/g, "")
       .replace(/<c\b([^>]*)><\/c>/g, "<c$1/>");
     outputRows.push(cleared);
+  }
+
+  if (reqMatrix) {
+    console.log(
+      `[export] requirement matrix (${reqMatrix.categories.size} categories): ` +
+      `${blankedNaCells} not-applicable (grey) cells kept empty; ` +
+      `${compliance?.length ?? 0} rows missing mandatory (pink) values`,
+    );
+    if (unknownMatrixCategories.size) {
+      console.warn(
+        `[export] requirement matrix has no column for: ${[...unknownMatrixCategories].join(" | ")} ` +
+        `— those rows exported without pink/grey enforcement`,
+      );
+    }
   }
 
   // Assemble sheetData: ALL rows before firstDataRowNum (both header rows) + output rows
@@ -1658,6 +1789,78 @@ async function resolveXmlRangeDropdown(
     }
   }
   return opts;
+}
+
+/**
+ * Parse the "Columns" requirement matrix a Mirakl (Mathis) template ships:
+ * row 1 holds one category path per column from E onward; every following row
+ * is one attribute (A = field code, B = display label) whose cells say
+ * REQUIRED / RECOMMENDED / OPTIONAL / NA for each category. A blank or
+ * unrecognised cell is treated as NA — the grey "leave empty" state — since
+ * that is what the template's colour coding renders for it.
+ */
+async function parseRequirementMatrix(
+  tplZip: JSZip,
+  sheetNameToPath: Map<string, string>,
+  ssArr: string[],
+): Promise<RequirementMatrix | null> {
+  const path = sheetNameToPath.get("columns");
+  if (!path) return null;
+  const xml = await tplZip.file(path)?.async("string");
+  if (!xml) return null;
+
+  const colNum = (letter: string): number =>
+    [...letter.toUpperCase()].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+
+  const catCols = new Map<number, string>(); // column number → lowercased category path
+  const byAttr = new Map<string, Map<string, ReqStatus>>();
+  const categories = new Set<string>();
+
+  for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
+    const rowNum = parseInt(rm[1], 10);
+    const cells = new Map<number, string>();
+    for (const cm of rm[2].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const attrs = cm[1], content = cm[2] ?? "";
+      const letter = attrs.match(/\br="([A-Z]+)\d+"/)?.[1];
+      if (!letter) continue;
+      const vVal = content.match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? "";
+      const tVal = content.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? "";
+      const val = /\bt="s"/.test(attrs) && vVal !== ""
+        ? (ssArr[parseInt(vVal, 10)] ?? "")
+        : xmlUnescape(tVal || vVal);
+      if (val.trim() !== "") cells.set(colNum(letter), val.trim());
+    }
+    if (rowNum === 1) {
+      // Category columns start at E (A–D are Code/Label/Description/Example).
+      for (const [cn, v] of cells) {
+        if (cn >= 5 && v.includes("/")) {
+          catCols.set(cn, v.toLowerCase());
+          categories.add(v.toLowerCase());
+        }
+      }
+      continue;
+    }
+    if (catCols.size === 0) continue; // header row absent or unrecognised
+    const code = cells.get(1) ?? "";
+    const label = cells.get(2) ?? "";
+    if (!code && !label) continue;
+    const statuses = new Map<string, ReqStatus>();
+    for (const [cn, catKey] of catCols) {
+      const v = (cells.get(cn) ?? "").toUpperCase().replace(/[^A-Z]/g, "");
+      const st: ReqStatus =
+        v === "REQUIRED" ? "REQUIRED" :
+        v === "RECOMMENDED" ? "RECOMMENDED" :
+        v === "OPTIONAL" ? "OPTIONAL" : "NA";
+      statuses.set(catKey, st);
+    }
+    for (const k of [code, label]) {
+      const nk = normalizeKey(k);
+      if (nk && !byAttr.has(nk)) byAttr.set(nk, statuses);
+    }
+  }
+  if (byAttr.size === 0) return null;
+  console.log(`[export] requirement matrix parsed: ${byAttr.size / 2 | 0}+ attributes × ${categories.size} categories`);
+  return { byAttr, categories };
 }
 
 /** Extract plain text from a shared-string <si> element (handles simple + rich text). */
@@ -1787,6 +1990,18 @@ function generateUncategorizedCsv(products: Product[]): string {
   const header = ["SKU", "Category", "Product Name", "Brand", "UPC", "Description", "Image URL"];
   const rows = products.map((p) =>
     [p.vendorSku, "", p.name, p.brand, toDisplayBarcode(p.upc), p.description, p.imageUrl].map(esc).join(","),
+  );
+  return [header.map(esc).join(","), ...rows].join("\n");
+}
+
+// Review file for rows whose template-mandatory (pink) cells came out empty.
+// Lets the client fill the gaps before importing instead of discovering them
+// as Mirakl rejections.
+function generateComplianceCsv(issues: (ComplianceIssue & { file: string })[]): string {
+  const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const header = ["Category File", "Shop SKU", "Product Name", "Category", "Missing Mandatory Fields"];
+  const rows = issues.map((i) =>
+    [i.file, i.sku, i.name, i.category, i.missingRequired.join("; ")].map(esc).join(","),
   );
   return [header.map(esc).join(","), ...rows].join("\n");
 }
