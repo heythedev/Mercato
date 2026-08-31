@@ -276,13 +276,26 @@ function decodeHtml(s: string): string {
 
 type SearchHit = { title: string; snippet: string };
 
+let serpAuthWarned = false;
+
 async function searchSerpApi(query: string): Promise<SearchHit[]> {
   const key = process.env.SERPAPI_KEY;
   if (!key) return [];
   try {
     const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&engine=google&api_key=${key}&num=5`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      // An invalid/expired key silently zeroes out ALL web SKU resolution —
+      // say so once, loudly, instead of every row just reading "No match".
+      if ((res.status === 401 || res.status === 403) && !serpAuthWarned) {
+        serpAuthWarned = true;
+        console.warn(
+          `[resolve-sku] SerpAPI rejected the key (HTTP ${res.status}) — ` +
+            `web SKU resolution is OFF until SERPAPI_KEY is fixed`,
+        );
+      }
+      return [];
+    }
     const data = (await res.json()) as { organic_results?: { title?: string; snippet?: string }[] };
     return (data.organic_results ?? [])
       .slice(0, 5)
@@ -400,11 +413,28 @@ async function searchWeb(query: string, originalSku: string): Promise<SearchHit[
   return searchDuckDuckGo(query);
 }
 
-function pickProductName(hits: SearchHit[], sku: string): string | null {
+/** Pure-alpha words ≥3 chars — excludes vendor codes like "H1PLR000". */
+function realWordCount(s: string): number {
+  return s.split(/\s+/).filter((w) => /^[a-zA-Z][a-zA-Z'&-]{2,}$/.test(w)).length;
+}
+
+/**
+ * The informative half of a pipe-separated retailer title. "Vickerman H1PLR000
+ * | 36" Ivory Plume Reed Bundle 7oz" describes the product AFTER the pipe —
+ * taking segment 0 unconditionally resolved such rows to "Brand CODE", which
+ * is no better than the raw code. Pick the segment with the most real words.
+ */
+function bestTitleSegment(raw: string): string {
+  const segs = raw.split("|").map((s) => s.trim()).filter(Boolean);
+  if (segs.length <= 1) return raw.trim();
+  return segs.reduce((a, b) => (realWordCount(b) > realWordCount(a) ? b : a));
+}
+
+export function pickProductName(hits: SearchHit[], sku: string): string | null {
   const skuNorm = sku.toLowerCase().replace(/[^a-z0-9]/g, "");
   for (const hit of hits) {
     // Prefer titles that look like real product names (have spaces / words)
-    const title = hit.title.split("|")[0]?.trim() ?? hit.title;
+    const title = bestTitleSegment(hit.title);
     if (!title || title.length < 8) continue;
     const words = title.split(/\s+/).filter((w) => /[a-zA-Z]{3,}/.test(w));
     if (words.length < 2) continue;
@@ -415,7 +445,31 @@ function pickProductName(hits: SearchHit[], sku: string): string | null {
     if (skuNorm.length >= 6 && blob.includes(skuNorm.slice(-6))) return title;
     if (words.length >= 2) return title;
   }
-  return hits[0]?.title.split("|")[0]?.trim() || null;
+  return (hits[0] ? bestTitleSegment(hits[0].title) : "") || null;
+}
+
+/**
+ * The identity bar a web hit must clear before its title is trusted: some
+ * ≥6-char normalized VARIANT of the sheet code appears in the results text, or
+ * the code's non-degenerate digit core appears as a bounded number.
+ *
+ * Variants matter because retailer pages list the vendor's own form of the
+ * code — "H1PLR000", never the sheet's "VICK-H1PLR000" — so requiring the full
+ * sheet code rejected every genuine hit. Degenerate cores ("000", "1111")
+ * appear in any page and prove nothing on their own.
+ */
+export function hitsReferenceSku(blob: string, sku: string, variants: string[]): boolean {
+  const skuCore = (sku.match(/\d{4,}/g) ?? []).pop();
+  const isDegenerate = !!skuCore && /^(\d)\1+$/.test(skuCore);
+  const hitDigitTokens = new Set(blob.match(/\d+/g) ?? []);
+  const normBlob = blob.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const variantTokens = variants
+    .map((v) => v.toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter((v) => v.length >= 6);
+  return (
+    (!!skuCore && !isDegenerate && hitDigitTokens.has(skuCore)) ||
+    variantTokens.some((v) => normBlob.includes(v))
+  );
 }
 
 function guessBrand(hits: SearchHit[], name: string | null): string | null {
@@ -508,11 +562,18 @@ export async function enrichSkuOnlyProducts(
           return;
         }
 
-        // Skip web search when it can't produce anything: a TOV-style code already tried
-        // its own catalog above (and we don't trust generic web results for it), and any
-        // other code has no working provider unless SerpAPI is configured. Pursuing a
-        // dead DuckDuckGo here is the ~40s-per-product stall that broke large runs.
-        if (!WEB_SEARCH_AVAILABLE || hasCatalogVendor(sku)) {
+        // Skip web search when it can't produce anything (no SerpAPI key — a
+        // dead DuckDuckGo is the ~40s-per-product stall that broke large runs)
+        // or when it must not be trusted: TOV codes only ever resolve against
+        // the TOV catalog (generic web hits mislabeled them), and COMBO codes
+        // are Mathis-internal bundles that exist in no catalog anywhere.
+        //
+        // Other catalog vendors DO get this guarded web fallback when their
+        // catalog missed: Vickerman drops discontinued families from
+        // vickerman.com entirely ("VICK-H1PLR000" — the 36" Ivory Plume Reed
+        // Bundle — resolves on Google but on no configured catalog), and
+        // hitsReferenceSku below keeps loose brand-only matches out.
+        if (!WEB_SEARCH_AVAILABLE || isTovLikeSku(sku) || /COMBO/i.test(sku)) {
           // The catalog didn't have this exact SKU (discontinued / unpublished), so we have
           // no title — but the SKU structure may still tell us the product family. Attach it
           // as a category hint so the AI categorizes the family instead of flagging "No match".
@@ -551,20 +612,12 @@ export async function enrichSkuOnlyProducts(
         }
 
         // BULLETPROOF GUARD: only trust a web-resolved name if the search results actually
-        // reference this SKU. We require the SKU's distinctive digit core to appear as a
-        // *bounded* number in a hit (not merely a substring of a longer number) — otherwise
-        // it's a loose brand/keyword match (the "TOV → TOTO toilet" failure) and we leave the
-        // row unresolved so it goes to review instead of being confidently mislabeled.
+        // reference this SKU (or one of its variants — retailer pages carry the vendor's own
+        // form of the code, without our sheet prefix). Otherwise it's a loose brand/keyword
+        // match (the "TOV → TOTO toilet" failure) and we leave the row unresolved so it goes
+        // to review instead of being confidently mislabeled.
         const blob = hits.map((h) => `${h.title} ${h.snippet}`).join(" ");
-        const skuCore = (sku.match(/\d{4,}/g) ?? []).pop();
-        const isDegenerate = !!skuCore && /^(\d)\1+$/.test(skuCore); // e.g. "0000", "11111"
-        const hitDigitTokens = new Set(blob.match(/\d+/g) ?? []);
-        const normSku = sku.toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const normBlob = blob.toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const referencesSku =
-          (!!skuCore && !isDegenerate && hitDigitTokens.has(skuCore)) ||
-          (normSku.length >= 6 && normBlob.includes(normSku));
-        if (!referencesSku) {
+        if (!hitsReferenceSku(blob, sku, variants)) {
           results[idx] = p;
           return;
         }
