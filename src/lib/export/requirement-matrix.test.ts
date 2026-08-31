@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import JSZip from "jszip";
-import { generateCategoryZip, type TemplateRow } from "./zip";
+import { dimensionFromText, generateCategoryZip, weightLbFromText, type TemplateRow } from "./zip";
 
 // The Mirakl (Mathis) "Columns" sheet is a requirement matrix: one row per
 // attribute, one column per category path, each cell REQUIRED / RECOMMENDED /
@@ -136,6 +136,41 @@ async function readDataRows(xlsx: Buffer): Promise<Map<number, Map<string, strin
   }
   return rows;
 }
+
+// Mandatory dimensions/weight are often stated in the product wording itself.
+// These are the REAL texts from the client's Decor_1 rows that exported blank.
+describe("dimensionFromText / weightLbFromText", () => {
+  const grass =
+    'Nature-Inspired: Lush greenery that fits all decor. Faux tall grass will add a welcome feel. Measuring 24"H x 12"W x 12"D.';
+  const plume = '36"-40" - 7-8oz - Medium Ivory Plume Reed Bundle. Sizes vary plant to plant.';
+
+  it("reads axis-labelled dimensions", () => {
+    expect(dimensionFromText(grass, "h")).toBe("24");
+    expect(dimensionFromText(grass, "w")).toBe("12");
+    expect(dimensionFromText(grass, "d")).toBe("12");
+  });
+
+  it("takes the lower bound of a leading height range", () => {
+    expect(dimensionFromText(plume, "h")).toBe("36");
+    expect(dimensionFromText(plume, "w")).toBe(""); // no width stated — stays honest
+  });
+
+  it("reads a leading height from stem/bush titles", () => {
+    expect(dimensionFromText('24" Red Berry Twig Glitter Spray', "h")).toBe("24");
+  });
+
+  it("never mistakes durations for dimensions", () => {
+    expect(dimensionFromText("LED lasts up to 12 hours of glow", "h")).toBe("");
+    expect(dimensionFromText("ships within 3 days", "d")).toBe("");
+  });
+
+  it("converts ounce ranges and pounds to decimal pounds", () => {
+    expect(weightLbFromText(plume)).toBe("0.44"); // 7oz lower bound
+    expect(weightLbFromText("3.5oz Bunch")).toBe("0.22");
+    expect(weightLbFromText("approx 1.5 lb per bundle")).toBe("1.5");
+    expect(weightLbFromText("no weight stated")).toBe("");
+  });
+});
 
 describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
   let dataRows: Map<number, Map<string, string>>;

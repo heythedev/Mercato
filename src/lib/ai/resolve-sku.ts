@@ -122,6 +122,7 @@ export async function fillCatalogAttributes(
     vendorSku?: string | null;
     imageUrl?: string | null;
     vendorData?: unknown;
+    upc?: string | null;
   }>,
   onProgress?: (done: number, total: number) => void,
   opts?: {
@@ -142,6 +143,16 @@ export async function fillCatalogAttributes(
     // A row whose name is still the raw vendor code needs the catalog even when its
     // images are already filled — otherwise the exported Name column shows the code.
     if (p.name && looksLikeSkuName(p.name, sku)) return true;
+    // A row with images but NO barcode still needs the catalog: the variant's
+    // UPC is mandatory on Mathis, and family-matched Vickerman codes can now
+    // resolve their own barcode off-site (Walmart exact-model / guarded Amazon).
+    const vd = (p.vendorData ?? {}) as Record<string, unknown>;
+    const hasBarcode =
+      String(p.upc ?? "").replace(/\D/g, "").length >= 8 ||
+      Object.entries(vd).some(
+        ([k, v]) => /^(upc|ean|gtin|barcode)$/i.test(k.trim()) && String(v ?? "").replace(/\D/g, "").length >= 8,
+      );
+    if (!hasBarcode) return true;
     if (p.imageUrl && String(p.imageUrl).startsWith("http")) {
       // Already has a main image — only re-fill if the numbered image columns are absent.
       const vd = (p.vendorData ?? {}) as Record<string, unknown>;

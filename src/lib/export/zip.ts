@@ -92,6 +92,41 @@ const COLOUR_FILL_OPTIONS = FILL_COLOUR_TERMS.map((c) =>
   c.replace(/\b\w/g, (ch) => ch.toUpperCase()),
 );
 
+/**
+ * Pull a mandatory dimension out of the product's own wording, as a bare
+ * decimal (inches). Two patterns, most explicit first:
+ *   - axis-labelled: `Measuring 24"H x 12"W x 12"D` → h=24, w=12, d=12
+ *   - leading measurement (height only): `36" Ivory Plume Reed` / `36"-40" …`
+ *     — stem/bush titles lead with the height; a range takes the LOWER bound
+ *     (natural products vary; the guaranteed minimum is the honest number).
+ */
+export function dimensionFromText(text: string, axis: "h" | "w" | "d"): string {
+  const num = "(\\d+(?:\\.\\d+)?)";
+  // Unit REQUIRED before a spaced axis letter (`24"H`, `24 in. W`) so free text
+  // like "12 hours" or "3 days" can never read as a dimension…
+  const withUnit = new RegExp(`${num}\\s*(?:"|”|''|in(?:ch(?:es)?)?\\.?)\\s*${axis}\\b`, "i").exec(text);
+  if (withUnit) return withUnit[1]!;
+  // …while the tight unitless form (`24H x 12W`) is unambiguous on its own.
+  const tight = new RegExp(`${num}${axis}\\b`, "i").exec(text);
+  if (tight) return tight[1]!;
+  if (axis === "h") {
+    const lead = /^\s*(\d+(?:\.\d+)?)\s*(?:"|”)/.exec(text);
+    if (lead) return lead[1]!;
+  }
+  return "";
+}
+
+/** Product weight in pounds from the text: `7-8oz` → 0.44 (lower bound),
+ *  `1.5 lb` → 1.5. "" when the wording carries no weight. */
+export function weightLbFromText(text: string): string {
+  const m = /(\d+(?:\.\d+)?)(?:\s*-\s*\d+(?:\.\d+)?)?\s*(oz|ounces?|lbs?|pounds?)\b/i.exec(text);
+  if (!m) return "";
+  const v = parseFloat(m[1]!);
+  if (!Number.isFinite(v) || v <= 0) return "";
+  const lb = /^o/i.test(m[2]!) ? v / 16 : v;
+  return String(Math.round(lb * 100) / 100);
+}
+
 export type TemplateRow = {
   id: string;
   name: string;
@@ -1361,6 +1396,14 @@ async function fillTemplateXlsx(
       const v = String(getProductField(p, "assembly_required") ?? "").trim();
       return /^(y|yes|true|req)/i.test(v) ? "Customer Assembly Required" : "Complete";
     }
+    // Mandatory dimensions/weight are often stated in the wording itself
+    // ("Measuring 24"H x 12"W x 12"D", "36"-40" … 7-8oz") — pull them out
+    // rather than shipping a blank the client has to hunt down by hand.
+    const text = `${p.name ?? ""} ${p.description ?? ""}`;
+    if (is("dimh", "heightdimension")) return dimensionFromText(text, "h");
+    if (is("dimw", "widthdimension")) return dimensionFromText(text, "w");
+    if (is("dimd", "depthdimension")) return dimensionFromText(text, "d");
+    if (is("dimweight", "productweight")) return weightLbFromText(text);
     return "";
   };
 

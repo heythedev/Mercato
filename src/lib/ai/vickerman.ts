@@ -455,6 +455,30 @@ export async function resolveVickermanSku(sku: string): Promise<CatalogEntry | n
     ? ownImages
     : [...pdp.imagesByCode.values()].flat().slice(0, 10);
 
+  // The page matched the FAMILY but not our exact variant — its UPC, weight and
+  // dimensions describe a DIFFERENT size, so they are never trusted (below).
+  // Walmart/Amazon list variants under the exact manufacturer code, which makes
+  // them an identity-safe source for the variant's OWN barcode and specs; only
+  // when they also miss does the family page (title/type/images, no specs)
+  // remain the answer.
+  if (!exact && ownImages.length === 0) {
+    const offsite = await offSiteFallback(code);
+    if (offsite) {
+      return {
+        ...offsite,
+        // Keep the vendor's own classification when the off-site listing has none.
+        category: offsite.category ?? pdp.specs["Product Type"]?.trim() ?? null,
+        tags: offsite.tags.length
+          ? offsite.tags
+          : pdp.specs["Product Type"]?.trim()
+            ? [pdp.specs["Product Type"]!.trim()]
+            : [],
+        image: offsite.image ?? images[0] ?? null,
+        images: offsite.images.length ? offsite.images : images,
+      };
+    }
+  }
+
   // Spec values feed the export template's attribute columns via catalogEntryToAttributes
   // (options are copied into vendorData verbatim, normalize-matched to template headers).
   // Physical specs describe ONE variant, so they are only trusted on an exact-code match
