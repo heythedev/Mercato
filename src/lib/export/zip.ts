@@ -1415,10 +1415,10 @@ async function fillTemplateXlsx(
   // Map a categorized value (a rich "A > B > C" path, or already a flat value)
   // down to one of the 75 categories the Walmart template dropdown accepts.
   // Loaded lazily so non-Walmart exports never touch the taxonomy files.
-  const { mapToTemplateCategory, loadWalmartProductTypes } = isWalmart
+  const { mapToApprovedCategory, loadWalmartProductTypes } = isWalmart
     ? await import("@/lib/ai/walmart-taxonomy")
     : {
-        mapToTemplateCategory: (): string | null => null,
+        mapToApprovedCategory: (): string | null => null,
         loadWalmartProductTypes: (): string[] | null => null,
       };
 
@@ -1563,23 +1563,24 @@ async function fillTemplateXlsx(
       return Number.isFinite(n) && n > 0 ? String(n) : WEIGHT_FALLBACK;
     }
 
-    // Walmart Product Category: prefer the live categoryPath (Walmart's own category
-    // from the Affiliate API, stored during verification) over the AI-assigned broad
-    // bucket from marketplaceCategory. For unverified products the AI bucket is used
-    // as the fallback. Either way, mapToTemplateCategory below converts to one of the
-    // 75 dropdown values the Walmart template accepts.
+    // Walmart Product Category: the assigned Spec Product Type maps 1:1 onto its
+    // APPROVED Walmart category (client-supplied structure) — authoritative. Path
+    // wording (live categoryPath from verification, else the AI-assigned path)
+    // is the fallback; mapToApprovedCategory keeps every written value inside
+    // the approved list or blank.
     if (isWalmart) {
       const nk = normalizeKey(col.key);
       const headerNk = normalizeKey(colLetterToHeader.get(letter) ?? "");
       if (nk === "productcategory" || nk === "category" ||
           headerNk === "productcategory" || headerNk === "category") {
-        // categoryPath is Walmart's own live category ("Home > Table Lamps") — more
-        // accurate than our AI guess. Use it when present.
+        // The upload sheet must carry Walmart's APPROVED category structure.
+        // The assigned Spec Product Type maps 1:1 onto its approved category
+        // (client-supplied mapping) — that is authoritative; path wording
+        // (live categoryPath first, then our assigned path) is the fallback.
+        const specPt = (p as { specProductType?: string | null }).specProductType ?? null;
         const livePath = (p as { categoryPath?: string | null }).categoryPath?.trim();
         if (livePath) raw = livePath;
-        // If raw is still empty after the live path check, leave it blank rather
-        // than writing an invalid value — mapToTemplateCategory handles the rest.
-        if (raw.trim()) raw = mapToTemplateCategory(raw) ?? "";
+        raw = mapToApprovedCategory(specPt, raw.trim() || null) ?? "";
       }
 
       // Per-category column groups ("Kitchen_Towels_condition", "Coasters_mainImageUrl",

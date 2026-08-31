@@ -25,6 +25,7 @@ const DATA_DIR = "src/lib/ai/data";
 const RAW_JSON = "walmart_taxonomy_raw.json";
 const RICH_CSV = "walmart_categories.csv";
 const TEMPLATE_CSV = "walmart_template_categories.csv";
+const APPROVED_CSV = "walmart_approved_categories.csv";
 
 function dataPath(file: string): string {
   return join(process.cwd(), DATA_DIR, file);
@@ -245,6 +246,128 @@ export function formatWalmartTaxonomyForPrompt(): string {
     lines.push("");
   }
   return lines.join("\n").trim();
+}
+
+// ── Approved category structure (client-supplied, upload-authoritative) ───────
+// Walmart validates uploads against its REAL category structure: 25-ish
+// top-level Product Categories ("Home & Garden", "Electronics", …), each
+// official Product Type belonging to exactly ONE of them. The client supplied
+// the full 5.2k-row mapping (Walmart_Category&Product type sheet, converted to
+// walmart_approved_categories.csv). The legacy 75-value template list has ZERO
+// overlap with this structure — every value it produced was off-list, which is
+// exactly the "categories are not matching Walmart's category structure"
+// rejection. When this file is present it is the ONLY export target.
+
+export type WalmartApprovedMap = {
+  /** lowercased product type → its approved category (verbatim). */
+  byType: Map<string, string>;
+  /** Distinct approved categories, most-populated first. */
+  categories: string[];
+};
+
+let cachedApproved: WalmartApprovedMap | null = null;
+let cachedApprovedMtime = 0;
+
+/** The client-approved ProductType→Category mapping; null when the file is absent. */
+export function loadWalmartApprovedMap(): WalmartApprovedMap | null {
+  const path = dataPath(APPROVED_CSV);
+  if (!existsSync(path)) return null;
+  const mtime = statSync(path).mtimeMs;
+  if (cachedApproved && mtime === cachedApprovedMtime) return cachedApproved;
+
+  const byType = new Map<string, string>();
+  const counts = new Map<string, number>();
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const [pt, cat] = parseCsvLine(t);
+    if (!pt || !cat || pt.toLowerCase() === "product_type") continue;
+    byType.set(pt.toLowerCase(), cat);
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+  }
+  if (!byType.size) return null;
+  cachedApproved = {
+    byType,
+    categories: [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c),
+  };
+  cachedApprovedMtime = mtime;
+  return cachedApproved;
+}
+
+/** The approved category a Spec Product Type belongs to — the 1:1 authoritative mapping. */
+export function approvedCategoryForType(productType: string | null | undefined): string | null {
+  if (!productType?.trim()) return null;
+  return loadWalmartApprovedMap()?.byType.get(productType.trim().toLowerCase()) ?? null;
+}
+
+// Deterministic hints onto the approved structure for paths whose wording
+// doesn't lexically overlap the category name. First match wins.
+const APPROVED_ALIASES: Array<[RegExp, string]> = [
+  [/\b(sofa|couch|table|chair|dresser|bed|desk|bookcase|furniture|nightstand|ottoman|rug|carpet|decor|vase|candle|mirror|pillow|curtain|cookware|bakeware|kitchen|dinnerware|garden|patio|planter|bedding|sheet|comforter|duvet|quilt|lamp|lighting)\b/, "Home & Garden"],
+  [/\b(tv|television|monitor|display|phone|tablet|laptop|computer|headphone|speaker|audio|video game|console)\b/, "Electronics"],
+  [/\b(toy|toys|play ?set|doll|action figure|game|puzzle)\b/, "Toys & Games"],
+  [/\b(shirt|pants|dress|apparel|clothing|jacket|shoe|footwear|sneaker|boot|sandal|hat|sock)\b/, "Clothing, Shoes & Accessories"],
+  [/\b(tool|drill|wrench|hammer|hardware|saw|fastener|plumbing|electrical)\b/, "Tools & Hardware"],
+  [/\b(sport|outdoor|camping|fishing|bike|bicycle|fitness|exercise|hunting)\b/, "Sports & Outdoors"],
+  [/\b(pet|dog|cat|bird|aquarium|animal)\b/, "Pet Supplies"],
+  [/\b(baby|infant|toddler|nursery|diaper|stroller|car seat)\b/, "Baby"],
+  [/\b(office|stationery|paper|pen|pencil|binder|desk accessory)\b/, "Office & Stationery"],
+  [/\b(craft|sewing|knitting|scrapbook|bead)\b/, "Crafts"],
+  [/\b(vehicle|automotive|car|truck|motorcycle|tire|engine)\b/, "Vehicles, Parts & Accessories"],
+  [/\b(food|beverage|snack|grocery|drink|coffee|tea)\b/, "Food & Beverages"],
+  [/\b(health|beauty|personal care|hygiene|makeup|cosmetic|vitamin|medicine)\b/, "Health & Beauty"],
+  [/\b(camera|lens|photography|binocular|telescope|optic)\b/, "Cameras, Photography & Optics"],
+  [/\b(jewelry|jewellery|watch|gem|ring|necklace|bracelet)\b/, "Jewelry, Gems & Watches"],
+  [/\b(book|magazine|music|movie|dvd|vinyl)\b/, "Books, Music & Movies"],
+  [/\b(luggage|suitcase|travel|backpack|duffel)\b/, "Travel, Luggage & Accessories"],
+  [/\b(guitar|piano|drum|instrument|microphone|dj|pro audio)\b/, "Musical Instruments & Pro Audio"],
+  [/\b(industrial|commercial|restaurant|janitorial|safety equipment)\b/, "Business & Industrial"],
+];
+
+/**
+ * Map a product onto the APPROVED category structure — the value the Walmart
+ * output sheet must carry:
+ *   1. Spec Product Type → its approved category (authoritative 1:1)
+ *   2. deterministic aliases, then word-overlap, against the approved list
+ * Falls back to the legacy template mapping when the approved file is absent.
+ * Returns null when nothing matches confidently (blank beats off-list).
+ */
+export function mapToApprovedCategory(
+  specProductType: string | null | undefined,
+  assigned: string | null | undefined,
+): string | null {
+  const approved = loadWalmartApprovedMap();
+  if (!approved) return assigned ? mapToTemplateCategory(assigned) : null;
+
+  const byType = approvedCategoryForType(specProductType);
+  if (byType) return byType;
+  if (!assigned?.trim()) return null;
+
+  // Already an approved category (verbatim or normalized)?
+  const exact = approved.categories.find((c) => norm(c) === norm(assigned));
+  if (exact) return exact;
+
+  const segments = assigned.split(">").map((s) => s.trim()).filter(Boolean);
+  const haystacks = [...segments.reverse(), assigned].map(norm);
+
+  for (const h of haystacks) {
+    for (const [re, target] of APPROVED_ALIASES) {
+      if (re.test(h)) return approved.categories.find((c) => c === target) ?? null;
+    }
+  }
+
+  let best: string | null = null;
+  let bestScore = 0;
+  for (const c of approved.categories) {
+    const cWords = norm(c).split(" ").filter((w) => w.length > 2);
+    for (const h of haystacks) {
+      const hWords = new Set(h.split(" ").filter((w) => w.length > 2));
+      let score = 0;
+      for (const w of cWords) if (hWords.has(w)) score += 1;
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+  }
+  return bestScore >= 1 ? best : null;
 }
 
 // ── Rich path → template value mapping ────────────────────────────────────────

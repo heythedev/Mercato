@@ -1,6 +1,6 @@
 import { generateText } from "ai";
 import { moonshot, moonshotConfigured, moonshotTemperature, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
-import { loadWalmartProductTypes, productTypesForCategoryPath } from "@/lib/ai/walmart-taxonomy";
+import { loadWalmartApprovedMap, loadWalmartProductTypes, productTypesForCategoryPath } from "@/lib/ai/walmart-taxonomy";
 
 // Walmart's "Spec Product Type" is a required field on the new-listing template
 // (e.g. "Bicycle Tires", "Dream Catcher"). The valid list is Walmart's Product
@@ -26,7 +26,18 @@ const TTL_MS = 6 * 60 * 60 * 1000; // 6h
 export async function loadSpecProductTypes(): Promise<string[]> {
   // Local file first — deterministic, credential-free, hot-swappable.
   const local = loadWalmartProductTypes();
-  if (local?.length) return local;
+  if (local?.length) {
+    // The client's approved mapping is upload-authoritative: a product type the
+    // approved sheet doesn't carry has no approved category and gets the sheet
+    // rejected, so assignment must never pick one (the raw taxonomy holds ~1.7k
+    // such types). Filter to the intersection when the approved file exists.
+    const approved = loadWalmartApprovedMap();
+    if (approved) {
+      const filtered = local.filter((t) => approved.byType.has(t.trim().toLowerCase()));
+      if (filtered.length) return filtered;
+    }
+    return local;
+  }
 
   if (cachedTypes && Date.now() - cachedAt < TTL_MS) return cachedTypes;
   try {
