@@ -350,11 +350,14 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
           ...liveBlocks,
         ],
       }],
-      maxOutputTokens: 150,
+      // Reasoning models (kimi-k line) spend output budget thinking first —
+      // a small cap returns an empty answer that reads as permanent "unsure".
+      maxOutputTokens: 2000,
       abortSignal: signal,
     });
 
-    const lines   = text.trim().split("\n").map(l => l.trim()).filter(Boolean);
+    // Strip markdown ("**MATCH**") the kimi models add despite instructions.
+    const lines   = text.replace(/[*_`#]/g, "").trim().split("\n").map(l => l.trim()).filter(Boolean);
     const first   = (lines[0] ?? "").toUpperCase();
     const reason  = lines.slice(1).join(" ") || "No reason given";
     const verdict =

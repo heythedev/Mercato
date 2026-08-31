@@ -34,8 +34,14 @@ export function moonshotTemperature(modelId: string, desired: number): number {
   return /^kimi-k[23]/.test(modelId) ? 1 : desired;
 }
 
-// moonshot-v1-auto picks the 8k/32k/128k tier per request, so prompts of any
-// size fit and are billed at the smallest tier that holds them.
-export const MOONSHOT_TEXT_MODEL = process.env.MOONSHOT_MODEL ?? "moonshot-v1-auto";
+// The moonshot-v1 line (moonshot-v1-auto, moonshot-v1-32k-vision-preview, …)
+// was RETIRED from this account (~2026-08-28): every call 404s with "Not found
+// the model … or Permission denied". The platform now serves the kimi-k line
+// only (kimi-k2.6 / kimi-k3 / k2.7-code, per GET /models), and both k2.6 and
+// k3 accept image input, so one general model covers text AND vision.
+// kimi-k2.6 is the default (k3 is the pricier flagship — categorization pins
+// it via CATEGORIZE_MODEL where the accuracy is worth it). Note these models
+// only accept temperature 1 — callers go through moonshotTemperature().
+export const MOONSHOT_TEXT_MODEL = process.env.MOONSHOT_MODEL ?? "kimi-k2.6";
 export const MOONSHOT_VISION_MODEL =
-  process.env.MOONSHOT_VISION_MODEL ?? "moonshot-v1-32k-vision-preview";
+  process.env.MOONSHOT_VISION_MODEL ?? "kimi-k2.6";

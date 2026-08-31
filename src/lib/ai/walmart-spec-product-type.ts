@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, moonshotTemperature } from "@/lib/ai/moonshot";
+import { moonshot, moonshotConfigured, moonshotTemperature, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 import { loadWalmartProductTypes, productTypesForCategoryPath } from "@/lib/ai/walmart-taxonomy";
 
 // Walmart's "Spec Product Type" is a required field on the new-listing template
@@ -68,9 +68,9 @@ export async function assignSpecProductTypes(
   if (!types.length) return result; // taxonomy unavailable → leave blank
 
   const allowed = new Set(types);
-  // The taxonomy list can be very large, so the auto-tier model (up to 128k)
-  // keeps big prompts from overflowing context.
-  const model = process.env.CATEGORIZE_MODEL ?? "moonshot-v1-auto";
+  // Fall back to the shared text-model default — the old hardcoded
+  // "moonshot-v1-auto" fallback 404s since the v1 line was retired.
+  const model = process.env.CATEGORIZE_MODEL ?? MOONSHOT_TEXT_MODEL;
 
   const BATCH = 15;
   const CONCURRENCY = 3;

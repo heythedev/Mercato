@@ -301,7 +301,11 @@ function parseColourWord(raw: string | undefined): string | null {
 }
 
 function parseVisionResponse(text: string): ImageCompareResult {
-  const lines = text.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  // The kimi-k models wrap answers in markdown despite the "exactly one word"
+  // instruction ("**MATCH**", "**COLOR:** navy | navy") — strip the markup
+  // before parsing or every verdict reads as UNSURE.
+  const lines = text.replace(/[*_`#]/g, "").trim()
+    .split("\n").map((l) => l.trim()).filter(Boolean);
   const first = (lines[0] ?? "").toUpperCase();
   const colourLine = lines.find((l) => /^colou?rs?\s*:/i.test(l));
   const reason =
@@ -358,7 +362,11 @@ export async function compareProductImages(
           ],
         },
       ],
-      maxOutputTokens: 200,
+      // The kimi-k models spend output budget on internal reasoning before the
+      // final text; 200 tokens returned an EMPTY answer (all budget consumed
+      // reasoning), which parsed as a permanent "unsure". Billing is by actual
+      // usage, so the high cap costs nothing on short answers.
+      maxOutputTokens: 2000,
     });
     return parseVisionResponse(text);
   } catch (e) {
@@ -441,7 +449,11 @@ export async function compareVendorAgainstAllImages(
           ],
         },
       ],
-      maxOutputTokens: 200,
+      // The kimi-k models spend output budget on internal reasoning before the
+      // final text; 200 tokens returned an EMPTY answer (all budget consumed
+      // reasoning), which parsed as a permanent "unsure". Billing is by actual
+      // usage, so the high cap costs nothing on short answers.
+      maxOutputTokens: 2000,
     });
     return parseVisionResponse(text);
   } catch (e) {

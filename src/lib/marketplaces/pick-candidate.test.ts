@@ -277,6 +277,54 @@ describe("pickBestCandidate — hidden case packs on a shared UPC", () => {
   });
 });
 
+// Synccentric-primary pools carry NO price/rank/review data. When the Keepa
+// quality backfill fails (token shortfall), the only enriched candidate is
+// whatever the payload cache held — the PREVIOUS pick, whose price the
+// re-uploaded vendor file echoes back. Price proximity must not fire on a
+// one-priced-candidate pool, or the old wrong match re-locks itself forever.
+describe("pickBestCandidate — quality-blind Synccentric pools", () => {
+  it("does not re-lock a cached previous pick that is the only priced candidate", () => {
+    // EMRY-1392331 as prod actually saw it (Synccentric rows from the live
+    // probe, Keepa at −762 tokens): the stale duplicate was re-picked purely
+    // on its unopposed price echo.
+    const stale = {
+      asin: "B002YCGOAW", title: "Black Jack 6460-9-20 10 Lb Black Jack Hole Patch Repair",
+      brand: "Gardner-Gibson", partNumber: "6460-9-20", price: 3137,
+      salesRank: 1381313, reviewCount: 3, offerCount: 1,
+    };
+    const drivePatch = {
+      asin: "B07JF27HXQ", title: "Black Jack Drive-Patch Matte Black Water-Based Latex Driveway Sealer",
+      brand: "Gardner-Gibson", model: "6460-9-20",
+    };
+    const speedPatch = {
+      asin: "B001B175Y6", title: "Black Jack Speed-Patch Blacktop Crack & Hole Repair - 10 lbs., Ready-to-Use Asphalt Patching Compound",
+      brand: "BLACK JACK", model: "6460-9-20",
+    };
+    const picked = pickBestCandidate(
+      product({ name: "PATCH DRIVE TROWEL 10LB (Pack of 1)", brand: "GARDNER-GIBSON", price: 31.37 }),
+      [stale, drivePatch, speedPatch],
+    );
+    expect(picked.asin).not.toBe("B002YCGOAW");
+  });
+
+  it("still uses price proximity when the pool has real prices to compare", () => {
+    // Two priced candidates: the reseller-relist case must keep working.
+    const fair = {
+      asin: "FAIR", title: "Bonide Mosquito Beater Granules, 1.3 lbs",
+      brand: "Bonide", price: 1199, salesRank: 4640, reviewCount: 2354, offerCount: 17,
+    };
+    const gouged = {
+      asin: "GOUGED", title: "Bonide Mosquito Beater Granules, 1.3 lbs",
+      brand: "Bonide", price: 6067, salesRank: 113762, reviewCount: 35, offerCount: 13,
+    };
+    const picked = pickBestCandidate(
+      product({ name: "MOSQUITO BEATER GRANUL (Pack of 1)", brand: "BONIDE", price: 11.99 }),
+      [gouged, fair],
+    );
+    expect(picked.asin).toBe("FAIR");
+  });
+});
+
 describe("listingQuality", () => {
   it("grades rank and reviews logarithmically", () => {
     const top = listingQuality({ salesRank: 5_000, reviewCount: 1_000 });

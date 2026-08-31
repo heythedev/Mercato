@@ -358,9 +358,12 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
               `Answer on the first line: SAME or DIFFERENT\n` +
               `On the second line: one short sentence explaining why.`,
           }],
-          maxOutputTokens: 100,
+          // Reasoning models (kimi-k line) consume output budget thinking
+          // before they answer — a small cap yields an EMPTY response.
+          maxOutputTokens: 1000,
         });
-        const lines = text.trim().split("\n").map(l => l.trim()).filter(Boolean);
+        // Strip markdown ("**SAME**") the kimi models add despite instructions.
+        const lines = text.replace(/[*_`#]/g, "").trim().split("\n").map(l => l.trim()).filter(Boolean);
         const verdict = (lines[0] ?? "").toUpperCase();
         const reason = lines.slice(1).join(" ") || "";
         if (verdict.startsWith("SAME")) {
@@ -889,7 +892,7 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       // With multiple listings on one barcode, first recover pack counts the
       // provider omitted — a case pack with a pack-wordless title would
       // otherwise pass this filter as a "single".
-      if (candidates.length > 1) await enrichCandidatePackData(candidates);
+      if (candidates.length > 1) await enrichCandidatePackData(candidates, deadline);
       let packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
 
       // Keepa second opinion (primary mode): Synccentric's database keeps ONE
@@ -926,7 +929,7 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
           const fresh = extra.filter((c) => !known.has(c.asin));
           if (fresh.length) {
             candidates = [...candidates, ...fresh];
-            await enrichCandidatePackData(candidates);
+            await enrichCandidatePackData(candidates, deadline);
             packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
             console.log(
               `[verify] Keepa second opinion on ${resolvedUpc(p)}: +${fresh.length} ASIN(s), ` +
@@ -2509,6 +2512,17 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
     .filter((v) => Number.isFinite(v) && v > 0);
   const minSameQtyPrice = sameQtyPrices.length ? Math.min(...sameQtyPrices) : null;
 
+  // Price proximity is only a fair signal when the pool has prices to COMPARE.
+  // Synccentric rows carry no price, so after a failed quality backfill the
+  // only priced candidate is whatever the payload cache held — the previous
+  // pick, whose price a re-uploaded vendor file echoes back (Product.price is
+  // not vendor truth). A lone priced candidate would take +15 unopposed and
+  // re-lock the old match, so the term needs at least two priced candidates.
+  const pricedCount = pool.filter((c) => {
+    const v = Number(c?.price);
+    return Number.isFinite(v) && v > 0;
+  }).length;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const score = (c: any): number => {
     let s = 0;
@@ -2551,8 +2565,9 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
       else if (vendorBrand.includes(liveBrand) || liveBrand.includes(vendorBrand)) s += 10;
     }
 
-    // 3. Price proximity — weight 15
-    if (vendorPrice != null && vendorPrice > 0 && c.price != null) {
+    // 3. Price proximity — weight 15 (only when the pool has ≥2 priced
+    //    candidates; see pricedCount above)
+    if (pricedCount >= 2 && vendorPrice != null && vendorPrice > 0 && c.price != null) {
       const livePrice = (c.price as number) / 100; // Keepa stores cents
       if (livePrice > 0) {
         const ratio = Math.min(vendorPrice, livePrice) / Math.max(vendorPrice, livePrice);
@@ -2731,7 +2746,7 @@ export function structuredPackQty(c: any): number | null {
  * Synccentric answers are never written to the Keepa cache.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function enrichCandidatePackData(candidates: any[]): Promise<void> {
+export async function enrichCandidatePackData(candidates: any[], deadline?: number): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const byAsin = new Map<string, any[]>();
   for (const c of candidates) {
@@ -2782,7 +2797,21 @@ export async function enrichCandidatePackData(candidates: any[]): Promise<void> 
       const missing = targets.filter((a) => !cached.has(a));
       let fetched: KeepaProduct[] = [];
       if (missing.length) {
-        const { getProducts } = await import("@/lib/keepa");
+        const { getProducts, getLastTokenInfo } = await import("@/lib/keepa");
+        // Quality signals (rank/reviews/offers/price) are what decide a
+        // duplicate-UPC pick — the client-confirmed canonical is found by
+        // listingQuality, not wording. Fetching them at a negative balance
+        // just errors out, which used to leave ONLY the previously-cached
+        // pick enriched and re-lock old wrong matches. Wait out a shallow
+        // shortfall like every other Keepa phase does.
+        const left = getLastTokenInfo()?.tokensLeft;
+        if (left != null && left < CODE_MIN_TOKENS) {
+          const { refreshKeepaTokens } = await import("@/lib/keepa/client");
+          await awaitTokenRefill(
+            refreshKeepaTokens, await refreshKeepaTokens(),
+            CODE_MIN_TOKENS, deadline, "candidate quality enrichment",
+          );
+        }
         fetched = await getProducts(KEEPA_DOMAIN, missing);
         if (fetched.length) await cacheProducts(KEEPA_DOMAIN, fetched);
       }

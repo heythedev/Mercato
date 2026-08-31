@@ -33,9 +33,11 @@ Sheet: ${sheetName ?? "none"}
 Column headers: ${columns.slice(0, 25).join(", ")}
 
 Reply with ONLY the category name (e.g. "Clothing", "Home & Kitchen", "Electronics", "Quilts & Bedding"). No explanation, no quotes.`,
-      maxOutputTokens: 30,
+      // Reasoning models (kimi-k line) think before answering — 30 tokens of
+      // budget returned an empty string every time.
+      maxOutputTokens: 1000,
     });
-    const result = text.trim().replace(/^["']|["']$/g, "");
+    const result = text.replace(/[*_`#]/g, "").trim().replace(/^["']|["']$/g, "");
     return result || null;
   } catch {
     return null;

@@ -14,9 +14,15 @@ vi.mock("@/lib/keepa/cache", () => ({
 }));
 vi.mock("@/lib/keepa", () => ({
   getProducts: vi.fn(async () => []),
+  getLastTokenInfo: vi.fn(() => ({ tokensLeft: 5000, refillRate: 300 })),
   // Raw test payloads already carry normalized field names — pass them through.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   normalizeMany: vi.fn((arr: any[]) => arr),
+}));
+vi.mock("@/lib/keepa/client", () => ({
+  refreshKeepaTokens: vi.fn(async () => ({ tokensLeft: 5000, refillRate: 300 })),
+  tokensSpentMark: vi.fn(() => 0),
+  tokensSpentSince: vi.fn(() => 0),
 }));
 vi.mock("@/lib/synccentric/client", () => ({
   synccentricConfigured: vi.fn(() => true),

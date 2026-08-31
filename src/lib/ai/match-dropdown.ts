@@ -119,7 +119,8 @@ Respond with one line per item, in order, formatted exactly as:
 No other text.`,
         });
 
-        for (const line of text.split(/\r?\n/)) {
+        // Strip markdown ("**1:** Grey") the kimi models add despite "No other text".
+        for (const line of text.replace(/[*_`#]/g, "").split(/\r?\n/)) {
           const m = line.match(/^\s*(\d+)\s*:\s*(.*)$/);
           if (!m) continue;
           const idx = parseInt(m[1], 10) - 1;
