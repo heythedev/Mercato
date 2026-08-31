@@ -85,6 +85,13 @@ export function colourFromText(text: string): string {
   return "";
 }
 
+/** The colour vocabulary as an option list for AI colour fills — a mandatory
+ *  free-text Color cell with no colour word in the title/description is filled
+ *  by the model, but constrained to real colour words. */
+const COLOUR_FILL_OPTIONS = FILL_COLOUR_TERMS.map((c) =>
+  c.replace(/\b\w/g, (ch) => ch.toUpperCase()),
+);
+
 export type TemplateRow = {
   id: string;
   name: string;
@@ -1603,26 +1610,69 @@ async function fillTemplateXlsx(
     return value;
   };
 
-  // AI layer of the mandatory fill: REQUIRED dropdown cells with no vendor
-  // value and no deterministic rule. Collected across all products up front so
-  // the model answers in a few batches instead of per row.
+  // Category key for matrix lookups, WRITTEN value first: the category cell's
+  // dropdown match can bridge naming drift between the taxonomy and the matrix
+  // (accent folding maps "Decor 1 > …" onto the matrix's "Mathis Home/Décor/…"),
+  // so the derived key alone misses categories the row genuinely has. This is
+  // the same precedence the row-loop enforcement uses.
+  const _productCatCache = new Map<string, string>();
+  const productCatKey = (p: Product): string => {
+    if (!reqMatrix) return "";
+    let k = _productCatCache.get(p.id);
+    if (k === undefined) {
+      k = "";
+      const catEntry = categoryLetter ? colEntries.find((e) => e.letter === categoryLetter) : undefined;
+      if (catEntry) {
+        const written = colVal(p, catEntry.col, categoryLetter!).trim().toLowerCase();
+        if (written && reqMatrix.categories.has(written)) k = written;
+      }
+      if (!k) k = matrixCatKey(p);
+      _productCatCache.set(p.id, k);
+    }
+    return k;
+  };
+
+  // AI layer of the mandatory fill: REQUIRED cells with no vendor value and no
+  // usable deterministic rule. Dropdown columns are answered from their OWN
+  // option list; free-text colour columns (no dropdown in the template) are
+  // constrained to the colour vocabulary. Collected across all products up
+  // front so the model answers in a few batches instead of per row.
   const aiFill = new Map<string, string>();
   if (isMathis && reqMatrix) {
+    const COLOUR_KEYS = new Set(["color", "colour", "casingfinishcolor", "finishcolor"]);
     const fillQueries: DropdownFillQuery[] = [];
     for (const p of products) {
-      const catKey = matrixCatKey(p);
+      const catKey = productCatKey(p);
       if (!catKey) continue;
+      const context = `${p.name ?? ""}${p.brand ? ` (brand: ${p.brand})` : ""}. ${String(p.description ?? "").slice(0, 220)}`.trim();
       for (const { col, letter } of exportEntries) {
-        const options = dropdowns.get(letter);
-        if (!options?.length) continue;
         if (statusesFor(col, letter)?.get(catKey) !== "REQUIRED") continue;
         const nk = fillNormKey(col, letter);
-        if (nk === "category" || DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(normalizeKey(String(col.key ?? "")))) continue;
+        const nk2 = normalizeKey(String(col.key ?? ""));
+        if (nk === "category") continue;
         if (colVal(p, col, letter).trim()) continue; // vendor data covers it
+
+        const isColour = COLOUR_KEYS.has(nk) || COLOUR_KEYS.has(nk2);
+        if (DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(nk2)) {
+          // Deterministic columns reach the AI only when their own rule will
+          // come up empty — a colour column with no colour word in the text.
+          if (!isColour) continue;
+          if (colourFromText(`${p.name ?? ""} ${p.description ?? ""}`)) continue;
+          fillQueries.push({
+            key: `${p.id}|${letter}`,
+            column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+            context,
+            options: dropdowns.get(letter) ?? COLOUR_FILL_OPTIONS,
+          });
+          continue;
+        }
+
+        const options = dropdowns.get(letter);
+        if (!options?.length) continue;
         fillQueries.push({
           key: `${p.id}|${letter}`,
           column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
-          context: `${p.name ?? ""}${p.brand ? ` (brand: ${p.brand})` : ""}. ${String(p.description ?? "").slice(0, 220)}`.trim(),
+          context,
           options,
         });
       }
@@ -1631,7 +1681,7 @@ async function fillTemplateXlsx(
       const filled = await fillDropdownValues(fillQueries);
       for (const [k, v] of filled) aiFill.set(k, v);
       console.log(
-        `[export] mandatory fill: ${fillQueries.length} empty pink dropdown cell(s) → AI filled ${filled.size}`,
+        `[export] mandatory fill: ${fillQueries.length} empty pink cell(s) → AI filled ${filled.size}`,
       );
     }
   }
