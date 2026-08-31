@@ -132,6 +132,10 @@ export interface NormalizedProduct {
   model?: string | null;
   partNumber?: string | null; // manufacturer part number (MPN)
   upc?: string | null; // barcode Keepa carries (upcList[0] ?? eanList[0]); often absent
+  /** ALL barcodes the source lists for this ASIN (upcList + eanList). Used to
+   *  detect identity contradictions: a keyword-search candidate whose barcodes
+   *  are known and do NOT include the vendor's UPC is a different product. */
+  barcodes?: string[];
 
   packageQuantity?: number | null; // units per package
   offerCount?: number | null; // # of current New offers (availability / qty signal)

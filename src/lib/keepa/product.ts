@@ -230,6 +230,11 @@ export function normalizeProduct(p: KeepaProduct, domain: number): NormalizedPro
     // actually confirm the match instead of always falling to "could not verify".
     // Coerce to string first: Keepa sometimes returns numeric EAN/UPC codes.
     upc: firstBarcode(p.upcList) ?? firstBarcode(p.eanList),
+    barcodes: [...new Set(
+      [...(p.upcList ?? []), ...(p.eanList ?? [])]
+        .map((c) => String(c).trim())
+        .filter((c) => c.length >= 8),
+    )],
     packageQuantity: pos(p.packageQuantity) ?? pos(p.numberOfItems),
     offerCount: statOrCsv(p, IDX.COUNT_NEW),
     oosPercent: pickOos(p),

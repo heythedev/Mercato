@@ -361,9 +361,22 @@ export async function compareProductImages(
       maxOutputTokens: 200,
     });
     return parseVisionResponse(text);
-  } catch {
+  } catch (e) {
+    logVisionError(productName, e);
     return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
   }
+}
+
+/** The UI only shows "AI vision call failed" — without this log the CAUSE
+ *  (auth, balance, rate limit, oversized payload) is invisible in production,
+ *  which is exactly how a systemic vision outage goes unnoticed. */
+function logVisionError(productName: string, e: unknown): void {
+  const err = e as { message?: string; statusCode?: number; responseBody?: string };
+  console.warn(
+    `[vision] call failed for ${JSON.stringify(productName)}: ` +
+      `${err.statusCode ? `HTTP ${err.statusCode} — ` : ""}${err.message ?? String(e)}` +
+      `${err.responseBody ? ` — ${String(err.responseBody).slice(0, 300)}` : ""}`,
+  );
 }
 
 /**
@@ -431,7 +444,8 @@ export async function compareVendorAgainstAllImages(
       maxOutputTokens: 200,
     });
     return parseVisionResponse(text);
-  } catch {
+  } catch (e) {
+    logVisionError(productName, e);
     return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
   }
 }

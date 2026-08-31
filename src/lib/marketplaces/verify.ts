@@ -857,7 +857,52 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       // provider omitted — a case pack with a pack-wordless title would
       // otherwise pass this filter as a "single".
       if (candidates.length > 1) await enrichCandidatePackData(candidates);
-      const packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
+      let packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
+
+      // Keepa second opinion (primary mode): Synccentric's database keeps ONE
+      // row per barcode, but Amazon reuses a barcode across pack sizes — the
+      // pack-compatible listing is often ANOTHER ASIN on the SAME code that
+      // only Keepa knows ("Pkg of 3" vs the "Pkg of 5" row Synccentric holds).
+      // Before setting the product aside as pack-incompatible, ask Keepa for
+      // the code once. Token-guarded, and the payload is cached for next time.
+      if (
+        !packCompatible.length &&
+        sync.synccentricPrimary() &&
+        barcodeVariants(resolvedUpc(p)).some((v) => syncResolved.has(v)) &&
+        (getLastTokenInfo()?.tokensLeft ?? Number.MAX_SAFE_INTEGER) >= CODE_MIN_TOKENS
+      ) {
+        try {
+          const codes = barcodeVariants(resolvedUpc(p));
+          const kp = await getProductsByCode(KEEPA_DOMAIN, codes, { stats: 1 });
+          if (kp.products.length) await cacheProducts(KEEPA_DOMAIN, kp.products);
+          // A completed Keepa answer is a Keepa fact — remember the mapping so
+          // the next upload of this barcode starts from the full ASIN set.
+          if (!kp.failedCodes.length) {
+            const g = toGtin14(resolvedUpc(p));
+            if (g) {
+              await cacheCodeLookup(
+                KEEPA_DOMAIN, g,
+                [...new Set(kp.products.map((r) => r.asin as string).filter(Boolean))],
+                "rescue",
+              );
+            }
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const extra = (normalizeMany(kp.products, 1) as any[]).filter(Boolean);
+          const known = new Set(candidates.map((c) => c.asin));
+          const fresh = extra.filter((c) => !known.has(c.asin));
+          if (fresh.length) {
+            candidates = [...candidates, ...fresh];
+            await enrichCandidatePackData(candidates);
+            packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
+            console.log(
+              `[verify] Keepa second opinion on ${resolvedUpc(p)}: +${fresh.length} ASIN(s), ` +
+                `${packCompatible.length} pack-compatible`,
+            );
+          }
+        } catch { /* the set-aside path below still applies */ }
+      }
+
       if (!packCompatible.length) {
         // Remember the best UPC-confirmed candidate before handing the
         // product to keyword search: if no pack-compatible listing exists
@@ -945,8 +990,16 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const setAside: any = upcPackIncompatible.get(p.id);
       if (!setAside?.asin) continue;
+      // A shallow token shortfall refills in ~a minute — wait it out like the
+      // keyword phase does, instead of abandoning every remaining rescue and
+      // leaving barcode-confirmed products stuck on their wrong-pack match.
       const left = getLastTokenInfo()?.tokensLeft;
-      if (left != null && left < 300) break;
+      if (left != null && left < 300) {
+        const info = await awaitTokenRefill(
+          refreshTokens, await refreshTokens(), 300, deadline, "pack-sibling rescue",
+        );
+        if (info != null && info.tokensLeft < 300) break;
+      }
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const sibling: any = await findPackSibling(p, setAside);
@@ -1079,6 +1132,20 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
           // pack): title wording first, structured Package Quantity fallback.
           const groupPackQty = vendorPackQty(group[0]);
 
+          // Barcode-identity guard: the vendor's own UPC(s) for this group, and
+          // the brands of any UPC-confirmed set-aside matches (whose pack
+          // siblings legitimately carry different barcodes). A candidate whose
+          // exposed barcodes contradict these is a different product — see
+          // contradictsVendorBarcode.
+          const groupCodeKeys = new Set(
+            group.flatMap((p) => barcodeVariants(resolvedUpc(p))).map(codeDigitsKey).filter(Boolean),
+          );
+          const setAsideBrands = new Set(
+            group
+              .map((p) => String(upcPackIncompatible.get(p.id)?.brand ?? "").trim().toLowerCase())
+              .filter(Boolean),
+          );
+
           const searchAndPick = async (searchTerm: string, minSim = 0.4) => {
             const cacheKey = searchTerm.toLowerCase().trim();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1094,9 +1161,17 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
             }
             if (!normed.length) return null;
 
+            // Identity first: drop candidates whose own barcodes contradict the
+            // vendor's UPC — a wording match with the wrong barcode is a
+            // different product, and attaching it is worse than "not found".
+            const identityOk = normed.filter(
+              (n) => !contradictsVendorBarcode(n, groupCodeKeys, setAsideBrands),
+            );
+            if (!identityOk.length) return null;
+
             // Prefer candidates whose pack qty matches the catalog title (single ≠ Pack of N).
-            const packMatched = filterPackCompatible(productName, normed, groupPackQty);
-            const pool = packMatched.length ? packMatched : normed;
+            const packMatched = filterPackCompatible(productName, identityOk, groupPackQty);
+            const pool = packMatched.length ? packMatched : identityOk;
 
             // Exact model/MPN match wins — but ONLY among pack-compatible candidates.
             // Never let a multipack win just because the model number matches; if only
@@ -2549,6 +2624,41 @@ export function resolveVendorPack(
 /** Vendor-side pack quantity for match/filter decisions (title + structured field). */
 export function vendorPackQty(p: Product): number {
   return resolveVendorPack(p, extractPackInfo(p.name)).qty;
+}
+
+/** Digits-only with leading zeros stripped — barcode equality across the
+ *  UPC-12 / EAN-13 / GTIN-14 zero-padding variants. */
+export function codeDigitsKey(c: string): string {
+  return String(c ?? "").replace(/\D/g, "").replace(/^0+/, "");
+}
+
+/**
+ * True when a candidate's own barcode data positively CONTRADICTS the vendor's
+ * barcode identity. A keyword search can only ever guess by wording, so a
+ * candidate that exposes barcodes which do NOT include the vendor's UPC is a
+ * different physical product ("MOSQUITO REPEL GRANUL" must not match a
+ * same-purpose competitor whose UPC differs).
+ *
+ * Deliberately conservative in both directions:
+ * - No vendor barcode, or no barcode data on the candidate → no contradiction
+ *   (absence proves nothing; many listings expose no barcode).
+ * - A candidate whose brand matches one of `allowedBrands` passes even with a
+ *   different barcode: pack siblings of a UPC-confirmed set-aside match carry
+ *   their own per-pack barcodes, and rejecting them would undo the pack-rescue.
+ */
+export function contradictsVendorBarcode(
+  candidate: { barcodes?: unknown; brand?: unknown },
+  vendorCodeKeys: ReadonlySet<string>,
+  allowedBrands: ReadonlySet<string>,
+): boolean {
+  if (!vendorCodeKeys.size) return false;
+  const codes = (Array.isArray(candidate?.barcodes) ? candidate.barcodes : [])
+    .map((c) => codeDigitsKey(String(c ?? "")))
+    .filter(Boolean);
+  if (!codes.length) return false;
+  if (codes.some((k) => vendorCodeKeys.has(k))) return false;
+  const brand = String(candidate?.brand ?? "").trim().toLowerCase();
+  return !(brand && allowedBrands.has(brand));
 }
 
 /**
