@@ -370,21 +370,25 @@ export async function compareProductImages(
     });
     return parseVisionResponse(text);
   } catch (e) {
-    logVisionError(productName, e);
-    return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
+    return { verdict: "unsure", reason: logVisionError(productName, e), retryable: true };
   }
 }
 
-/** The UI only shows "AI vision call failed" — without this log the CAUSE
- *  (auth, balance, rate limit, oversized payload) is invisible in production,
- *  which is exactly how a systemic vision outage goes unnoticed. */
-function logVisionError(productName: string, e: unknown): void {
+/** Log the full vision-call failure AND return a short cause for the UI note.
+ *  A bare "AI vision call failed" hid a whole model retirement for days — the
+ *  reviewer must see WHY (model missing, auth, rate limit) without needing
+ *  server logs. */
+function logVisionError(productName: string, e: unknown): string {
   const err = e as { message?: string; statusCode?: number; responseBody?: string };
   console.warn(
     `[vision] call failed for ${JSON.stringify(productName)}: ` +
       `${err.statusCode ? `HTTP ${err.statusCode} — ` : ""}${err.message ?? String(e)}` +
       `${err.responseBody ? ` — ${String(err.responseBody).slice(0, 300)}` : ""}`,
   );
+  const short = `${err.statusCode ? `HTTP ${err.statusCode}: ` : ""}${String(err.message ?? e)}`
+    .replace(/\s+/g, " ")
+    .slice(0, 140);
+  return `AI vision call failed${short ? ` (${short})` : "."}`;
 }
 
 /**
@@ -457,8 +461,7 @@ export async function compareVendorAgainstAllImages(
     });
     return parseVisionResponse(text);
   } catch (e) {
-    logVisionError(productName, e);
-    return { verdict: "unsure", reason: "AI vision call failed.", retryable: true };
+    return { verdict: "unsure", reason: logVisionError(productName, e), retryable: true };
   }
 }
 
