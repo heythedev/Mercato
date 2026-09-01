@@ -895,16 +895,48 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       if (candidates.length > 1) await enrichCandidatePackData(candidates, deadline);
       let packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
 
-      // Keepa second opinion (primary mode): Synccentric's database keeps ONE
-      // row per barcode, but Amazon reuses a barcode across pack sizes — the
-      // pack-compatible listing is often ANOTHER ASIN on the SAME code that
-      // only Keepa knows ("Pkg of 3" vs the "Pkg of 5" row Synccentric holds).
-      // Before setting the product aside as pack-incompatible, ask Keepa for
-      // the code once. Token-guarded, and the payload is cached for next time.
+      // Second opinions: when every candidate fails the pack filter, the
+      // sources NOT yet consulted for this barcode may hold the compatible
+      // listing. Amazon reuses one UPC across pack sizes, and each source sees
+      // a different slice of them — a CACHED mapping (one prior Keepa answer)
+      // hides Synccentric's fuller set, and a Synccentric answer hides Keepa's.
+
+      // 2a. Synccentric re-ask — for pools served from the CACHE this run
+      // (the cached mapping answered first, so Synccentric was never asked;
+      // its database held the exact Pkg-of-3 the cached Pkg-of-10 mapping
+      // couldn't offer in the Bonide mosquito-granules case). Quota-cheap,
+      // no tokens involved.
+      if (
+        !packCompatible.length &&
+        sync.synccentricConfigured() &&
+        !barcodeVariants(resolvedUpc(p)).some((v) => syncResolved.has(v))
+      ) {
+        try {
+          const fb = await sync.searchByCode(barcodeVariants(resolvedUpc(p)));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const extra = (normalizeMany(fb.products, 1) as any[]).filter(Boolean);
+          const known = new Set(candidates.map((c) => c.asin));
+          const fresh = extra.filter((c) => !known.has(c.asin));
+          if (fresh.length) {
+            candidates = [...candidates, ...fresh];
+            await enrichCandidatePackData(candidates, deadline);
+            packCompatible = filterPackCompatible(p.name, candidates, vendorPackQty(p));
+            console.log(
+              `[verify] Synccentric second opinion on ${resolvedUpc(p)}: +${fresh.length} ASIN(s), ` +
+                `${packCompatible.length} pack-compatible`,
+            );
+          }
+        } catch { /* the Keepa branch / set-aside path below still applies */ }
+      }
+
+      // 2b. Keepa second opinion (primary mode): Synccentric's database keeps
+      // ONE row per barcode, but the pack-compatible listing is often ANOTHER
+      // ASIN on the SAME code that only Keepa knows ("Pkg of 3" vs the
+      // "Pkg of 5" row Synccentric holds). Token-guarded; the payload AND the
+      // full mapping are cached, which also overwrites a stale narrow mapping.
       if (
         !packCompatible.length &&
         sync.synccentricPrimary() &&
-        barcodeVariants(resolvedUpc(p)).some((v) => syncResolved.has(v)) &&
         (getLastTokenInfo()?.tokensLeft ?? Number.MAX_SAFE_INTEGER) >= CODE_MIN_TOKENS
       ) {
         try {

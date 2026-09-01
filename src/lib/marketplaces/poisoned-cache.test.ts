@@ -112,6 +112,34 @@ describe("poisoned keyword mappings self-heal", () => {
     expect(result.liveData.asin).not.toBe("B0GXKZFDDH");
   });
 
+  it("re-asks Synccentric when a cache-served pool fails the pack filter", async () => {
+    // The Bonide mosquito-granules regression: a prior Keepa answer cached a
+    // NARROW mapping (only the Pkg-of-10 listing), which answers first on the
+    // next run and hides Synccentric's fuller set — including the exact
+    // Pkg-of-3 the catalog needs. A cache-served pool that fails the pack
+    // filter must go back to Synccentric before settling for the wrong pack.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tenPack: any = {
+      asin: "B0PACK1000",
+      title: "MOSQUITO BEATER REPEL GL (Pkg of 10)",
+      brand: "Bonide",
+      packageQuantity: 10,
+      upcList: [UPC],
+      eanList: [],
+      barcodes: [UPC],
+    };
+    mockedLookups.mockResolvedValue(
+      new Map([[GTIN14, { asins: ["B0PACK1000"], source: "rescue" as const }]]),
+    );
+    mockedProducts.mockResolvedValue(new Map([["B0PACK1000", tenPack]]));
+    mockedSearch.mockResolvedValue(bonideRows()); // holds the Pkg-of-3 B002YK7JVW
+
+    const [result] = await verifyProducts("amazon", [mosquito()], { skipAiPasses: true });
+    expect(mockedSearch).toHaveBeenCalled();
+    expect(result.liveData.asin).toBe("B002YK7JVW"); // the pack-compatible listing wins
+    expect(result.liveData.asin).not.toBe("B0PACK1000");
+  });
+
   it("keeps serving sibling-source mappings even though their barcode differs", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const sibling: any = {
