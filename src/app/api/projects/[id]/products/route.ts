@@ -38,6 +38,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       brand: true, price: true, imageUrl: true, verifyStatus: true,
       verifyFields: true, marketplaceCategory: true, categoryPath: true,
       categoryConfidence: true, categorizedAt: true, verifiedAt: true,
+      specProductType: true,
     },
   });
 

@@ -84,6 +84,39 @@ async function bulkUpdateCategories(
   }
 }
 
+/**
+ * Bulk-persist Spec Product Types (Walmart level-3). Same UPDATE…FROM(VALUES)
+ * shape as bulkUpdateCategories for the same reason (a remote DB makes per-row
+ * writes minutes of network wait). Bumping `categorizedAt` is deliberate: the
+ * progress feed's cursor is (categorizedAt, id), so the write re-streams these
+ * rows to the client and the Product Type column fills in live — and it keeps
+ * the run-liveness check fed during a spec-only resumed invocation.
+ */
+async function bulkUpdateSpecTypes(
+  rows: Array<{ productId: string; specProductType: string }>,
+): Promise<void> {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += CATEGORY_WRITE_CHUNK) {
+    const chunk = rows.slice(i, i + CATEGORY_WRITE_CHUNK);
+    const params: unknown[] = [];
+    const tuples: string[] = [];
+    for (const r of chunk) {
+      const n = params.length;
+      params.push(r.productId, r.specProductType);
+      tuples.push(`($${n + 1}::text, $${n + 2}::text)`);
+    }
+    params.push(new Date());
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Product" AS p
+       SET "specProductType" = v.spec,
+           "categorizedAt"   = $${params.length}::timestamp
+       FROM (VALUES ${tuples.join(",")}) AS v(id, spec)
+       WHERE p.id = v.id`,
+      ...params,
+    );
+  }
+}
+
 // ── GET /api/projects/[id]/categorize?jobId=… ─────────────────────────────────
 // Poll a background categorization job started by POST. The in-memory job store
 // answers when the poll lands on the instance that runs the job; on Vercel most
@@ -179,7 +212,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const project = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, userId: true, products: { select: { id: true, name: true, vendorSku: true } } },
+    select: { id: true, userId: true, marketplace: true, products: { select: { id: true, name: true, vendorSku: true } } },
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -191,44 +224,33 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const file = form.get("file");
   if (!(file instanceof File)) return NextResponse.json({ error: "No file attached" }, { status: 400 });
 
-  const raw = Buffer.from(await file.arrayBuffer()).toString("utf-8").replace(/^﻿/, "");
-  const delim = raw.includes("\t") ? "\t" : ",";
-  const [headerLine, ...dataLines] = raw.split(/\r?\n/).filter(Boolean);
-  const headers = (headerLine ?? "").split(delim).map(h => h.replace(/^"|"$/g, "").trim().toLowerCase());
+  const raw = Buffer.from(await file.arrayBuffer()).toString("utf-8");
+  const { parseCategoryCsv } = await import("@/lib/categorize/category-csv");
+  const parsed = parseCategoryCsv(raw);
+  if (parsed.error) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-  // Find column indices
-  const skuIdx = headers.findIndex(h => /sku|sku_id|vendor_sku|item_sku/.test(h));
-  const nameIdx = headers.findIndex(h => /product[\s_]?name|name|title/.test(h));
-  const catIdx = headers.findIndex(h => /^category$|marketplace[\s_]?cat/.test(h));
-  const ptIdx = headers.findIndex(h => /^product[\s_]?type$/.test(h));
-  const pathIdx = headers.findIndex(h => /category[\s_]?path|path/.test(h));
-
-  if (catIdx === -1) {
-    return NextResponse.json({ error: "CSV must have a 'Category' column" }, { status: 400 });
+  // Walmart level-3: validate edited Product Type cells against the taxonomy
+  // (canonical casing); anything off-list is ignored so a typo can never
+  // clobber a good stored value. Users edit subsets — an EMPTY cell also
+  // leaves the stored value untouched.
+  const { loadSpecProductTypes, normSpecType: normSpec } = await import("@/lib/ai/walmart-spec-product-type");
+  let specCanon: Map<string, string> | null = null;
+  if (parsed.hasGroupColumn && project.marketplace?.toLowerCase() === "walmart") {
+    specCanon = new Map((await loadSpecProductTypes()).map((t) => [normSpec(t), t]));
   }
 
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const skuMap = new Map(project.products.map(p => [p.vendorSku?.trim() ?? "", p.id]));
   const nameMap = new Map(project.products.map(p => [norm(p.name), p.id]));
 
-  const updates: Array<{ id: string; category: string; path: string | null }> = [];
-  for (const line of dataLines) {
-    if (!line.trim()) continue;
-    const cols = line.split(delim).map(c => c.replace(/^"|"$/g, "").trim());
-    const sku = skuIdx >= 0 ? (cols[skuIdx] ?? "") : "";
-    const name = nameIdx >= 0 ? (cols[nameIdx] ?? "") : "";
-    let category = (cols[catIdx] ?? "").trim();
-    const productType = ptIdx >= 0 ? (cols[ptIdx] ?? "").trim() : "";
-    // The downloaded CSV splits "Category > Product Type" into two columns;
-    // re-join here so download -> edit -> upload round-trips are lossless.
-    // Skip when the category cell already carries a full path (older files).
-    if (productType && !category.includes(" > ")) category = `${category} > ${productType}`;
-    const path = pathIdx >= 0 ? (cols[pathIdx] ?? "").trim() || null : null;
-    if (!category) continue;
-
-    const productId = (sku && skuMap.get(sku)) || (name && nameMap.get(norm(name)));
+  const updates: Array<{ id: string; category: string; path: string | null; specProductType: string | null }> = [];
+  for (const row of parsed.rows) {
+    const productId = (row.sku && skuMap.get(row.sku)) || (row.name && nameMap.get(norm(row.name)));
     if (!productId) continue;
-    updates.push({ id: productId, category, path });
+    const spec = specCanon && row.specProductType
+      ? specCanon.get(normSpec(row.specProductType)) ?? null
+      : null;
+    updates.push({ id: productId, category: row.category, path: row.path, specProductType: spec });
   }
 
   if (!updates.length) {
@@ -239,7 +261,12 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   await inChunks(updates, (u) =>
     prisma.product.update({
       where: { id: u.id },
-      data: { marketplaceCategory: u.category, categoryPath: u.path, categorizedAt: new Date() },
+      data: {
+        marketplaceCategory: u.category,
+        categoryPath: u.path,
+        categorizedAt: new Date(),
+        ...(u.specProductType ? { specProductType: u.specProductType } : {}),
+      },
     })
   );
   await prisma.project.update({ where: { id }, data: { status: "categorized" } });
@@ -558,8 +585,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Save Spec Product Types sourced directly from the Seller API live data.
     // These are exact values Walmart already has on file — no AI needed.
     if (walmartSpecTypeById.size > 0) {
-      await inChunks([...walmartSpecTypeById], ([productId, specProductType]) =>
-        prisma.product.update({ where: { id: productId }, data: { specProductType } }),
+      await bulkUpdateSpecTypes(
+        [...walmartSpecTypeById].map(([productId, specProductType]) => ({ productId, specProductType })),
       );
       console.log(
         `[categorize] ${walmartSpecTypeById.size} products got Spec Product Type from live Seller API data`,
@@ -730,18 +757,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     // Walmart: for products that didn't get a Spec Product Type from live Seller API
-    // data, use AI to assign one from Walmart's PT taxonomy. Skip products already
-    // covered above — live data is more accurate than AI inference.
+    // data, use AI to assign one from Walmart's PT taxonomy (the level-3 "last
+    // level"). Idempotent + resumable: products whose stored type is already
+    // valid AND consistent with their assigned path are skipped, so each run
+    // only works on blanks/invalidated rows; a deadline stop reports partial
+    // and the client's resume chain continues from wherever work remains.
     let specTypesRequested = 0;
     let specTypesAssigned = 0;
+    let specTypesRemaining = 0;
+    let specPartial = false;
     let specTypeError: string | undefined;
-    // Skipped on a partial stop — the resumed invocation reaches it once the
-    // whole catalog is processed.
+    // Skipped on a categorize partial stop (budget already spent) — the
+    // resumed invocation reaches it once the whole catalog is processed.
     if (mpLower === "walmart" && !partial) {
+      const { assignSpecProductTypes, isSpecTypeCurrent, loadSpecProductTypes, normSpecType } =
+        await import("@/lib/ai/walmart-spec-product-type");
+      const validSpecNorm = new Set((await loadSpecProductTypes()).map(normSpecType));
+
       // All products (including those that went through the Walmart category path)
-      // need a spec type. Use all project products minus those already assigned from
-      // live data. Paged back out of the DB — the streaming load above kept no
-      // product rows around — into the slim inputs the spec assigner needs.
+      // need a spec type. Paged back out of the DB — the streaming load above kept
+      // no product rows around — into the slim inputs the spec assigner needs.
       const specInputs: Array<{
         id: string;
         name: string;
@@ -759,12 +794,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             where,
             orderBy: { id: "asc" },
             take: PAGE_SIZE,
-            select: { id: true, name: true, brand: true, description: true, categoryPath: true },
+            select: { id: true, name: true, brand: true, description: true, categoryPath: true, specProductType: true },
           });
           if (page.length === 0) break;
           cursor = page[page.length - 1].id;
           for (const p of page) {
+            // Live Seller API values are authoritative — never re-derived.
             if (walmartSpecTypeById.has(p.id)) continue;
+            const path = p.categoryPath ?? existingCatById.get(p.id) ?? null;
+            // Idempotence: a stored type that is valid and belongs to the
+            // product's (possibly re-assigned) path needs no work. `force`
+            // re-runs AI types but still never touches live ones.
+            if (!force && isSpecTypeCurrent(p.specProductType, path, validSpecNorm)) continue;
             specInputs.push({
               id: p.id,
               name: p.name,
@@ -774,7 +815,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
               // prompt to that group's types. The flat category leaf (fallback)
               // resolves no group, which degraded the prompt to the full ~7K
               // type list and tanked accuracy.
-              category: p.categoryPath ?? existingCatById.get(p.id) ?? null,
+              category: path,
             });
           }
         }
@@ -782,15 +823,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       specTypesRequested = specInputs.length;
       if (specInputs.length > 0) {
         try {
-          setCategorizeJobPhase(jobId, "Assigning Walmart spec product types…");
-          const { assignSpecProductTypes } = await import("@/lib/ai/walmart-spec-product-type");
-          const specMap = await assignSpecProductTypes(specInputs);
-          if (specMap.size > 0) {
-            await inChunks([...specMap], ([productId, specProductType]) =>
-              prisma.product.update({ where: { id: productId }, data: { specProductType } }),
-            );
-          }
-          specTypesAssigned = specMap.size;
+          setCategorizeJobPhase(jobId, `Assigning product types 0/${specInputs.length}…`);
+          const specRes = await assignSpecProductTypes(specInputs, {
+            deadlineAt: startedAt + TIME_BUDGET_MS,
+            onProgress: (done, totalSpec) => {
+              heartbeat();
+              setCategorizeJobPhase(jobId, `Assigning product types ${done}/${totalSpec}…`);
+            },
+            onAssigned: (rows) => bulkUpdateSpecTypes(rows),
+          });
+          specTypesAssigned = specRes.assigned.size;
+          specTypesRemaining = specTypesRequested - specRes.assigned.size;
+          specPartial = specRes.deadlineHit;
         } catch (err) {
           // Surfaced in the job summary — a failed spec pass must not report as
           // a clean run (the export would silently fall back to category-leaf
@@ -861,9 +905,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     runFinished = true;
     await beatPromise;
 
+    // A deadline stop in the spec pass is a partial run too: the client's
+    // resume chain POSTs again, the categorize loop finds nothing to do, and
+    // the spec pass continues from whatever the skip rule says remains.
+    const anyPartial = partial || specPartial;
     await prisma.project.update({
       where: { id },
-      data: partial
+      data: anyPartial
         ? {
             // Clean out-of-budget stop: back to the pre-categorize status so
             // nothing is ever stuck "categorizing" if the client vanishes, with
@@ -886,14 +934,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       categorized: allCats.length,
       matched,
       unmatched,
-      ...(partial
+      ...(anyPartial
         ? { partial: true, remaining: totalToProcess - processed, resumeFrom: logicalRunStart }
         : {}),
       reprocessed: processed,
       enrichedFromSku: enrichedCount,
       ...(familyInherited > 0 ? { familyInherited } : {}),
       ...(mpLower === "walmart"
-        ? { specTypesRequested, specTypesAssigned, ...(specTypeError ? { specTypeError } : {}) }
+        ? {
+            specTypesRequested,
+            specTypesAssigned,
+            specTypesRemaining,
+            ...(specTypeError ? { specTypeError } : {}),
+          }
         : {}),
       categories:
         mpLower === "temu"

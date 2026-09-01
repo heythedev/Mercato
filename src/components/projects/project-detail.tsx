@@ -34,6 +34,8 @@ type Product = {
   categoryConfidence: number | null;
   categorizedAt: Date | null;
   verifiedAt: Date | null;
+  /** Walmart level-3 Product Type (taxonomy's real last level). */
+  specProductType?: string | null;
 };
 
 type Project = {
@@ -455,7 +457,7 @@ export function ProjectDetail({ project: initial, productCount }: {
     setCategorizePhase(null);
     // A re-categorize (force) clears the previous run's results first, otherwise the
     // stale list would sit there looking like fresh progress — matches runVerify.
-    if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null, categoryConfidence: null })));
+    if (force) setProducts((prev) => prev.map((p) => ({ ...p, marketplaceCategory: null, categoryPath: null, categoryConfidence: null, specProductType: null })));
     const stopPolling = startCategorizeFeed();
     try {
       // Categorization is a background job (large catalogs make dozens of model
@@ -476,6 +478,7 @@ export function ProjectDetail({ project: initial, productCount }: {
       // spinning forever.
       let lastMatched = -1;
       let lastRemaining = Number.MAX_SAFE_INTEGER;
+      let lastSpecRemaining = Number.MAX_SAFE_INTEGER;
       let noProgressResumes = 0;
 
       for (;;) {
@@ -514,7 +517,8 @@ export function ProjectDetail({ project: initial, productCount }: {
           status: string; error?: string; phase?: string; updatedAt?: number;
           matched?: number; unmatched?: number; categorized?: number;
           partial?: boolean; interrupted?: boolean; remaining?: number; resumeFrom?: number;
-          specTypesRequested?: number; specTypesAssigned?: number; specTypeError?: string;
+          specTypesRequested?: number; specTypesAssigned?: number; specTypesRemaining?: number;
+          specTypeError?: string;
         };
         let verdict: PollData | null = null;
 
@@ -589,11 +593,17 @@ export function ProjectDetail({ project: initial, productCount }: {
 
         if (verdict.partial) {
           // Out-of-budget stop (or a dead instance the GET fallback repaired) —
-          // resume where the server left off.
+          // resume where the server left off. A spec-type-only resume link
+          // holds `matched` and `remaining` constant while specTypesRemaining
+          // drops, so that counts as progress too.
           const remaining = typeof verdict.remaining === "number" ? verdict.remaining : Number.MAX_SAFE_INTEGER;
-          const progressed = matched > lastMatched || remaining < lastRemaining;
+          const specRemaining =
+            typeof verdict.specTypesRemaining === "number" ? verdict.specTypesRemaining : Number.MAX_SAFE_INTEGER;
+          const progressed =
+            matched > lastMatched || remaining < lastRemaining || specRemaining < lastSpecRemaining;
           lastMatched = Math.max(lastMatched, matched);
           lastRemaining = Math.min(lastRemaining, remaining);
+          lastSpecRemaining = Math.min(lastSpecRemaining, specRemaining);
           noProgressResumes = progressed ? 0 : noProgressResumes + 1;
           if (noProgressResumes >= 2) {
             toast.error("Categorization keeps stopping without progress — please try again later.");

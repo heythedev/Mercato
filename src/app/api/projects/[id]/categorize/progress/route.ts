@@ -62,7 +62,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       take: limit,
       select: {
         id: true, name: true, marketplaceCategory: true, categoryPath: true,
-        categoryConfidence: true, categorizedAt: true,
+        categoryConfidence: true, categorizedAt: true, specProductType: true,
       },
     }),
     prisma.product.count({ where: { projectId: id, categorizedAt: { not: null } } }),

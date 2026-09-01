@@ -16,6 +16,8 @@ type Product = {
   categoryPath: string | null;
   categoryConfidence: number | null;
   categorizedAt: Date | null;
+  /** Walmart level-3 Product Type (the taxonomy's real last level). */
+  specProductType?: string | null;
 };
 
 export function CategorizeStep({ projectId, projectName, products, categorizedCount, loading, projectStatus, marketplace, elapsedMs, completedAt, phase, onRunCategorize, onNext }: {
@@ -108,17 +110,24 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   }
 
   function downloadCsv() {
+    // Walmart's taxonomy has THREE levels: Category > Product Type Group >
+    // Product Type. The old CSV mislabeled the level-2 GROUP as "Product Type";
+    // for Walmart the real level-3 (specProductType) gets its own column and
+    // the group is named honestly. Other marketplaces keep the 2-level shape.
+    const header = isWalmart
+      ? ["SKU", "Product Name", "Brand", "Category", "Product Type Group", "Product Type", "Category Path", "Confidence", "Status"]
+      : ["SKU", "Product Name", "Brand", "Category", "Product Type", "Category Path", "Confidence", "Status"];
     const rows = [
       // "Confidence" is ignored by the CSV import (headers resolve by name),
       // so download -> edit -> upload stays lossless with the extra column.
-      ["SKU", "Product Name", "Brand", "Category", "Product Type", "Category Path", "Confidence", "Status"],
+      header,
       ...products.map((p) => {
-        // "Category > Product Type" paths are split into two columns for easier
+        // "Category > Group" paths are split into two columns for easier
         // review. The CSV import (PUT) re-joins them, so download -> edit ->
         // upload stays lossless — keep the header names in sync with it.
         // Most rows store only the leaf ("Shop All Wall Sconces") in
         // marketplaceCategory while categoryPath carries the full two-level
-        // path — split from the path in that case so Product Type isn't blank.
+        // path — split from the path in that case so the group isn't blank.
         const cat = p.marketplaceCategory ?? "";
         const path = p.categoryPath ?? "";
         const full =
@@ -127,20 +136,22 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
             : cat;
         const sep = full.indexOf(" > ");
         const topCategory = sep === -1 ? full : full.slice(0, sep);
-        const productType = sep === -1 ? "" : full.slice(sep + 3);
+        const group = sep === -1 ? "" : full.slice(sep + 3);
         const conf = p.categoryConfidence;
         const confLabel = conf == null || !cat || cat === "Uncategorized" ? ""
           : conf >= 0.8 ? "High" : conf >= REVIEW_CONFIDENCE ? "Medium" : "Low";
-        return [
-          p.vendorSku ?? p.id,
-          p.name,
-          p.brand ?? "",
-          topCategory,
-          productType,
-          p.categoryPath ?? "",
-          confLabel,
-          p.marketplaceCategory === "Uncategorized" ? "No match" : p.marketplaceCategory ? "Done" : "Not categorized",
-        ];
+        const status = p.marketplaceCategory === "Uncategorized" ? "No match" : p.marketplaceCategory ? "Done" : "Not categorized";
+        return isWalmart
+          ? [
+              p.vendorSku ?? p.id, p.name, p.brand ?? "",
+              topCategory, group, p.specProductType ?? "",
+              p.categoryPath ?? "", confLabel, status,
+            ]
+          : [
+              p.vendorSku ?? p.id, p.name, p.brand ?? "",
+              topCategory, group,
+              p.categoryPath ?? "", confLabel, status,
+            ];
       }),
     ];
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -373,6 +384,9 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Product</th>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Category</th>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Path</th>
+                {isWalmart && (
+                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Product Type</th>
+                )}
                 <th className="text-center px-4 py-3 font-medium text-muted-foreground">Status</th>
               </tr>
             </thead>
@@ -399,6 +413,21 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                       )}
                     </td>
                     <td className="px-4 py-3 text-xs text-muted-foreground">{isUncategorized ? "—" : (p.categoryPath ?? "—")}</td>
+                    {isWalmart && (
+                      <td className="px-4 py-3 text-xs">
+                        {p.specProductType ? (
+                          <span className="font-medium">{p.specProductType}</span>
+                        ) : p.marketplaceCategory && !isUncategorized ? (
+                          // Categorized but the level-3 type hasn't landed yet —
+                          // visible as pending rather than silently blank.
+                          <span className="text-muted-foreground italic" title="Product type not assigned yet — re-run Categorize to fill it">
+                            Pending
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    )}
                     <td className="px-4 py-3 text-center">
                       {isUncategorized ? (
                         <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
