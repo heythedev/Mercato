@@ -95,6 +95,7 @@ const FIELDS = [
   "ean",
   "parent_asin",
   "package_quantity",
+  "number_of_items",
   "large_image",
   "medium_image",
   "additional_image_1",
@@ -217,10 +218,19 @@ function toKeepaProduct(row: Record<string, unknown>): KeepaProduct | null {
     partNumber: str(row.part_num) ?? str(row.mpn) ?? undefined,
     color: str(row.color) ?? undefined,
     size: str(row.size) ?? undefined,
-    packageQuantity:
-      typeof row.package_quantity === "number" && row.package_quantity > 0
-        ? row.package_quantity
-        : undefined,
+    // Synccentric changed this field from number to STRING (~2026-08-28-ish:
+    // "5", "12", "" — verified by raw probe). The old typeof === "number"
+    // check silently nulled every pack count, which wiped out the pack filter
+    // and re-opened the wrong-pack picks. Coerce; blank/zero stays undefined.
+    packageQuantity: (() => {
+      const v = Number(row.package_quantity);
+      return Number.isFinite(v) && v > 0 ? Math.round(v) : undefined;
+    })(),
+    // Secondary pack signal, same string coercion (livePackQty reads both).
+    numberOfItems: (() => {
+      const v = Number(row.number_of_items);
+      return Number.isFinite(v) && v > 0 ? Math.round(v) : undefined;
+    })(),
     // Marker so callers/logs can tell fallback data from real Keepa payloads.
     _source: "synccentric",
   };

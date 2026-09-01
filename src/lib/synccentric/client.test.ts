@@ -1,54 +1,54 @@
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { synccentricConfigured, synccentricPrimary } from "./client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { searchByCode } from "./client";
 
-const saved = {
-  token: process.env.SYNCCENTRIC_API_TOKEN,
-  primary: process.env.SYNCCENTRIC_PRIMARY,
-};
+// Synccentric changed package_quantity from a number to a STRING ("3", "12",
+// "") around 2026-08-28. The old typeof === "number" mapping silently nulled
+// every pack count, wiped out the pack filter, and re-opened wrong-pack ASIN
+// picks (the mosquito Pack-of-3 kept resolving to singles/10-packs).
+const row = (attrs: Record<string, unknown>) => ({ attributes: attrs });
 
-beforeEach(() => {
-  delete process.env.SYNCCENTRIC_API_TOKEN;
-  delete process.env.SYNCCENTRIC_PRIMARY;
-});
+function mockFetch(rows: unknown[]) {
+  return vi.fn(async () =>
+    new Response(JSON.stringify({ data: rows }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+}
 
-afterAll(() => {
-  if (saved.token != null) process.env.SYNCCENTRIC_API_TOKEN = saved.token;
-  else delete process.env.SYNCCENTRIC_API_TOKEN;
-  if (saved.primary != null) process.env.SYNCCENTRIC_PRIMARY = saved.primary;
-  else delete process.env.SYNCCENTRIC_PRIMARY;
-});
-
-describe("synccentricPrimary", () => {
-  it("defaults to primary whenever a token is configured", () => {
-    process.env.SYNCCENTRIC_API_TOKEN = "tok";
-    expect(synccentricPrimary()).toBe(true);
+describe("Synccentric pack-quantity coercion", () => {
+  beforeEach(() => {
+    vi.stubEnv("SYNCCENTRIC_API_TOKEN", "test-token");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
-  it("is never primary without a token", () => {
-    expect(synccentricConfigured()).toBe(false);
-    expect(synccentricPrimary()).toBe(false);
-    process.env.SYNCCENTRIC_PRIMARY = "1";
-    expect(synccentricPrimary()).toBe(false);
+  it("coerces string package_quantity values to numbers", async () => {
+    vi.stubGlobal("fetch", mockFetch([
+      row({ asin: "B002YK7JVW", title: "Mosquito Beater Area Repellent Granules", upc: "037321056126", package_quantity: "3" }),
+    ]));
+    const { products } = await searchByCode(["037321056126"]);
+    expect(products[0]?.packageQuantity).toBe(3);
   });
 
-  it("can be flipped back to Keepa-led with an explicit opt-out", () => {
-    process.env.SYNCCENTRIC_API_TOKEN = "tok";
-    for (const v of ["0", "false", "no", "off", "OFF"]) {
-      process.env.SYNCCENTRIC_PRIMARY = v;
-      expect(synccentricPrimary()).toBe(false);
-    }
+  it("blank/zero/garbage pack values stay undefined", async () => {
+    vi.stubGlobal("fetch", mockFetch([
+      row({ asin: "B000UJTBWE", title: "Granules", upc: "037321056126", package_quantity: "" }),
+      row({ asin: "B001WPOET0", title: "Granules", upc: "037321056126", package_quantity: "0" }),
+      row({ asin: "B007RGCRRY", title: "Granules", upc: "037321056126", package_quantity: "n/a" }),
+    ]));
+    const { products } = await searchByCode(["037321056126"]);
+    expect(products.map((p) => p.packageQuantity)).toEqual([undefined, undefined, undefined]);
   });
 
-  it("stays primary for affirmative or unrecognized values", () => {
-    process.env.SYNCCENTRIC_API_TOKEN = "tok";
-    for (const v of ["1", "true", "yes", "on"]) {
-      process.env.SYNCCENTRIC_PRIMARY = v;
-      expect(synccentricPrimary()).toBe(true);
-    }
-  });
-
-  it("tolerates a token pasted with surrounding quotes", () => {
-    process.env.SYNCCENTRIC_API_TOKEN = '"tok"';
-    expect(synccentricConfigured()).toBe(true);
+  it("still accepts numeric package_quantity and maps number_of_items", async () => {
+    vi.stubGlobal("fetch", mockFetch([
+      row({ asin: "B00IMKY9X4", title: "3 each: Granules", upc: "037321056126", package_quantity: 12, number_of_items: "12" }),
+    ]));
+    const { products } = await searchByCode(["037321056126"]);
+    expect(products[0]?.packageQuantity).toBe(12);
+    expect(products[0]?.numberOfItems).toBe(12);
   });
 });
