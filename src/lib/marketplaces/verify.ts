@@ -949,8 +949,9 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
       }
 
       // Pick the best ASIN using multi-signal scoring (not just title).
+      const picked = pickBestCandidateDetailed(p, packCompatible)!;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const best: any = pickBestCandidate(p, packCompatible);
+      const best: any = picked.best;
 
       // A UPC barcode IS the product identity — do NOT reject based on title similarity.
       // Vendor files often use heavy abbreviations ("PWR STRP 360PRO") that share zero words
@@ -968,6 +969,24 @@ async function verifyAmazon(products: Product[], deadline?: number): Promise<Ver
         result.fields = result.fields.map((f) =>
           f.severity === "mismatch" ? { ...f, severity: "warning" as const } : f
         );
+      }
+      // Auto-pick vs review routing: a near-tie between two DIFFERENT listings
+      // on one barcode is an operator call, not a silent auto-pick — surface
+      // the runner-up so the reviewer can switch in one look instead of
+      // disputing the row later.
+      if (picked.runnerUp && picked.margin < 6) {
+        result.fields.push({
+          field: "asin_pick",
+          label: "ASIN selection",
+          stored: "multiple listings on this UPC",
+          live: String(best.asin ?? ""),
+          match: false,
+          severity: "warning",
+          note:
+            `Top two candidates scored nearly equal — picked ${String(best.asin ?? "?")} over ` +
+            `${String(picked.runnerUp.asin ?? "?")} (margin ${picked.margin.toFixed(1)}). Review the selection.`,
+        });
+        if (result.status === "ok") result.status = "warning";
       }
       upcResults.set(p.id, result);
     }
@@ -2462,14 +2481,132 @@ export function listingQuality(c: any): number {
   return q;
 }
 
+// ── Vendor-attribute agreement signals (duplicate-UPC disambiguation) ────────
+// The vendor file states more identity than the title alone — colour, sizes,
+// weight. These separate same-UPC VARIANTS (colourways, size listings) that
+// title similarity and quality cannot. Agreement is rewarded modestly and only
+// where copying can't fake it; a stated CONTRADICTION hits hard.
+
+/** Earliest colour word in the text (position wins; longer term on ties). */
+export function colourWordOf(text: string): string {
+  const lo = ` ${text.toLowerCase()} `;
+  let best = "";
+  let bestIdx = Number.POSITIVE_INFINITY;
+  for (const term of COLOUR_TERMS) {
+    const idx = lo.search(new RegExp(`\\b${term}\\b`));
+    if (idx >= 0 && (idx < bestIdx || (idx === bestIdx && term.length > best.length))) {
+      best = term;
+      bestIdx = idx;
+    }
+  }
+  return best;
+}
+
+/** ±8 colour agreement between the vendor's wording and a candidate listing.
+ *  Same colour (or same base family — "navy blue" vs "blue") +8, a different
+ *  family −8, no colour stated on either side 0. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function colourAgreement(vendorText: string, c: any): number {
+  const v = colourWordOf(vendorText);
+  if (!v) return 0;
+  const cand = colourWordOf(`${String(c?.color ?? "")} ${String(c?.title ?? "")}`);
+  if (!cand) return 0;
+  const fam = (s: string) => (s.split(" ").pop() ?? s).replace("grey", "gray");
+  return v === cand || fam(v) === fam(cand) ? 8 : -8;
+}
+
+const MEASURE_RE =
+  /(\d+(?:\.\d+)?)\s*("|”|''|inch(?:es)?\b|in\b\.?|oz\b|ounces?\b|lbs?\b|pounds?\b|ft\b|feet\b|foot\b|gallons?\b|gal\b|quarts?\b|qt\b|ml\b|cm\b|mm\b)/gi;
+
+function canonMeasureUnit(u: string): string {
+  const s = u.toLowerCase().replace(/\.$/, "");
+  if (s === '"' || s === "”" || s === "''" || s.startsWith("in")) return "in";
+  if (s.startsWith("o")) return "oz";
+  if (s.startsWith("l") || s.startsWith("p")) return "lb";
+  if (s.startsWith("f")) return "ft";
+  if (s.startsWith("g")) return "gal";
+  if (s.startsWith("q")) return "qt";
+  return s;
+}
+
+/** Stated measures grouped by canonical unit ("4OZ", `36"`, "1.5 lb"). */
+export function measureTokensOf(text: string): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  // "2-in-1" style phrases are product forms, not inch measurements.
+  const cleaned = text.replace(/\b\d+\s*-?\s*in\s*-?\s*1\b/gi, " ");
+  for (const m of cleaned.matchAll(MEASURE_RE)) {
+    const v = parseFloat(m[1]!);
+    if (!Number.isFinite(v) || v <= 0) continue;
+    const unit = canonMeasureUnit(m[2]!);
+    if (!out.has(unit)) out.set(unit, []);
+    out.get(unit)!.push(v);
+  }
+  return out;
+}
+
+/** −10 when the vendor states a measure and the candidate states a DIFFERENT
+ *  one in the same unit ("4OZ" vendor vs a "16 oz" listing); 0 otherwise.
+ *  A MATCHING measure deliberately earns NOTHING: reseller relists copy the
+ *  distributor feed wording, measures included, so rewarding agreement would
+ *  crown the copies (the same trap as description similarity — see the
+ *  EMRY-1392331 pin, where the stale duplicate titles the feed's "10 Lb"). */
+export function measureContradiction(vendorText: string, candTitle: string): number {
+  const v = measureTokensOf(vendorText);
+  const c = measureTokensOf(candTitle);
+  for (const [unit, vals] of v) {
+    const cv = c.get(unit);
+    if (!cv?.length) continue;
+    const overlap = vals.some((a) => cv.some((b) => Math.abs(a - b) <= Math.max(0.02 * a, 0.01)));
+    if (!overlap) return -10;
+  }
+  return 0;
+}
+
+/** The vendor sheet's stated weight in pounds, from any weight-ish column. */
+function vendorWeightLb(p: Product): number | null {
+  const vd = p.vendorData as Record<string, unknown> | null;
+  if (!vd) return null;
+  for (const [k, v] of Object.entries(vd)) {
+    if (!/\b(weight|wt)\b/i.test(k.replace(/[_-]/g, " "))) continue;
+    const n = parseFloat(String(v ?? "").replace(/[^0-9.]/g, ""));
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+/** +8 when the vendor's stated weight agrees with the listing's catalog weight
+ *  (within 20%). No penalty on disagreement: vendor weight columns mix units
+ *  (lb/oz) too often to punish a mismatch safely. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function weightAgreement(p: Product, c: any): number {
+  const vw = vendorWeightLb(p);
+  const g = Number(c?.weightG);
+  if (vw == null || !Number.isFinite(g) || g <= 0) return 0;
+  const cLb = g / 453.592;
+  const ratio = Math.min(vw, cLb) / Math.max(vw, cLb);
+  return ratio >= 0.8 ? 8 : 0;
+}
+
+/** Detailed pick: the winner plus the strongest DIFFERENT-ASIN runner-up and
+ *  the score margin between them — the auto-pick vs review signal. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type CandidatePick = { best: any; bestScore: number; runnerUp: any | null; margin: number };
+
 // ── Multi-signal ASIN candidate picker ───────────────────────────────────────
 // When Keepa returns multiple ASINs for a single UPC, score each candidate
 // across signals and return the highest-scoring one.
 // Pack quantity is a hard pre-filter when any same-qty candidates exist.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function pickBestCandidate(p: Product, candidates: any[]): any {
+  return pickBestCandidateDetailed(p, candidates)?.best ?? null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function pickBestCandidateDetailed(p: Product, candidates: any[]): CandidatePick | null {
   if (!candidates.length) return null;
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) {
+    return { best: candidates[0], bestScore: 0, runnerUp: null, margin: Number.POSITIVE_INFINITY };
+  }
 
   // Vendor pack count — title wording plus the structured Package Quantity
   // column, so a pack-wordless title with a vendor field of 6 competes as a
@@ -2503,6 +2640,18 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
     }
     return null;
   })();
+
+  // Vendor-side attribute texts, built once per pick. Colour priority: explicit
+  // vendor colour column, then the name, then the description (colourWordOf
+  // scans by position, so the concatenation order IS the priority). Measures
+  // come from the name and an explicit size column only — long descriptions
+  // mention too many incidental numbers to trust for contradictions.
+  const vendorColourText = [
+    String(vdRaw["color"] ?? vdRaw["Color"] ?? vdRaw["colour"] ?? ""),
+    p.name ?? "",
+    String(p.description ?? ""),
+  ].join(" ");
+  const vendorMeasureText = [p.name ?? "", String(vdRaw["size"] ?? vdRaw["Size"] ?? "")].join(" ");
 
   // Cheapest same-pack price in the pool — the reference for spotting reseller
   // relists: a single priced at $60 when the canonical single sells for $12.
@@ -2594,6 +2743,13 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
     // and price-echo edges the junk duplicates get from copying the vendor feed.
     s += listingQuality(c);
 
+    // 6. Vendor-file attribute agreement — colour ±8, catalog weight +8,
+    //    stated-measure contradiction −10. Separates same-UPC colourway/size
+    //    VARIANTS that title similarity and quality cannot.
+    s += colourAgreement(vendorColourText, c);
+    s += weightAgreement(p, c);
+    s += measureContradiction(vendorMeasureText, liveTitle);
+
     // A same-pack candidate priced far above the cheapest same-pack peer is a
     // reseller relist, not the listing buyers actually see. The stored vendor
     // price can't arbitrate here: re-uploaded working files carry the PREVIOUS
@@ -2608,11 +2764,30 @@ export function pickBestCandidate(p: Product, candidates: any[]): any {
 
   let best = pool[0];
   let bestScore = score(pool[0]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let runnerUp: any = null;
+  let runnerScore = Number.NEGATIVE_INFINITY;
   for (const c of pool.slice(1)) {
     const cs = score(c);
-    if (cs > bestScore) { bestScore = cs; best = c; }
+    if (cs > bestScore) {
+      runnerUp = best;
+      runnerScore = bestScore;
+      best = c;
+      bestScore = cs;
+    } else if (cs > runnerScore) {
+      runnerUp = c;
+      runnerScore = cs;
+    }
   }
-  return best;
+  // Duplicate rows of the SAME ASIN are not a rivalry — only a different
+  // listing counts as the runner-up for the auto-pick/review decision.
+  if (runnerUp && String(runnerUp.asin ?? "") === String(best.asin ?? "")) runnerUp = null;
+  return {
+    best,
+    bestScore,
+    runnerUp,
+    margin: runnerUp ? bestScore - runnerScore : Number.POSITIVE_INFINITY,
+  };
 }
 
 /** Keep only candidates whose pack/case qty matches the vendor's pack count

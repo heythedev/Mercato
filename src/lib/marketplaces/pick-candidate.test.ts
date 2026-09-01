@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import type { Product } from "@prisma/client";
-import { filterPackCompatible, listingQuality, pickBestCandidate, pickWalmartCandidate } from "./verify";
+import {
+  colourWordOf,
+  filterPackCompatible,
+  listingQuality,
+  measureContradiction,
+  pickBestCandidate,
+  pickBestCandidateDetailed,
+  pickWalmartCandidate,
+} from "./verify";
 
 type C = { name?: string; upc?: string };
 
@@ -322,6 +330,78 @@ describe("pickBestCandidate — quality-blind Synccentric pools", () => {
       [gouged, fair],
     );
     expect(picked.asin).toBe("FAIR");
+  });
+});
+
+// The vendor file states more identity than the title alone — colour, sizes,
+// weight. These signals separate same-UPC VARIANTS (colourways, sizes) that
+// title similarity and listing quality cannot, and a near-tie between two
+// different listings is routed to review instead of silently auto-picked.
+describe("pickBestCandidate — vendor-attribute agreement", () => {
+  const sameQuality = { brand: "Acme", salesRank: 50_000, reviewCount: 200, offerCount: 5 };
+
+  it("picks the vendor's colourway among same-UPC colour variants", () => {
+    const blue = { ...sameQuality, asin: "BLUE000001", title: "Acme Soft Throw Pillow Cover, Baby Blue" };
+    const grey = { ...sameQuality, asin: "GREY000001", title: "Acme Soft Throw Pillow Cover, Charcoal" };
+    const picked = pickBestCandidate(
+      product({ name: "THROW PILLOW SOFT CVR (Pack of 1)", brand: "Acme", vendorData: { color: "Baby Blue" } }),
+      [grey, blue],
+    );
+    expect(picked.asin).toBe("BLUE000001");
+  });
+
+  it("a contradicting stated size loses to the matching one", () => {
+    const rightSize = { ...sameQuality, asin: "FOUROZ0001", title: "Acme Wood Filler Light Oak 4 oz" };
+    const wrongSize = { ...sameQuality, asin: "SIXTEENOZ1", title: "Acme Wood Filler Light Oak 16 oz" };
+    const picked = pickBestCandidate(
+      product({ name: "WOOD FILLER LT OAK 4OZ (Pack of 1)", brand: "Acme" }),
+      [wrongSize, rightSize],
+    );
+    expect(picked.asin).toBe("FOUROZ0001");
+  });
+
+  it("reports a slim margin between genuinely ambiguous duplicates", () => {
+    const a = { ...sameQuality, asin: "DUPA000001", title: "Acme Garden Trowel Steel" };
+    const b = { ...sameQuality, asin: "DUPB000001", title: "Acme Garden Trowel, Steel", reviewCount: 210 };
+    const picked = pickBestCandidateDetailed(
+      product({ name: "GARDEN TROWEL STL (Pack of 1)", brand: "Acme" }),
+      [a, b],
+    )!;
+    expect(picked.runnerUp).not.toBeNull();
+    expect(picked.margin).toBeLessThan(6);
+  });
+
+  it("a clear winner reports a wide margin (auto-pick territory)", () => {
+    const canonical = { ...sameQuality, asin: "CANON00001", title: "Acme Garden Trowel Steel", reviewCount: 5000, salesRank: 3000 };
+    const junk = { asin: "JUNK000001", title: "Trowel", brand: "Other", salesRank: 2_000_000, reviewCount: 1, offerCount: 1 };
+    const picked = pickBestCandidateDetailed(
+      product({ name: "GARDEN TROWEL STL (Pack of 1)", brand: "Acme" }),
+      [junk, canonical],
+    )!;
+    expect(picked.best.asin).toBe("CANON00001");
+    expect(picked.margin).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("attribute-signal helpers", () => {
+  it("colourWordOf takes the earliest colour by position", () => {
+    expect(colourWordOf("Navy Blue Pillow with ivory trim")).toBe("navy blue");
+    expect(colourWordOf("ivory trim on a navy blue pillow")).toBe("ivory");
+    expect(colourWordOf("no colour stated here")).toBe("");
+  });
+
+  it("measureContradiction fires only on same-unit disagreement", () => {
+    expect(measureContradiction("WOOD FILLER 4OZ", "Wood Filler 16 oz")).toBe(-10);
+    expect(measureContradiction("WOOD FILLER 4OZ", "Wood Filler 4 oz")).toBe(0);
+    expect(measureContradiction("WOOD FILLER 4OZ", "Wood Filler Light Oak")).toBe(0);
+    // "N-in-1" product phrasing is not an inch measurement.
+    expect(measureContradiction('36" Plume Bundle', "2 in 1 Cleaner Spray")).toBe(0);
+  });
+
+  it("a matching measure earns nothing (feed-copying relists must not be rewarded)", () => {
+    // Same-value overlap → 0, not a bonus; the EMRY-1392331 pin above depends
+    // on this (the stale duplicate titles the feed's own "10 Lb").
+    expect(measureContradiction("PATCH DRIVE TROWEL 10LB", "Black Jack 10 Lb Hole Patch Repair")).toBe(0);
   });
 });
 
