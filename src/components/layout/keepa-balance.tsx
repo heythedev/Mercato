@@ -6,31 +6,37 @@ import { cn } from "@/lib/utils";
 
 type SyncBalance = { remaining: number | null; limit: number | null };
 type KeepaBal = { tokensLeft?: number; refillRate?: number; error?: string };
+type KimiBal = { availableBalance: number | null };
 
 /** Data-source balances for the sidebar. Amazon verification draws on BOTH
  *  sources in one run (Synccentric leads or backfills, Keepa covers the rest),
- *  so the widget shows each configured source's budget rather than picking
- *  one. Fetches once on mount; the refresh button forces a live probe. */
+ *  and every AI feature spends the Kimi balance — so the widget shows each
+ *  configured source's budget rather than picking one. Fetches once on mount;
+ *  the refresh button forces a live probe. */
 export function KeepaBalance() {
   const [sync, setSync] = useState<SyncBalance | null>(null);
   const [keepa, setKeepa] = useState<KeepaBal | null>(null);
+  const [kimi, setKimi] = useState<KimiBal | null>(null);
   // null until the first load answers — render a single loading row until then.
-  const [configured, setConfigured] = useState<{ sync: boolean; keepa: boolean } | null>(null);
+  const [configured, setConfigured] = useState<{ sync: boolean; keepa: boolean; kimi: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async (fresh: boolean) => {
     setLoading(true);
     try {
       // Independent sources — one failing must not blank the other.
-      const [scRes, kpRes] = await Promise.allSettled([
+      const [scRes, kpRes, kmRes] = await Promise.allSettled([
         fetch(`/api/synccentric/balance${fresh ? "?fresh=1" : ""}`, { cache: "no-store" }).then((r) => r.json()),
         fetch("/api/keepa/balance", { cache: "no-store" }).then((r) => r.json()),
+        fetch(`/api/kimi/balance${fresh ? "?fresh=1" : ""}`, { cache: "no-store" }).then((r) => r.json()),
       ]);
       const sc = scRes.status === "fulfilled" ? scRes.value : null;
       const kp = kpRes.status === "fulfilled" ? kpRes.value : null;
-      setConfigured({ sync: !!sc?.configured, keepa: !!kp?.configured });
+      const km = kmRes.status === "fulfilled" ? kmRes.value : null;
+      setConfigured({ sync: !!sc?.configured, keepa: !!kp?.configured, kimi: !!km?.configured });
       setSync(sc?.configured ? { remaining: sc.remaining ?? null, limit: sc.limit ?? null } : null);
       setKeepa(kp?.configured ? { tokensLeft: kp.tokensLeft, refillRate: kp.refillRate, error: kp.error } : null);
+      setKimi(km?.configured ? { availableBalance: km.availableBalance ?? null } : null);
     } catch {
       setKeepa({ error: "Failed to load" });
     } finally {
@@ -42,10 +48,10 @@ export function KeepaBalance() {
     load(false);
   }, [load]);
 
-  // Neither source configured on this environment — hide entirely.
-  if (configured && !configured.sync && !configured.keepa) return null;
+  // No source configured on this environment — hide entirely.
+  if (configured && !configured.sync && !configured.keepa && !configured.kimi) return null;
 
-  const rows: { label: string; value: string; detail: string | null }[] = [];
+  const rows: { label: string; value: string; detail: string | null; alert?: boolean }[] = [];
   if (!configured) {
     rows.push({ label: "Data sources", value: "…", detail: null });
   } else {
@@ -67,6 +73,19 @@ export function KeepaBalance() {
         detail: keepa?.refillRate ? `+${keepa.refillRate}/min` : null,
       });
     }
+    if (configured.kimi) {
+      // One balance funds EVERY AI feature (categorize, spec types, dropdown
+      // fills, vision checks, titles) — at $0 they all fail at once, so an
+      // empty balance is flagged loudly instead of blending into the list.
+      const bal = kimi?.availableBalance;
+      const empty = bal != null && bal <= 0;
+      rows.push({
+        label: "Kimi (AI) balance",
+        value: loading && bal == null ? "…" : bal != null ? `$${bal.toFixed(2)}` : "—",
+        detail: empty ? "top up — AI features failing" : null,
+        alert: empty,
+      });
+    }
   }
 
   return (
@@ -77,10 +96,12 @@ export function KeepaBalance() {
           {rows.map((r) => (
             <div key={r.label}>
               <p className="text-[11px] leading-tight text-muted-foreground">{r.label}</p>
-              <p className="truncate text-sm font-semibold tabular-nums">
+              <p className={cn("truncate text-sm font-semibold tabular-nums", r.alert && "text-red-600")}>
                 {r.value}
                 {r.detail ? (
-                  <span className="ml-1 text-[11px] font-normal text-muted-foreground">{r.detail}</span>
+                  <span className={cn("ml-1 text-[11px] font-normal", r.alert ? "text-red-600" : "text-muted-foreground")}>
+                    {r.detail}
+                  </span>
                 ) : null}
               </p>
             </div>
