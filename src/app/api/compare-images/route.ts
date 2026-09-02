@@ -35,7 +35,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
+import {
+  moonshot,
+  moonshotConfigured,
+  MOONSHOT_VISION_MODEL,
+  checkAiAvailable,
+  classifyAiError,
+  noThinkingHeaders,
+} from "@/lib/ai/moonshot";
 import { readBodyCapped, compressForVision } from "@/lib/ai/compare-images";
 
 // Moonshot (OpenAI-compatible) supports jpeg, png, gif, webp — NOT avif.
@@ -350,8 +357,9 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
           ...liveBlocks,
         ],
       }],
-      // Reasoning models (kimi-k line) spend output budget thinking first —
-      // a small cap returns an empty answer that reads as permanent "unsure".
+      // A one-word verdict needs no hidden reasoning — non-thinking mode
+      // answers directly instead of burning the budget on reasoning.
+      headers: noThinkingHeaders(MOONSHOT_VISION_MODEL),
       maxOutputTokens: 2000,
       abortSignal: signal,
     });
@@ -368,11 +376,21 @@ async function handlePost(req: NextRequest, signal: AbortSignal): Promise<NextRe
     console.log(`[compare-images] verdict=${verdict} reason="${reason}"`);
     return NextResponse.json({ verdict, reason });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[compare-images] Moonshot call failed:", msg);
+    const info = classifyAiError(err);
+    console.error(`[compare-images] Moonshot call ${info.fatal ? "rejected" : "failed"}:`, info.reason);
+    if (info.fatal) {
+      // Account-level failure (no balance, bad key, retired model): retrying
+      // cannot help, and the client must show the cause instead of a spinner.
+      return NextResponse.json({
+        verdict:   "unsure",
+        retryable: false,
+        fatal:     true,
+        reason:    info.reason,
+      });
+    }
     return NextResponse.json({
       verdict: "unsure",
-      reason:  "AI vision call failed — will retry automatically.",
+      reason:  `AI vision call failed (${info.reason}) — will retry automatically.`,
     });
   }
 }
@@ -392,6 +410,17 @@ let activeComparisons = 0;
  * that the proxy 502s everything — the exact failure this endpoint had.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // Preflight: a drained balance / dead key is reported as a final, fatal
+  // answer before any image is downloaded — never as a retryable "unsure".
+  const availability = await checkAiAvailable();
+  if (!availability.ok) {
+    return NextResponse.json({
+      verdict:   "unsure",
+      retryable: false,
+      fatal:     true,
+      reason:    availability.reason,
+    });
+  }
   // Shed load instead of queueing — the client treats "unsure" as retryable.
   if (activeComparisons >= MAX_CONCURRENT) {
     return NextResponse.json({

@@ -16,8 +16,10 @@ import { KeepaBalance } from "./keepa-balance";
 
 type Props = {
   role: string;
-  /** Whether to show the Keepa balance widget (Amazon-access users + admins). */
-  showKeepa?: boolean;
+  /** Whether the balance widget also lists the Amazon-only data sources
+   *  (Keepa tokens, Synccentric searches). The Kimi (AI) balance row shows
+   *  for everyone. */
+  showAmazonSources?: boolean;
 };
 
 const userNav = [
@@ -31,7 +33,7 @@ const adminNav = [
   { href: "/admin/templates", label: "Templates", icon: FileText },
 ];
 
-export function Sidebar({ role, showKeepa = false }: Props) {
+export function Sidebar({ role, showAmazonSources = false }: Props) {
   const path = usePathname();
   const isAdmin = role === "admin";
   const navItems = isAdmin ? adminNav : userNav;
@@ -132,9 +134,10 @@ export function Sidebar({ role, showKeepa = false }: Props) {
           })}
         </nav>
 
-        {/* Keepa token balance — pinned to the card footer. Amazon-specific,
-            so only shown to admins or users with Amazon access. */}
-        {showKeepa && <KeepaBalance />}
+        {/* Data-source balances — pinned to the card footer. The Kimi (AI)
+            balance shows for everyone (every AI feature spends it); the
+            Amazon-specific rows only for admins / users with Amazon access. */}
+        <KeepaBalance showAmazonSources={showAmazonSources} />
       </aside>
     </>
   );

@@ -1,5 +1,13 @@
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, moonshotTemperature, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
+import {
+  moonshot,
+  moonshotConfigured,
+  moonshotTemperature,
+  MOONSHOT_TEXT_MODEL,
+  AiUnavailableError,
+  classifyAiError,
+  getAiOutage,
+} from "@/lib/ai/moonshot";
 import { loadWalmartApprovedMap, loadWalmartProductTypes, productTypesForCategoryPath } from "@/lib/ai/walmart-taxonomy";
 
 // Walmart's "Spec Product Type" is the taxonomy's LEVEL 3 — the real product
@@ -340,6 +348,9 @@ Respond ONLY with a JSON array, no markdown:
         await flush(rows);
         return;
       } catch (err) {
+        // Account-level failure: no retry or split can help, and the route
+        // must report the cause instead of a silent all-blank pass.
+        if (classifyAiError(err).fatal) throw err;
         if (attempt < attempts) {
           await new Promise((r) => setTimeout(r, 400 * attempt));
           continue;
@@ -361,6 +372,10 @@ Respond ONLY with a JSON array, no markdown:
   let batchMsTotal = 0;
   let batchesRun = 0;
   for (let i = 0; i < batches.length; i += CONCURRENCY) {
+    // Provider outage: stop dispatching. Nothing would be assigned, and the
+    // route records the reason as specTypeError for the user to see.
+    const outage = getAiOutage();
+    if (outage) throw new AiUnavailableError(outage.reason);
     if (opts?.deadlineAt) {
       const avg = batchesRun > 0 ? batchMsTotal / batchesRun : 8_000;
       if (Date.now() + avg * 1.25 > opts.deadlineAt) {

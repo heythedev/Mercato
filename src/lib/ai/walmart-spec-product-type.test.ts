@@ -6,6 +6,12 @@ vi.mock("@/lib/ai/moonshot", () => ({
   moonshotConfigured: () => true,
   moonshotTemperature: () => 0.2,
   MOONSHOT_TEXT_MODEL: "test-model",
+  // AI availability guard: no outage in these tests, every failure transient.
+  getAiOutage: () => null,
+  classifyAiError: (e: unknown) => ({ fatal: false, reason: String(e) }),
+  AiUnavailableError: class AiUnavailableError extends Error {
+    constructor(readonly reason: string) { super(reason); }
+  },
 }));
 
 import { generateText } from "ai";

@@ -23,6 +23,7 @@ import {
   loadWalmartRichTaxonomy,
   loadWalmartProductTypes,
 } from "@/lib/ai/walmart-taxonomy";
+import { checkAiAvailable } from "@/lib/ai/moonshot";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
@@ -368,6 +369,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   });
   if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  // Preflight: categorization is entirely AI work, so a drained Kimi balance
+  // must refuse the run up front. Starting anyway would flip the project to
+  // "categorizing" and produce nothing but failed batches. Fresh probe — this
+  // runs once per run, not per chunk.
+  const availability = await checkAiAvailable({ fresh: true });
+  if (!availability.ok) {
+    return NextResponse.json(
+      { error: `Categorization can't start — ${availability.reason}`, code: "AI_UNAVAILABLE" },
+      { status: 503 },
+    );
+  }
 
   const jobId = `${id}_${Date.now()}`;
   const startedAt = Date.now();

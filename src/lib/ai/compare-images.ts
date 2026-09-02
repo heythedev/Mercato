@@ -1,6 +1,13 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, MOONSHOT_VISION_MODEL } from "@/lib/ai/moonshot";
+import {
+  moonshot,
+  moonshotConfigured,
+  MOONSHOT_VISION_MODEL,
+  classifyAiError,
+  getAiOutage,
+  noThinkingHeaders,
+} from "@/lib/ai/moonshot";
 
 export type ImageCompareVerdict = "match" | "mismatch" | "unsure";
 
@@ -11,6 +18,11 @@ export type ImageCompareResult = {
    *  and a later retry could succeed. Absent when the model actually looked at
    *  both images and said UNSURE — that verdict is final. */
   retryable?: boolean;
+  /** True when the AI provider could not serve the call at all (no balance,
+   *  rejected key, retired model). Nothing was learned about the product:
+   *  callers must leave the row untouched and stop the run, never count an
+   *  attempt or write a note. */
+  fatal?: boolean;
   /** Product colour as seen in each image, reported by the vision model on the
    *  same call. Used to fill a "Not stated" colour side in the verify report
    *  when neither the title nor the attributes named one. null = the model
@@ -306,6 +318,12 @@ function parseVisionResponse(text: string): ImageCompareResult {
   // before parsing or every verdict reads as UNSURE.
   const lines = text.replace(/[*_`#]/g, "").trim()
     .split("\n").map((l) => l.trim()).filter(Boolean);
+  // No text at all means the model never answered (a reasoning model that
+  // spent its whole output budget thinking, or a truncated reply). That is not
+  // a verdict on the images — retry it, don't finalize it as manual review.
+  if (!lines.length) {
+    return { verdict: "unsure", reason: "AI returned an empty answer.", retryable: true };
+  }
   const first = (lines[0] ?? "").toUpperCase();
   const colourLine = lines.find((l) => /^colou?rs?\s*:/i.test(l));
   const reason =
@@ -322,6 +340,28 @@ function parseVisionResponse(text: string): ImageCompareResult {
 
 // ── Single pair comparison ─────────────────────────────────────────────────────
 
+/** The provider cannot serve calls right now (balance / key / model). The row
+ *  must be left exactly as it is — see ImageCompareResult.fatal. */
+function unavailableResult(reason: string): ImageCompareResult {
+  return { verdict: "unsure", reason: `AI unavailable — ${reason}`, retryable: true, fatal: true };
+}
+
+/** Log a failed vision call and turn it into the right result: fatal when the
+ *  account itself is the problem, a retryable "unsure" otherwise. A bare
+ *  "AI vision call failed" once hid a whole model retirement for days — the
+ *  reviewer must see WHY without needing server logs. */
+function failedCallResult(productName: string, e: unknown): ImageCompareResult {
+  const info = classifyAiError(e);
+  const err = e as { responseBody?: string };
+  console.warn(
+    `[vision] call ${info.fatal ? "REJECTED (provider unavailable)" : "failed"} for ` +
+      `${JSON.stringify(productName)}: ${info.reason}` +
+      `${err?.responseBody ? ` — ${String(err.responseBody).slice(0, 300)}` : ""}`,
+  );
+  if (info.fatal) return unavailableResult(info.reason);
+  return { verdict: "unsure", reason: `AI vision call failed (${info.reason}).`, retryable: true };
+}
+
 export async function compareProductImages(
   vendorImageUrl: string,
   liveImageUrl: string,
@@ -330,6 +370,9 @@ export async function compareProductImages(
   if (!moonshotConfigured()) {
     return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
+  // Don't even download the images when the provider is known to be down.
+  const outage = getAiOutage();
+  if (outage) return unavailableResult(outage.reason);
 
   const [vendorImg, liveImg] = await Promise.all([
     fetchImageCached(vendorImageUrl),
@@ -362,33 +405,19 @@ export async function compareProductImages(
           ],
         },
       ],
-      // The kimi-k models spend output budget on internal reasoning before the
-      // final text; 200 tokens returned an EMPTY answer (all budget consumed
-      // reasoning), which parsed as a permanent "unsure". Billing is by actual
-      // usage, so the high cap costs nothing on short answers.
+      // A one-word verdict needs no hidden reasoning: with thinking on, the
+      // kimi-k2.6 model spent its whole output budget reasoning and returned
+      // EMPTY text for more than half of all products (billed at full output
+      // price). Non-thinking mode answers directly.
+      headers: noThinkingHeaders(MOONSHOT_VISION_MODEL),
+      // Generous cap so a model that still reasons (an env override to k3)
+      // has room to finish the visible answer. Billing is by actual usage.
       maxOutputTokens: 2000,
     });
     return parseVisionResponse(text);
   } catch (e) {
-    return { verdict: "unsure", reason: logVisionError(productName, e), retryable: true };
+    return failedCallResult(productName, e);
   }
-}
-
-/** Log the full vision-call failure AND return a short cause for the UI note.
- *  A bare "AI vision call failed" hid a whole model retirement for days — the
- *  reviewer must see WHY (model missing, auth, rate limit) without needing
- *  server logs. */
-function logVisionError(productName: string, e: unknown): string {
-  const err = e as { message?: string; statusCode?: number; responseBody?: string };
-  console.warn(
-    `[vision] call failed for ${JSON.stringify(productName)}: ` +
-      `${err.statusCode ? `HTTP ${err.statusCode} — ` : ""}${err.message ?? String(e)}` +
-      `${err.responseBody ? ` — ${String(err.responseBody).slice(0, 300)}` : ""}`,
-  );
-  const short = `${err.statusCode ? `HTTP ${err.statusCode}: ` : ""}${String(err.message ?? e)}`
-    .replace(/\s+/g, " ")
-    .slice(0, 140);
-  return `AI vision call failed${short ? ` (${short})` : "."}`;
 }
 
 /**
@@ -418,6 +447,9 @@ export async function compareVendorAgainstAllImages(
   if (!moonshotConfigured()) {
     return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
+  // Don't even download the images when the provider is known to be down.
+  const outage = getAiOutage();
+  if (outage) return unavailableResult(outage.reason);
 
   const [vendorImg, liveImg] = await Promise.all([
     fetchImageCached(vendorImageUrl),
@@ -453,15 +485,13 @@ export async function compareVendorAgainstAllImages(
           ],
         },
       ],
-      // The kimi-k models spend output budget on internal reasoning before the
-      // final text; 200 tokens returned an EMPTY answer (all budget consumed
-      // reasoning), which parsed as a permanent "unsure". Billing is by actual
-      // usage, so the high cap costs nothing on short answers.
+      // See compareProductImages: non-thinking mode for the one-word verdict.
+      headers: noThinkingHeaders(MOONSHOT_VISION_MODEL),
       maxOutputTokens: 2000,
     });
     return parseVisionResponse(text);
   } catch (e) {
-    return { verdict: "unsure", reason: logVisionError(productName, e), retryable: true };
+    return failedCallResult(productName, e);
   }
 }
 
@@ -499,6 +529,13 @@ export async function compareVendorAgainstAllImagesBatch(
 ): Promise<ImageCompareResult[]> {
   const results: ImageCompareResult[] = new Array(items.length);
   for (let i = 0; i < items.length; i += concurrency) {
+    // Once the provider is known to be down, don't start another wave: every
+    // remaining item is reported as fatal without a single download or call.
+    const outage = getAiOutage();
+    if (outage) {
+      for (let j = i; j < items.length; j++) results[j] = unavailableResult(outage.reason);
+      break;
+    }
     const batch = items.slice(i, i + concurrency);
     const settled = await Promise.all(
       batch.map((it) => compareVendorAgainstAllImages(it.vendorImageUrl, it.liveImageUrls, it.productName)),

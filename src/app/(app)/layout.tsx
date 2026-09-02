@@ -9,12 +9,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const role = (user as { role?: string }).role ?? "user";
   const isAdmin = role === "admin";
 
-  // Keepa is Amazon-specific — only surface the balance widget to admins or
-  // users granted the Amazon marketplace.
+  // The balance widget always renders — every user runs AI features, and the
+  // Kimi balance it shows is the one thing that explains ALL of them failing
+  // at once. Only the Amazon-specific rows (Keepa tokens, Synccentric
+  // searches) are gated to admins or users granted the Amazon marketplace.
   //
   // This is the only DB call in the layout that wraps the whole authenticated
   // app, so a DB outage here would 500 every page. Degrade instead: if the
-  // lookup fails, just don't show the widget — the rest of the UI still renders.
+  // lookup fails, just hide the Amazon rows — the rest of the UI still renders.
   let showKeepa = isAdmin;
   if (!isAdmin) {
     try {
@@ -32,7 +34,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <SidebarProvider>
       <div className="flex min-h-screen">
-        <Sidebar role={role} showKeepa={showKeepa} />
+        <Sidebar role={role} showAmazonSources={showKeepa} />
         <SidebarInset>
           {/* Floating action pill (theme + user menu) — replaces the old navbar */}
           <AppNavbar

@@ -418,6 +418,24 @@ negative costs a full keyword cascade while a false positive self-corrects.
 module-level cache, which would pin megabytes for the life of the process.
 Limits: 5 MB per image, `image/(jpeg|png|gif|webp)` only.
 
+**AI availability guard** ([moonshot.ts](src/lib/ai/moonshot.ts)). Every AI
+feature spends one Moonshot (Kimi) balance; when it drains the platform answers
+every call with HTTP 429 `exceeded_current_quota_error` — the same status as a
+rate limit. The provider fetch rewrites that into a non-retryable 402, records
+an outage so later calls short-circuit (no downloads, no SDK retries), and
+`checkAiAvailable()` is the preflight the verify, sweep, single re-verify,
+manual compare and categorize routes call before any AI work. A fatal failure
+(balance, key, retired model) is never written to a product: `applyAiVerificationPasses`
+returns `{ aiUnavailable, untouched }`, callers skip persisting `untouched`
+rows, the sweep answers `aiUnavailable`, and the verify step shows a red
+"paused" banner with Retry instead of a spinner. Rows finalized during an
+outage before this guard (notes matching `REQUEUE_NOTE_FRAGMENTS` in
+[image-check-state.ts](src/lib/marketplaces/image-check-state.ts)) are picked
+up by the sweep again and judged for real. The vision verdict call runs
+kimi-k2.6 in non-thinking mode (`thinking: disabled`, sent as a header the
+provider fetch turns into the body field) — with thinking on, more than half
+the calls returned empty text at full output price.
+
 **Prisma singleton** ([db.ts](src/lib/db.ts)) — cached on `globalThis` in
 development to survive HMR; pg pool with `keepAlive`, 30s idle, 10s connect timeout.
 

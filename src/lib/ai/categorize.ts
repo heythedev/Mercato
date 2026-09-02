@@ -543,7 +543,12 @@ export async function categorizeProducts(
               const idx = allResults.findIndex((a) => a.productId === r.productId);
               if (idx !== -1) { allResults[idx] = r; changed.push(r); }
             }
-          } catch {
+          } catch (err) {
+            // An account-level failure (balance, key, model) during the retry
+            // pass must abort the run like it does in the main pass — stamping
+            // the rest "Uncategorized" would record an outage as a verdict.
+            const systemic = classifySystemicError(err);
+            if (systemic) throw systemic;
             for (const p of batch) {
               const idx = allResults.findIndex((a) => a.productId === p.id);
               if (idx !== -1) {

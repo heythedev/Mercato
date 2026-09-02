@@ -10,6 +10,7 @@ import { cn, formatDuration } from "@/lib/utils";
 import { LottieLoader } from "@/components/ui/lottie-loader";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
+import { isImageCheckPending } from "@/lib/marketplaces/image-check-state";
 
 type FieldResult = {
   field: string;
@@ -115,11 +116,21 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   // Progress shown as a banner above the product list while the batch runs.
   const [bgCheckStatus, setBgCheckStatus] = useState<{
     total: number; done: number; current: string | null;
+    /** Set when the AI provider cannot serve calls (drained Kimi balance,
+     *  rejected key, retired model). The sweep is stopped, nothing is being
+     *  written, and the banner turns red with this reason and a Retry. */
+    paused?: string;
   } | null>(null);
   // Prevents two concurrent sweep drivers if the effect fires twice.
   const sweepRunningRef = useRef(false);
   // Raised when a verify run starts so an in-flight sweep stops cleanly.
   const sweepStopRef = useRef(false);
+  // Raised when the sweep stopped on a provider outage. The auto-start effect
+  // must not relaunch it on every state change — only an explicit Retry (or a
+  // new verify run, i.e. the user acted) lifts it.
+  const sweepHaltedRef = useRef(false);
+  // One toast per outage, not one per chunk/product.
+  const pauseToastRef = useRef(false);
   // Always-fresh product list for async callbacks that outlive a render cycle.
   const productsRef = useRef(products);
 
@@ -242,8 +253,19 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         return;
       }
 
-      const data = await res.json() as { verdict: string; reason: string; retryable?: boolean };
+      const data = await res.json() as { verdict: string; reason: string; retryable?: boolean; fatal?: boolean };
       const { verdict, reason } = data;
+
+      // The AI provider itself is unavailable (no balance, bad key, retired
+      // model). Not a verdict on this product — say so, once, and stop.
+      if (data.fatal) {
+        setFinal("unsure", `AI image check paused — ${reason}`);
+        if (!pauseToastRef.current) {
+          pauseToastRef.current = true;
+          toast.error(`AI image checks paused — ${reason}`, { duration: 12_000 });
+        }
+        return;
+      }
 
       // Permanent failure (broken/invalid image link) — retrying can't help.
       if (data.retryable === false) {
@@ -358,12 +380,15 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
    * Sweeps EVERY verified status, not just Warning: pending images are a soft
    * field, so a product with an unchecked image can sit at Match.
    */
-  async function runImageSweep() {
+  async function runImageSweep(opts?: { fresh?: boolean }) {
     if (sweepRunningRef.current) return;
     sweepRunningRef.current = true;
     sweepStopRef.current = false;
 
     let sawCleanFinish = false;
+    let paused: string | null = null;
+    // A manual Retry asks the server to re-probe the balance live (once).
+    let fresh = opts?.fresh ?? false;
     try {
       // One round = one cursor walk over the whole project. Later rounds retry
       // products whose attempt failed transiently; the server counts attempts
@@ -383,15 +408,17 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             nextCursor: string | null;
             pendingTotal: number;
             lastName: string | null;
+            aiUnavailable?: string;
           } | null = null;
           try {
             const res = await fetch(`/api/projects/${projectId}/verify/images`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ cursor }),
+              body: JSON.stringify({ cursor, ...(fresh ? { fresh: true } : {}) }),
             });
             if (res.ok) data = await res.json();
           } catch { /* network error — backoff below */ }
+          fresh = false;
 
           if (!data) {
             // Server busy, restarting, or asleep (free tier). Back off, and
@@ -402,10 +429,27 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             continue;
           }
           failures = 0;
+          if (data.results?.length) onProductsUpdated(data.results);
+
+          if (data.aiUnavailable) {
+            // The AI provider cannot serve calls (drained Kimi balance, bad
+            // key, retired model). The server wrote NOTHING for the rows it
+            // could not judge — stop here and show why, instead of walking the
+            // whole queue recording failures as "manual review".
+            paused = data.aiUnavailable;
+            const total = announcedTotal ?? data.pendingTotal;
+            setBgCheckStatus({
+              total,
+              done: Math.max(0, total - data.pendingTotal),
+              current: null,
+              paused,
+            });
+            return;
+          }
+
           processedThisRound += data.processed;
           pending = data.pendingTotal;
           if (announcedTotal === null) announcedTotal = data.pendingTotal + data.processed;
-          if (data.results?.length) onProductsUpdated(data.results);
           setBgCheckStatus({
             total: announcedTotal,
             done: Math.max(0, Math.min(announcedTotal, announcedTotal - data.pendingTotal)),
@@ -426,9 +470,26 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         await sleep(3_000);
       }
     } finally {
-      setBgCheckStatus(null);
+      if (paused) {
+        // Keep the red banner up and block auto-restarts until Retry.
+        sweepHaltedRef.current = true;
+        if (!pauseToastRef.current) {
+          pauseToastRef.current = true;
+          toast.error(`AI image checks paused — ${paused}`, { duration: 12_000 });
+        }
+      } else {
+        setBgCheckStatus(null);
+      }
       sweepRunningRef.current = false;
     }
+  }
+
+  /** The user topped up (or fixed the key): probe the balance live and resume. */
+  function retryImageSweep() {
+    sweepHaltedRef.current = false;
+    pauseToastRef.current = false;
+    setBgCheckStatus(null);
+    runImageSweep({ fresh: true });
   }
 
   // Kick off the sweep whenever verified products still carry the server's
@@ -437,20 +498,23 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
   useEffect(() => {
     if (loading) {
       // A verify run owns the products now; stop the sweep at its next chunk
-      // boundary. It restarts automatically when the run finishes.
+      // boundary. It restarts automatically when the run finishes — and a new
+      // run means the user acted (possibly after a top-up), so lift the halt.
       sweepStopRef.current = true;
+      sweepHaltedRef.current = false;
       return;
     }
-    if (sweepRunningRef.current) return;
+    if (sweepRunningRef.current || sweepHaltedRef.current) return;
 
+    // "Pending" is the same predicate the server sweep uses: rows carrying the
+    // "not compared" marker AND rows that were closed without a verdict during
+    // a provider outage (those are re-queued and judged for real).
     type FR = { field: string; stored?: string; liveImage?: string; note?: string };
     const hasPending = products.some(p => {
       if (p.verifyStatus !== "ok" && p.verifyStatus !== "warning" && p.verifyStatus !== "mismatch") return false;
       const fields = (p.verifyFields ?? []) as FR[];
       const img = fields.find(f => f.field === "images");
-      return !!img?.note?.includes("not compared") &&
-        !!img.stored?.startsWith("http") &&
-        !!img.liveImage?.startsWith("http");
+      return !!img && isImageCheckPending(img);
     });
     if (!hasPending) return;
 
@@ -722,7 +786,29 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
         <div className="space-y-2">
 
           {/* ── Background batch image-check progress banner ───────────────────── */}
-          {bgCheckStatus && (
+          {bgCheckStatus?.paused && (
+            <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-[12px] text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold">AI image checks paused — nothing is being written</p>
+                <p className="mt-0.5 text-red-700/80 dark:text-red-300/80">{bgCheckStatus.paused}</p>
+                <p className="mt-0.5 text-red-700/80 dark:text-red-300/80">
+                  {(bgCheckStatus.total - bgCheckStatus.done).toLocaleString()} product image
+                  {bgCheckStatus.total - bgCheckStatus.done === 1 ? "" : "s"} still waiting. Once the account has
+                  credit again, click Retry — the queue continues exactly where it stopped.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={retryImageSweep}
+                className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-red-500/40 bg-background text-[12px] font-medium text-red-700 hover:bg-red-500/10 transition dark:text-red-300"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            </div>
+          )}
+          {bgCheckStatus && !bgCheckStatus.paused && (
             <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-2.5 text-[12px] text-blue-700 dark:text-blue-300">
               {bgCheckStatus.done < bgCheckStatus.total ? (
                 <>

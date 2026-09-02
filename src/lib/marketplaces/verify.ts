@@ -6,6 +6,7 @@ import {
   cacheCodeLookup, cacheCodeLookups,
   cacheProducts, newCacheStats, logCacheStats,
 } from "@/lib/keepa/cache";
+import { isImageCheckPending, needsImageRequeue, requeueImageField } from "@/lib/marketplaces/image-check-state";
 
 /** Keepa domain for amazon.com. Verification is US-only today. */
 const KEEPA_DOMAIN = 1;
@@ -142,12 +143,24 @@ export async function verifyProducts(
  * from a vision check, while a warning/mismatch is exactly where AI adjudication
  * changes the verdict.
  */
+export type AiPassOutcome = {
+  /** Set when the AI provider could not serve calls at all (drained balance,
+   *  rejected key, retired model). The run must stop and tell the user. */
+  aiUnavailable: string | null;
+  /** Product ids whose fields were left exactly as they were because their
+   *  call hit the outage. Callers must NOT persist these as AI results — an
+   *  outage is not a verdict, and writing it once turned thousands of never-
+   *  checked products into "Needs manual review". */
+  untouched: Set<string>;
+};
+
 export async function applyAiVerificationPasses(
   results: VerifyResult[],
   products: Product[],
   marketplace: string,
   options?: { onlyFlagged?: boolean },
-): Promise<void> {
+): Promise<AiPassOutcome> {
+  const outcome: AiPassOutcome = { aiUnavailable: null, untouched: new Set() };
   let targets = results;
   if (options?.onlyFlagged) {
     // Keep flagged products AND any whose images were never compared. Filtering
@@ -155,22 +168,27 @@ export async function applyAiVerificationPasses(
     // "ok" (a warning must mean something looks wrong, not that we didn't look),
     // so those products are "ok" overall — yet they are exactly what a deep
     // check is for. Callers may pre-narrow the set; this is a safety net for
-    // direct callers, not the primary filter.
+    // direct callers, not the primary filter. "Pending" includes rows that were
+    // closed without a verdict during a provider outage — those are re-queued.
     targets = results.filter(
       (r) =>
         r.status === "warning" ||
         r.status === "mismatch" ||
-        r.fields.some(
-          (f) => f.field === "images" && f.note?.includes("not compared"),
-        ),
+        r.fields.some((f) => f.field === "images" && isImageCheckPending(f)),
     );
-    if (!targets.length) return;
+    if (!targets.length) return outcome;
     // Narrow the product list to match, so the passes don't scan the full set.
     const ids = new Set(targets.map((r) => r.productId));
     products = products.filter((p) => ids.has(p.id));
   }
-  await applyImageComparison(targets, products);
-  if (marketplace === "walmart") await applySemanticTitleCheck(targets, products);
+  const images = await applyImageComparison(targets, products);
+  outcome.aiUnavailable = images.aiUnavailable;
+  for (const id of images.untouched) outcome.untouched.add(id);
+  // The title check would only hit the same outage; skip it and report once.
+  if (marketplace === "walmart" && !outcome.aiUnavailable) {
+    outcome.aiUnavailable = await applySemanticTitleCheck(targets, products);
+  }
+  return outcome;
 }
 
 // ── AI image comparison post-pass ─────────────────────────────────────────────
@@ -180,9 +198,10 @@ export async function applyAiVerificationPasses(
 // "mismatch" (visibly different product). "unsure" keeps the manual-review
 // warning. Degrades gracefully: without an API key nothing changes.
 
-async function applyImageComparison(results: VerifyResult[], products: Product[]): Promise<void> {
+async function applyImageComparison(results: VerifyResult[], products: Product[]): Promise<AiPassOutcome> {
+  const outcome: AiPassOutcome = { aiUnavailable: null, untouched: new Set() };
   const { moonshotConfigured } = await import("@/lib/ai/moonshot");
-  if (!moonshotConfigured()) return;
+  if (!moonshotConfigured()) return outcome;
 
   const isUrl = (v: string | undefined): v is string => !!v && v.startsWith("http");
   const nameById = new Map(products.map((p) => [p.id, p.name]));
@@ -201,9 +220,13 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
     const liveImages = Array.isArray(r.liveData.images) ? r.liveData.images as string[] : [];
     const liveImageUrls = liveImages.filter(isUrl).slice(0, 3);
     if (!liveImageUrls.length) continue;
+    // A row finalized earlier only because the AI could not run (or answered
+    // nothing) was never judged. Put it back into the pending state first so
+    // its attempt budget starts fresh and the note is honest about why.
+    if (needsImageRequeue(field)) requeueImageField(field);
     targets.push({ result: r, field, liveImageUrls });
   }
-  if (!targets.length) return;
+  if (!targets.length) return outcome;
 
   const { compareVendorAgainstAllImagesBatch } = await import("@/lib/ai/compare-images");
   const verdicts = await compareVendorAgainstAllImagesBatch(
@@ -220,6 +243,14 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
   // aren't falsely flagged. Hard fields come from the shared HARD_FIELDS above.
   targets.forEach((t, i) => {
     const v = verdicts[i];
+    if (v.fatal) {
+      // The provider could not serve this call at all. Nothing was learned
+      // about the product, so nothing is written: no attempt counted, no note
+      // changed, no status moved. The caller stops the run and tells the user.
+      outcome.aiUnavailable ??= v.reason;
+      outcome.untouched.add(t.result.productId);
+      return;
+    }
     if (v.verdict === "match") {
       t.field.severity = "ok";
       t.field.match = true;
@@ -256,6 +287,7 @@ async function applyImageComparison(results: VerifyResult[], products: Product[]
     if (v.colours) applyImageColourFallback(t.result, v.colours);
     t.result.status = rollupStatus(t.result);
   });
+  return outcome;
 }
 
 /** Canonicalise a free-text colour the vision model reported ("dark brown",
@@ -316,9 +348,13 @@ function applyImageColourFallback(
 // ask Claude whether the two titles refer to the same product. This upgrades
 // genuine matches to "ok" and catches semantic mismatches word-overlap misses.
 
-async function applySemanticTitleCheck(results: VerifyResult[], products: Product[]): Promise<void> {
-  const { moonshotConfigured } = await import("@/lib/ai/moonshot");
-  if (!moonshotConfigured()) return;
+/** Returns the outage reason when the provider went unavailable mid-pass (the
+ *  remaining titles are left as they were), otherwise null. */
+async function applySemanticTitleCheck(results: VerifyResult[], products: Product[]): Promise<string | null> {
+  const { moonshotConfigured, getAiOutage, classifyAiError } = await import("@/lib/ai/moonshot");
+  if (!moonshotConfigured()) return null;
+  const known = getAiOutage();
+  if (known) return known.reason;
 
   const nameById = new Map(products.map((p) => [p.id, p.name]));
 
@@ -336,13 +372,18 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
     if (!vendorTitle || !liveTitle) continue;
     targets.push({ result: r, field, vendorTitle, liveTitle });
   }
-  if (!targets.length) return;
+  if (!targets.length) return null;
 
   const { generateText } = await import("ai");
   const { moonshot, MOONSHOT_TEXT_MODEL } = await import("@/lib/ai/moonshot");
 
+  let unavailable: string | null = null;
   const CONCURRENCY = 5;
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    // Stop starting waves once the provider is down — every call would fail
+    // identically, and a failure here never writes anything anyway.
+    const active = unavailable ? { reason: unavailable } : getAiOutage();
+    if (active) { unavailable = active.reason; break; }
     const batch = targets.slice(i, i + CONCURRENCY);
     await Promise.all(batch.map(async (t) => {
       try {
@@ -378,9 +419,15 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
         // Recompute overall status after AI title verdict (shared rollup —
         // pending image checks stay soft, concluded ones escalate).
         t.result.status = rollupStatus(t.result);
-      } catch { /* leave existing severity in place */ }
+      } catch (e) {
+        // Existing severity stays in place either way; a fatal failure also
+        // ends the pass so the run can report the outage.
+        const info = classifyAiError(e);
+        if (info.fatal) unavailable ??= info.reason;
+      }
     }));
   }
+  return unavailable;
 }
 
 // ── Amazon (Keepa) ────────────────────────────────────────────────────────────

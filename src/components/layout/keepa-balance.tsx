@@ -11,9 +11,12 @@ type KimiBal = { availableBalance: number | null };
 /** Data-source balances for the sidebar. Amazon verification draws on BOTH
  *  sources in one run (Synccentric leads or backfills, Keepa covers the rest),
  *  and every AI feature spends the Kimi balance — so the widget shows each
- *  configured source's budget rather than picking one. Fetches once on mount;
- *  the refresh button forces a live probe. */
-export function KeepaBalance() {
+ *  configured source's budget rather than picking one. The Kimi row shows for
+ *  every user; the Amazon rows only when `showAmazonSources`. Fetches on
+ *  mount, again whenever the tab becomes visible and every few minutes, so a
+ *  balance that drains mid-session turns red without a reload; the refresh
+ *  button forces a live probe. */
+export function KeepaBalance({ showAmazonSources = false }: { showAmazonSources?: boolean }) {
   const [sync, setSync] = useState<SyncBalance | null>(null);
   const [keepa, setKeepa] = useState<KeepaBal | null>(null);
   const [kimi, setKimi] = useState<KimiBal | null>(null);
@@ -46,16 +49,24 @@ export function KeepaBalance() {
 
   useEffect(() => {
     load(false);
+    const REFRESH_MS = 5 * 60_000;
+    const iv = setInterval(() => {
+      if (document.visibilityState === "visible") load(false);
+    }, REFRESH_MS);
+    const onVisible = () => { if (document.visibilityState === "visible") load(false); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVisible); };
   }, [load]);
 
-  // No source configured on this environment — hide entirely.
-  if (configured && !configured.sync && !configured.keepa && !configured.kimi) return null;
+  // Nothing to show for this user on this environment — hide entirely.
+  const showsAmazon = showAmazonSources && !!(configured?.sync || configured?.keepa);
+  if (configured && !configured.kimi && !showsAmazon) return null;
 
   const rows: { label: string; value: string; detail: string | null; alert?: boolean }[] = [];
   if (!configured) {
     rows.push({ label: "Data sources", value: "…", detail: null });
   } else {
-    if (configured.sync) {
+    if (configured.sync && showAmazonSources) {
       // The API relays Synccentric's own header, which goes negative once the
       // day's quota is overrun — clamp for display; "0 left" is the message.
       const remaining = sync?.remaining != null ? Math.max(0, sync.remaining) : null;
@@ -65,7 +76,7 @@ export function KeepaBalance() {
         detail: sync?.limit != null ? `of ${sync.limit.toLocaleString()} today` : null,
       });
     }
-    if (configured.keepa) {
+    if (configured.keepa && showAmazonSources) {
       rows.push({
         label: "Keepa tokens",
         value: loading && keepa?.tokensLeft == null ? "…"

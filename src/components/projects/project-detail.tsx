@@ -215,6 +215,9 @@ export function ProjectDetail({ project: initial, productCount }: {
     try {
       let totalVerified = 0;
       let totalSkipped = 0;
+      // The AI post-pass reports a provider outage on every pass it skipped —
+      // warn once per run, not once per pass.
+      let aiPausedWarned = false;
       // Only the first request carries `force`; the follow-up passes must resume
       // (force=1 would re-check the products we just finished, and never end).
       let useForce = force;
@@ -245,6 +248,7 @@ export function ProjectDetail({ project: initial, productCount }: {
           verified?: number;
           skipped?: number;
           remaining?: number;
+          aiUnavailable?: string;
         } | null = null;
         for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
           if (attempt > 0) await new Promise((r) => setTimeout(r, retryDelaysMs[attempt - 1]));
@@ -283,6 +287,14 @@ export function ProjectDetail({ project: initial, productCount }: {
 
         totalVerified += data.verified ?? 0;
         totalSkipped += data.skipped ?? 0;
+
+        if (data.aiUnavailable && !aiPausedWarned) {
+          aiPausedWarned = true;
+          toast.warning(
+            `Marketplace checks are running, but AI image checks are paused — ${data.aiUnavailable}`,
+            { duration: 12_000 },
+          );
+        }
 
         const remaining = data.remaining ?? 0;
         if (remaining > 0) {
@@ -703,7 +715,11 @@ export function ProjectDetail({ project: initial, productCount }: {
           verifiedAt: u.verifiedAt ? new Date(u.verifiedAt) : p.verifiedAt,
         }
       : p));
-    toast.success("Product re-verified");
+    if (typeof data.aiUnavailable === "string") {
+      toast.warning(`Re-verified against the marketplace, but the AI image check is paused — ${data.aiUnavailable}`, { duration: 12_000 });
+    } else {
+      toast.success("Product re-verified");
+    }
   }
 
   /** Merge rows the background image sweep already persisted server-side into

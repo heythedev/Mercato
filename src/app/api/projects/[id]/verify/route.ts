@@ -17,6 +17,7 @@ import {
   estimateAmazonVerifyTokens,
   refreshKeepaTokens,
 } from "@/lib/keepa/client";
+import { checkAiAvailable } from "@/lib/ai/moonshot";
 
 // Products per lookup batch — also the page size for streaming rows out of the
 // database. Each batch is the unit of both progress and memory: rows are
@@ -415,6 +416,10 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   let totalSkipped = 0;
   let attempted = 0;
   let ranOutOfTime = false;
+  // Set when the AI post-pass could not run (drained Kimi balance, rejected
+  // key, retired model). Lookups still complete — they don't need the AI —
+  // and the affected rows keep their "not compared" marker for the sweep.
+  let aiUnavailable = null as string | null;
 
   // Accumulate only the flagged results for the AI post-pass — and only the
   // parts of them the passes actually read. A full VerifyResult drags its raw
@@ -527,8 +532,15 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         );
       }
       if (useAi && flaggedResults.length > 0 && flaggedResults.length <= AI_INLINE_MAX) {
+        // Preflight, like the Keepa token check above: a drained balance is
+        // reported up front instead of discovered one failed call at a time.
+        const availability = await checkAiAvailable();
+        if (!availability.ok) {
+          aiUnavailable = availability.reason;
+          console.warn(`[verify] AI post-pass skipped — ${availability.reason}`);
+        }
         const productById = new Map(flaggedNames.map((p) => [p.id, p]));
-        for (let i = 0; i < flaggedResults.length; i += AI_CHUNK) {
+        for (let i = 0; availability.ok && i < flaggedResults.length; i += AI_CHUNK) {
           // Belt-and-braces: never let the AI phase push the request past the
           // budget the lookup loop already respects — return cleanly instead.
           if (Date.now() - startedAt > TIME_BUDGET_MS) break;
@@ -536,7 +548,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
           const sliceProducts = slice
             .map((r) => productById.get(r.productId))
             .filter((p): p is { id: string; name: string } => !!p);
-          await applyAiVerificationPasses(
+          const outcome = await applyAiVerificationPasses(
             slice,
             sliceProducts as unknown as Parameters<typeof applyAiVerificationPasses>[1],
             project.marketplace,
@@ -544,10 +556,15 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
           );
           // Re-persist only the rows the AI pass could have changed. liveData /
           // asin / price / upc were already written in the batch loop above.
+          // Rows the outage left untouched are not AI results — skip them.
           await persistResults(
-            slice.filter((r) => r.status !== "skipped"),
+            slice.filter((r) => r.status !== "skipped" && !outcome.untouched.has(r.productId)),
             { statusAndFieldsOnly: true },
           );
+          if (outcome.aiUnavailable) {
+            aiUnavailable = outcome.aiUnavailable;
+            break;
+          }
         }
       }
     });
@@ -577,6 +594,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       complete,
       partial: ranOutOfTime,
       totalProducts,
+      ...(aiUnavailable ? { aiUnavailable } : {}),
     });
   } catch (err) {
     // Work already committed to the DB is preserved; the project drops back to

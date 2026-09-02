@@ -54,6 +54,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { withImageCache } = await import("@/lib/ai/compare-images");
 
   try {
+    // Set when the AI passes could not run (drained Kimi balance, rejected
+    // key, retired model). The marketplace lookup below still stands — its
+    // fields simply keep the "not compared" marker for the background sweep.
+    let aiUnavailable = null as string | null;
     const [result] = await withImageCache(async () => {
       // Leave the AI pass ~20s of the 60s budget; the deadline keeps any
       // token-refill wait inside what remains.
@@ -62,11 +66,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         [product] as Parameters<typeof verifyProducts>[1],
         { skipAiPasses: true, deadline: startedAt + (maxDuration - 20) * 1000 },
       );
-      await applyAiVerificationPasses(
+      const outcome = await applyAiVerificationPasses(
         results,
         [product] as Parameters<typeof applyAiVerificationPasses>[1],
         project.marketplace,
       );
+      aiUnavailable = outcome.aiUnavailable;
       return results;
     });
 
@@ -105,7 +110,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       },
     });
 
-    return NextResponse.json({ product: updated });
+    return NextResponse.json({ product: updated, ...(aiUnavailable ? { aiUnavailable } : {}) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Verification failed";
     return NextResponse.json({ error: msg }, { status: 500 });
