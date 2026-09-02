@@ -1,6 +1,25 @@
-allowBuilds:
-  sharp: set this to true or false
-  unrs-resolver: set this to true or false
-ignoredBuiltDependencies:
+# Dependencies whose install/postinstall build scripts pnpm may run.
+#
+# pnpm 10.3+ fails `pnpm install` outright (ERR_PNPM_IGNORED_BUILDS —
+# strictDepBuilds defaults to true) when a dependency with a build script is
+# not reviewed here. That is what killed every Vercel build on 2026-09-02:
+# @prisma/engines, prisma and esbuild were never listed, and the previous
+# file even *ignored* sharp, whose build downloads the libvips binary the
+# image compression in lib/ai/compare-images.ts needs.
+#
+# Both spellings are kept on purpose: `onlyBuiltDependencies` is what pnpm 10
+# (Vercel's version) reads; `allowBuilds` is its pnpm 10.26+/11 replacement.
+# When a new dependency with a build script is added, list it in BOTH.
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - esbuild
+  - prisma
   - sharp
   - unrs-resolver
+
+allowBuilds:
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true
+  sharp: true
+  unrs-resolver: true
