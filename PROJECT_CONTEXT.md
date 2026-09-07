@@ -343,13 +343,28 @@ bundled into the serverless function.
    exclude a product from export and surface it for review than to file it wrongly.
 
 **SKU-only sheet enrichment** ([resolve-sku.ts](src/lib/ai/resolve-sku.ts) +
-[vendor-catalog.ts](src/lib/ai/vendor-catalog.ts)): Mathis furniture sheets often
-contain nothing but codes like `TOVF-TOVL54566`. Resolution order is the vendor's
-own Shopify `/products.json` catalog (downloaded once, indexed by normalized SKU,
-digit-core and series letter, cached 24h) → web search → give up. When a catalog
+[vendor-catalog.ts](src/lib/ai/vendor-catalog.ts) +
+[category-reuse.ts](src/lib/categorize/category-reuse.ts)): Mathis furniture sheets
+often contain nothing but codes like `TOVF-TOVL54566`. Resolution order is
+**cross-project SKU reuse** (`findResolvedNamesBySku`: one bulk DB query — any
+OTHER project, any user, any marketplace, that already carries a real name for the
+exact same vendor SKU; carries name/brand/description/UPC/main image only, never
+the source row's cost/price/listing fields) → the vendor's own Shopify
+`/products.json` catalog (downloaded once, indexed by normalized SKU, digit-core
+and series letter, cached 24h; only `VENDORS` in vendor-catalog.ts — TOV Furniture
+and Modway today) → web search (only with `SERPAPI_KEY`) → give up. When a catalog
 entry is found, the vendor's JSON-LD breadcrumb category is also pulled, which
 resolves the multi-room-tag ambiguity. Resolved titles/brands/descriptions are
-written back to the `Product` row.
+written back to the `Product` row; a reused UPC/image fills the column only when
+the row had none. The cross-project step exists because the same wholesale
+catalog routinely gets uploaded once with every column for one marketplace and
+once as a bare SKU list for another (real case: 600 of a 4,811-row bare "VIDA-"
+Mathis sheet — vidaXL — were already fully described in an earlier Walmart
+upload). A row that is STILL a bare code after all of this, with no description
+or vendor category, is never sent to the categorize model at all
+(`isUnresolvedSkuOnly`): the bulletproofing gate would discard the verdict
+regardless, so it is marked `Uncategorized` directly and the run reports the
+count (`skuOnlyUnresolved`).
 
 **Re-runs are idempotent by default**: only products with no category or
 `Uncategorized` are reprocessed. `{ force: true }` redoes everything.

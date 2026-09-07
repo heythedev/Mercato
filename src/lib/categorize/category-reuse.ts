@@ -98,3 +98,102 @@ export async function findReusableCategories(
   }
   return out;
 }
+
+// ── Cross-project SKU identity reuse ─────────────────────────────────────────
+// The twin of the above for a product's IDENTITY rather than its category. A
+// vendor sheet that is nothing but bare codes ("VIDA-134814") gives every
+// resolver nothing to work with — unless some OTHER upload, in any project,
+// already carried the full record for the exact same vendor SKU. That happens
+// constantly: the same wholesale catalog gets exported once with every column
+// (name, description, UPC, images) for one marketplace and once as a bare SKU
+// list for another. The Product table already holds the first export, so the
+// second can be filled from it for free — no network, no AI, no guessing:
+// an exact SKU match on the vendor's own code is as authoritative as the
+// vendor catalog itself.
+//
+// Unlike category reuse this is NOT marketplace-scoped: what a product IS
+// doesn't depend on where it's being listed (the real-world case that
+// motivated this was a Walmart upload filling a Mathis one). It carries only
+// product-identity fields — name, brand, description, UPC, main image — and
+// deliberately nothing from the source row's vendorData beyond those: that
+// blob holds the client's own cost/price/commission/listing-note fields,
+// which have no business crossing into another project.
+
+export type ResolvedSkuIdentity = {
+  name: string;
+  brand: string | null;
+  description: string | null;
+  upc: string | null;
+  imageUrl: string | null;
+};
+
+/** Normalize a vendor SKU the same way for both the lookup key and the query. */
+export function normalizeSku(sku: string): string {
+  return sku.trim().toLowerCase();
+}
+
+/**
+ * Look up products in any OTHER project (any user, any marketplace) whose
+ * vendor SKU exactly matches one of `skus` and that carry a real name for it
+ * (a name that is not simply the SKU itself — the cheap SQL-side guard; the
+ * caller applies looksLikeSkuName as the full one). Ties broken by most
+ * recently updated. Returns a Map keyed by `normalizeSku(sku)`. Never throws.
+ */
+export async function findResolvedNamesBySku(
+  excludeProjectId: string,
+  skus: string[],
+): Promise<Map<string, ResolvedSkuIdentity>> {
+  const out = new Map<string, ResolvedSkuIdentity>();
+  const normSet = new Set(skus.map(normalizeSku).filter(Boolean));
+  if (!normSet.size) return out;
+  const normSkus = [...normSet];
+
+  try {
+    for (let i = 0; i < normSkus.length; i += CHUNK) {
+      const slice = normSkus.slice(i, i + CHUNK);
+      const rows = await prisma.$queryRaw<
+        Array<{
+          norm_sku: string;
+          name: string;
+          brand: string | null;
+          description: string | null;
+          upc: string | null;
+          image_url: string | null;
+        }>
+      >`
+        SELECT DISTINCT ON (norm_sku)
+          norm_sku, name, brand, description, upc, image_url
+        FROM (
+          SELECT
+            lower(trim(pr."vendorSku")) AS norm_sku,
+            pr.name AS name,
+            pr.brand AS brand,
+            pr.description AS description,
+            pr.upc AS upc,
+            pr."imageUrl" AS image_url,
+            pr."updatedAt" AS updated_at
+          FROM "Product" pr
+          WHERE pr."projectId" <> ${excludeProjectId}
+            AND pr."vendorSku" IS NOT NULL
+            AND pr.name IS NOT NULL
+            AND trim(pr.name) <> ''
+            AND lower(trim(pr.name)) <> lower(trim(pr."vendorSku"))
+            AND lower(trim(pr."vendorSku")) = ANY(${slice}::text[])
+        ) matched
+        ORDER BY norm_sku, updated_at DESC NULLS LAST`;
+      for (const r of rows) {
+        out.set(r.norm_sku, {
+          name: r.name,
+          brand: r.brand,
+          description: r.description,
+          upc: r.upc,
+          imageUrl: r.image_url,
+        });
+      }
+    }
+  } catch (e) {
+    console.error("[sku-reuse] lookup failed — proceeding without it:", e);
+    return new Map();
+  }
+  return out;
+}

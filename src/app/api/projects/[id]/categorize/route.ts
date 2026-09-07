@@ -721,6 +721,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             heartbeat();
             setCategorizeJobPhase(jobId, `Resolving SKU-only products ${done}/${total} (${processed}/${totalToProcess} done)…`);
           },
+          // Cross-project SKU reuse looks at every OTHER project's rows for the
+          // same vendor code — this project's own rows are the ones being filled.
+          { excludeProjectId: id },
         );
         // Fold the enriched rows back into this slice by id.
         const enrichedById = new Map(enriched.map((e) => [e.id, e]));
@@ -733,19 +736,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           // Fetched here for just the enriched rows: the streaming load above
           // deliberately let go of the raw vendorData blobs to keep memory flat.
           const enrichedIds = enrichments.map((e) => e.productId);
-          const vendorDataById = new Map<string, Record<string, unknown>>();
+          type Current = { vendorData: Record<string, unknown>; upc: string | null; imageUrl: string | null };
+          const currentById = new Map<string, Current>();
           for (let i = 0; i < enrichedIds.length; i += PAGE_SIZE) {
             const rows = await prisma.product.findMany({
               where: { id: { in: enrichedIds.slice(i, i + PAGE_SIZE) } },
-              select: { id: true, vendorData: true },
+              select: { id: true, vendorData: true, upc: true, imageUrl: true },
             });
             for (const row of rows) {
-              vendorDataById.set(row.id, (row.vendorData ?? {}) as Record<string, unknown>);
+              currentById.set(row.id, {
+                vendorData: (row.vendorData ?? {}) as Record<string, unknown>,
+                upc: row.upc,
+                imageUrl: row.imageUrl,
+              });
             }
           }
           await inChunks(enrichments, (e) => {
+            const current = currentById.get(e.productId);
             const mergedVendorData = e.attributes
-              ? { ...(vendorDataById.get(e.productId) ?? {}), ...e.attributes }
+              ? { ...(current?.vendorData ?? {}), ...e.attributes }
               : undefined;
             return prisma.product.update({
               where: { id: e.productId },
@@ -755,6 +764,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
                 description: e.description,
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 ...(mergedVendorData ? { vendorData: mergedVendorData as any } : {}),
+                // Identity columns a cross-project match supplies (a bare-SKU sheet
+                // never carries them). Fill only what this row is missing — a UPC
+                // or image the sheet DID carry is never overwritten.
+                ...(e.upc && !current?.upc ? { upc: e.upc } : {}),
+                ...(e.imageUrl && !current?.imageUrl ? { imageUrl: e.imageUrl } : {}),
               },
             });
           });

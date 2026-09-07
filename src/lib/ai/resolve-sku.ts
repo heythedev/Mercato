@@ -1,4 +1,5 @@
 import { resolveSkuFromCatalog, hasCatalogVendor, type CatalogEntry } from "./vendor-catalog";
+import { findResolvedNamesBySku, normalizeSku } from "@/lib/categorize/category-reuse";
 
 /**
  * Is any usable web-search provider configured?
@@ -53,6 +54,14 @@ export type SkuEnrichment = {
    * Size, Image URL 1…) that the export field resolver already understands.
    */
   attributes?: Record<string, string>;
+  /**
+   * Product-identity columns a cross-project match can supply that a bare-SKU
+   * sheet never carries. A UPC in particular unlocks the whole verify pipeline
+   * (barcode lookups) for a row that was a dead end. Only written when the
+   * target row is missing them — never overwrite a value the sheet did carry.
+   */
+  upc?: string | null;
+  imageUrl?: string | null;
 };
 
 /**
@@ -517,9 +526,30 @@ function guessBrand(hits: SearchHit[], name: string | null): string | null {
 export async function enrichSkuOnlyProducts(
   products: SkuProductInput[],
   onProgress?: (done: number, total: number) => void,
+  opts?: { excludeProjectId?: string },
 ): Promise<{ products: SkuProductInput[]; enrichments: SkuEnrichment[] }> {
   const enrichments: SkuEnrichment[] = [];
   const out: SkuProductInput[] = [];
+
+  // Resolution key: the vendor SKU column is authoritative. Fall back to the product
+  // name only when it still looks like a raw code (never resolved yet). Using vendorSku
+  // means re-runs self-heal even if a prior bad run overwrote `name` with a wrong title.
+  const skuOf = (p: SkuProductInput): string =>
+    (p.sku && p.sku.trim()) || (looksLikeSkuName(p.name) ? p.name.trim() : "");
+
+  // 0. Cross-project identity reuse — ONE bulk DB query for the whole batch, before
+  //    any per-product network work. Another upload (any project, any marketplace)
+  //    may already carry the full record for the exact same vendor SKU: the same
+  //    wholesale catalog routinely gets exported with every column for one
+  //    marketplace and as a bare SKU list for another. An exact match on the
+  //    vendor's own code is as authoritative as the vendor catalog itself, and it
+  //    is the ONLY signal available for a vendor with no known catalog, no
+  //    barcode and no web search — the case that otherwise dead-ends as
+  //    "No match found" for an entire file.
+  const crossProject = await findResolvedNamesBySku(
+    opts?.excludeProjectId ?? "",
+    products.map(skuOf).filter(Boolean),
+  );
 
   // Enrichment is network-bound (catalog + product-page fetch), so run more of it at
   // once. The catalog index is cached after the first hit, so the remaining cost is the
@@ -533,12 +563,36 @@ export async function enrichSkuOnlyProducts(
     const slice = queue.slice(i, i + PARALLEL);
     await Promise.all(
       slice.map(async ({ p, idx }) => {
-        // Resolution key: the vendor SKU column is authoritative. Fall back to the product
-        // name only when it still looks like a raw code (never resolved yet). Using vendorSku
-        // means re-runs self-heal even if a prior bad run overwrote `name` with a wrong title.
-        const sku = (p.sku && p.sku.trim()) || (looksLikeSkuName(p.name) ? p.name.trim() : "");
+        const sku = skuOf(p);
         if (!sku) {
           results[idx] = p;
+          return;
+        }
+
+        // 0. (continued) A record of this exact SKU from another project. The
+        //    looksLikeSkuName guard is the full version of the query's cheap
+        //    "name isn't just the SKU" filter: never propagate one unresolved
+        //    code's placeholder as if it were a real title.
+        const reused = crossProject.get(normalizeSku(sku));
+        if (reused && !looksLikeSkuName(reused.name, sku)) {
+          enrichments.push({
+            productId: p.id,
+            name: reused.name,
+            brand: reused.brand || p.brand,
+            description: reused.description || p.description,
+            searchContext: `cross-project: ${sku} | ${reused.name}`,
+            upc: reused.upc,
+            imageUrl: reused.imageUrl,
+          });
+          results[idx] = {
+            ...p,
+            name: reused.name,
+            brand: reused.brand || p.brand,
+            description: reused.description || p.description,
+            vendorContext: [p.vendorContext, `resolved_from_sku: ${sku}`, "source: same SKU in another project's upload"]
+              .filter(Boolean)
+              .join("; "),
+          };
           return;
         }
 

@@ -7,7 +7,71 @@ vi.mock("./vendor-catalog", () => ({
   hasCatalogVendor: vi.fn(() => false),
 }));
 
-import { hitsReferenceSku, isUnresolvedSkuOnly, pickProductName, skuSearchVariants } from "./resolve-sku";
+// Cross-project SKU reuse is a DB lookup; stub it so enrichSkuOnlyProducts
+// never touches prisma here. Tests that want a hit queue one with
+// mockResolvedValueOnce; the default finds nothing.
+vi.mock("@/lib/categorize/category-reuse", () => ({
+  findResolvedNamesBySku: vi.fn(async () => new Map()),
+  normalizeSku: (s: string) => s.trim().toLowerCase(),
+}));
+
+import { findResolvedNamesBySku } from "@/lib/categorize/category-reuse";
+import { resolveSkuFromCatalog } from "./vendor-catalog";
+import {
+  enrichSkuOnlyProducts,
+  hitsReferenceSku,
+  isUnresolvedSkuOnly,
+  pickProductName,
+  skuSearchVariants,
+} from "./resolve-sku";
+
+describe("enrichSkuOnlyProducts — cross-project SKU reuse", () => {
+  const bare = { id: "p1", name: "VIDA-134814", sku: "VIDA-134814", brand: null, description: null };
+
+  it("fills a bare-SKU row from another project's record of the same SKU, before any catalog call", async () => {
+    // The real case: a Walmart upload of the same vidaXL catalog carried the full record.
+    vi.mocked(findResolvedNamesBySku).mockResolvedValueOnce(
+      new Map([[
+        "vida-134814",
+        {
+          name: 'vidaXL Blackout Curtains with Rings 2 pcs Anthracite 54"x84" Velvet',
+          brand: "vidaXL",
+          description: "These elegant blackout curtains block almost 85% of incoming light.",
+          upc: "8720286039632",
+          imageUrl: "https://image.virventures.com/VIDA/134814.jpg",
+        },
+      ]]),
+    );
+    const { products, enrichments } = await enrichSkuOnlyProducts([bare], undefined, { excludeProjectId: "proj-x" });
+
+    expect(vi.mocked(findResolvedNamesBySku)).toHaveBeenCalledWith("proj-x", ["VIDA-134814"]);
+    expect(products[0]!.name).toBe('vidaXL Blackout Curtains with Rings 2 pcs Anthracite 54"x84" Velvet');
+    expect(products[0]!.brand).toBe("vidaXL");
+    expect(enrichments).toHaveLength(1);
+    expect(enrichments[0]).toMatchObject({
+      productId: "p1",
+      upc: "8720286039632",
+      imageUrl: "https://image.virventures.com/VIDA/134814.jpg",
+    });
+    // Found for free — the vendor-catalog network path was never needed.
+    expect(vi.mocked(resolveSkuFromCatalog)).not.toHaveBeenCalled();
+  });
+
+  it("never trusts a cross-project name that is itself still a raw code", async () => {
+    vi.mocked(findResolvedNamesBySku).mockResolvedValueOnce(
+      new Map([["vida-134814", { name: "VIDA134814", brand: null, description: null, upc: null, imageUrl: null }]]),
+    );
+    const { products, enrichments } = await enrichSkuOnlyProducts([bare], undefined, { excludeProjectId: "proj-x" });
+    expect(products[0]!.name).toBe("VIDA-134814");
+    expect(enrichments).toHaveLength(0);
+  });
+
+  it("leaves the row untouched when no project anywhere knows the SKU", async () => {
+    const { products, enrichments } = await enrichSkuOnlyProducts([bare], undefined, { excludeProjectId: "proj-x" });
+    expect(products[0]).toEqual(bare);
+    expect(enrichments).toHaveLength(0);
+  });
+});
 
 describe("isUnresolvedSkuOnly", () => {
   it("is true for a bare SKU code with no description or vendor category", () => {
