@@ -1048,7 +1048,16 @@ ${pathHint}
   // reasoning tokens before emitting any JSON — measured at ~300 on a batch of
   // 40, and a small budget can be consumed entirely by reasoning, returning
   // empty text. The extra headroom keeps the visible JSON inside the cap.
-  const reasoningHeadroom = /^kimi-k[23]/.test(model) ? 1500 : 0;
+  //
+  // k2.6 reasons FAR more verbosely than k3: measured on real Mathis batches,
+  // ~3.5k output tokens on a batch of 8 and still truncating at 6.3k on a batch
+  // of 12 (k3: 0.4-2k) — the JSON itself is only ~30/item, the rest is hidden
+  // thinking, and it grows with the item count. With the k3-sized 1500 headroom
+  // EVERY Mathis batch hit finishReason=length and fell back to Uncategorized
+  // (11 of 12 products on a live run), so the budget is per model family.
+  // Generous on purpose: this is a CAP, not a charge — unused budget costs
+  // nothing, while too small a cap costs a whole batch plus its retry.
+  const reasoningHeadroom = /^kimi-k2\.6/.test(model) ? 8000 : /^kimi-k[23]/.test(model) ? 1500 : 0;
   const maxOutputTokens = Math.min(
     16000,
     Math.max(1500, products.length * perItemTokens + 500 + reasoningHeadroom),
