@@ -50,6 +50,18 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const csvRef = useRef<HTMLInputElement>(null);
 
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
+  // Uncategorized rows that were never IDENTIFIED, as opposed to identified
+  // but unmatched: the sheet gave only a vendor code (the name is the SKU
+  // itself, or blank) and nothing resolved it to a real product. Nothing —
+  // AI included — can categorize a bare code, so telling the user these
+  // "don't fit any path" is wrong and sends them looking for a categorization
+  // bug; the fix is a file that carries names, not another run.
+  const unidentified = uncategorized.filter((p) => {
+    const name = (p.name ?? "").trim().toLowerCase();
+    const sku = (p.vendorSku ?? "").trim().toLowerCase();
+    return !name || (!!sku && name === sku);
+  });
+  const unidentifiedIds = new Set(unidentified.map((p) => p.id));
   const categorized = products.filter((p) => p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized");
   const pending = products.filter((p) => !p.marketplaceCategory);
   // Assigned a category, but the model itself wasn't sure. Constrained
@@ -308,14 +320,32 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-semibold text-orange-800">
-                {uncategorized.length} product{uncategorized.length !== 1 ? "s" : ""} could not be matched to a{isMathis ? " Mathis" : ""} category
-              </p>
-              <p className="text-xs text-orange-700 mt-1">
-                {isMathis
-                  ? "These products don't fit any path in the Mathis category sheet (e.g. everyday apparel, fragrances, electronics, food). They will be excluded from the ZIP export. Review them below or remove them from the vendor file."
-                  : "These products couldn't be confidently assigned a category. They will be excluded from the export. Try re-categorizing or check the product names."}
-              </p>
+              {unidentified.length === uncategorized.length ? (
+                <>
+                  <p className="text-sm font-semibold text-orange-800">
+                    {uncategorized.length} product{uncategorized.length !== 1 ? "s have" : " has"} no product information to categorize from
+                  </p>
+                  <p className="text-xs text-orange-700 mt-1">
+                    The vendor file gives only a code for {uncategorized.length !== 1 ? "these products" : "this product"} — no name, description, or barcode — and no
+                    catalog or earlier upload knows the code, so there is nothing to identify {uncategorized.length !== 1 ? "them" : "it"} by. Re-running won&apos;t change this.
+                    Upload the file with product names (the vendor&apos;s full export), then categorize again.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-orange-800">
+                    {uncategorized.length} product{uncategorized.length !== 1 ? "s" : ""} could not be matched to a{isMathis ? " Mathis" : ""} category
+                  </p>
+                  <p className="text-xs text-orange-700 mt-1">
+                    {isMathis
+                      ? "These products don't fit any path in the Mathis category sheet (e.g. everyday apparel, fragrances, electronics, food). They will be excluded from the ZIP export. Review them below or remove them from the vendor file."
+                      : "These products couldn't be confidently assigned a category. They will be excluded from the export. Try re-categorizing or check the product names."}
+                    {unidentified.length > 0 && (
+                      <> {unidentified.length} of them {unidentified.length !== 1 ? "are" : "is"} a bare vendor code with no name or description — nothing can identify {unidentified.length !== 1 ? "those" : "that one"} without a file that carries product names.</>
+                    )}
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -397,6 +427,8 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                   everything (matches the Verify step's resultPool pattern). */}
               {(loading ? products.filter((p) => p.marketplaceCategory) : products).slice(0, visibleRows).map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
+                // A bare vendor code nothing could identify — not a taxonomy miss.
+                const isUnidentified = isUncategorized && unidentifiedIds.has(p.id);
                 const lowConfidence = !isUncategorized && !!p.marketplaceCategory &&
                   p.categoryConfidence != null && p.categoryConfidence < REVIEW_CONFIDENCE;
                 return (
@@ -407,7 +439,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                     </td>
                     <td className="px-4 py-3 font-medium text-sm">
                       {isUncategorized ? (
-                        <span className="text-orange-600">No match found</span>
+                        <span className="text-orange-600">{isUnidentified ? "No product info" : "No match found"}</span>
                       ) : (
                         p.marketplaceCategory ?? "—"
                       )}
@@ -430,9 +462,14 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                     )}
                     <td className="px-4 py-3 text-center">
                       {isUncategorized ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
+                        <span
+                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700"
+                          title={isUnidentified
+                            ? "The file gives only a vendor code for this product — no name, description or barcode — and nothing could identify it. Needs a file with product names."
+                            : undefined}
+                        >
                           <XCircle className="w-3 h-3" />
-                          No match
+                          {isUnidentified ? "No info" : "No match"}
                         </span>
                       ) : lowConfidence ? (
                         <span
