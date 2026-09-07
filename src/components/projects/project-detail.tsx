@@ -530,7 +530,7 @@ export function ProjectDetail({ project: initial, productCount }: {
           matched?: number; unmatched?: number; categorized?: number;
           partial?: boolean; interrupted?: boolean; remaining?: number; resumeFrom?: number;
           specTypesRequested?: number; specTypesAssigned?: number; specTypesRemaining?: number;
-          specTypeError?: string; skuOnlyUnresolved?: number;
+          specTypeError?: string; skuOnlyUnresolved?: number; specTypesLevelFallback?: number;
         };
         let verdict: PollData | null = null;
 
@@ -651,6 +651,16 @@ export function ProjectDetail({ project: initial, productCount }: {
           (verdict.specTypesAssigned ?? 0) < verdict.specTypesRequested
         ) {
           toast.warning(`Spec product types: ${verdict.specTypesAssigned ?? 0} of ${verdict.specTypesRequested} assigned — re-run Categorize to fill the rest.`);
+        }
+        // Products where none of the real (level-3) Product Types fit — the
+        // Product Type cell was filled with the product's Category/Group
+        // instead of being left blank, but that value is NOT guaranteed to be
+        // one of Walmart's own approved Product Types, so it's worth a look
+        // before uploading.
+        if (verdict.specTypesLevelFallback) {
+          toast.warning(
+            `${verdict.specTypesLevelFallback} product${verdict.specTypesLevelFallback === 1 ? "" : "s"} got their category (not an exact Walmart Product Type) — worth double-checking before uploading.`,
+          );
         }
         // Bare-SKU rows with no name, description, or barcode to go on — no
         // matcher (AI, vendor catalog, or barcode lookup) can identify what

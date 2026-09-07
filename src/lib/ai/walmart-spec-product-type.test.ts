@@ -110,6 +110,19 @@ describe("isSpecTypeCurrent", () => {
     expect(isSpecTypeCurrent(null, path, validNorm)).toBe(false);
     expect(isSpecTypeCurrent("Invented Type", path, validNorm)).toBe(false);
   });
+
+  it("a level-fallback value matching the CURRENT path's deepest segment is current", () => {
+    const group = path.split(">").map((s) => s.trim()).at(-1)!;
+    // Not on the valid-types list (it's a Group name, not a real Product
+    // Type) — still current, because it's exactly what the fallback would
+    // recompute for this same path, so re-attempting can't change anything.
+    expect(isSpecTypeCurrent(group, path, validNorm)).toBe(true);
+  });
+
+  it("a level-fallback value from a DIFFERENT path is NOT current (category changed)", () => {
+    const group = path.split(">").map((s) => s.trim()).at(-1)!;
+    expect(isSpecTypeCurrent(group, "Some Other Category > Some Other Group", validNorm)).toBe(false);
+  });
 });
 
 describe("assignSpecProductTypes", () => {
@@ -127,7 +140,7 @@ describe("assignSpecProductTypes", () => {
     expect(mockedGen).not.toHaveBeenCalled();
   });
 
-  it("accepts in-slice answers, canonicalizes near-misses, drops out-of-slice ones", async () => {
+  it("accepts in-slice answers, canonicalizes near-misses, level-falls-back the rest", async () => {
     const t0 = slice[0]!;
     const t1 = slice[1]!;
     mockedGen
@@ -136,7 +149,8 @@ describe("assignSpecProductTypes", () => {
         { index: 2, productType: t1.toUpperCase() },       // near-miss → canonical
         { index: 3, productType: "Completely Different" }, // out-of-slice → blank
       ])))
-      // The leftover re-pass re-asks about the blank product; it stays blank.
+      // The leftover re-pass re-asks about the blank product; it stays blank —
+      // a genuinely exhausted attempt, so it should level-fall-back, not stay empty.
       .mockResolvedValue(reply(JSON.stringify([{ index: 1, productType: "" }])));
     const res = await assignSpecProductTypes([
       { id: "a", name: "product a", category: path },
@@ -145,7 +159,10 @@ describe("assignSpecProductTypes", () => {
     ]);
     expect(res.assigned.get("a")).toBe(t0);
     expect(res.assigned.get("b")).toBe(t1);
-    expect(res.assigned.has("c")).toBe(false);
+    // "c" never got a real type from any round — falls back to the deepest
+    // resolved category level (the Product Type Group, the path's last segment).
+    expect(res.assigned.get("c")).toBe(path.split(">").map((s) => s.trim()).at(-1));
+    expect(res.levelFallback).toBe(1);
   });
 
   it("retries a failed batch instead of silently blanking it", async () => {
@@ -172,5 +189,36 @@ describe("assignSpecProductTypes", () => {
     expect(res.assigned.get("pre")).toBe(target);
     expect(persisted.some((r) => r.productId === "pre")).toBe(true);
     expect(mockedGen).not.toHaveBeenCalled();
+    // Never reached by the deadline — must stay blank for the resumed
+    // invocation's real attempt, not get locked into a premature fallback.
+    expect(res.assigned.has("ai")).toBe(false);
+  });
+
+  it("level-falls-back to the deepest resolved segment when nothing in the group's real list fits", async () => {
+    mockedGen.mockResolvedValue(reply(JSON.stringify([{ index: 1, productType: "" }])));
+    const persisted: Array<{ productId: string; specProductType: string }> = [];
+    const res = await assignSpecProductTypes(
+      [{ id: "a", name: "product a", category: path }],
+      { onAssigned: async (rows) => { persisted.push(...rows); } },
+    );
+    const group = path.split(">").map((s) => s.trim()).at(-1);
+    expect(res.assigned.get("a")).toBe(group);
+    expect(res.levelFallback).toBe(1);
+    expect(persisted.some((r) => r.productId === "a" && r.specProductType === group)).toBe(true);
+  });
+
+  it("falls back to the whole path when it has no group segment to split on", async () => {
+    mockedGen.mockResolvedValue(reply(JSON.stringify([{ index: 1, productType: "" }])));
+    const res = await assignSpecProductTypes([
+      { id: "a", name: "product a", category: "Just A Category" },
+    ]);
+    expect(res.assigned.get("a")).toBe("Just A Category");
+  });
+
+  it("stays blank when the product has no category to fall back to at all", async () => {
+    mockedGen.mockResolvedValue(reply(JSON.stringify([{ index: 1, productType: "" }])));
+    const res = await assignSpecProductTypes([{ id: "a", name: "product a", category: null }]);
+    expect(res.assigned.has("a")).toBe(false);
+    expect(res.levelFallback).toBe(0);
   });
 });

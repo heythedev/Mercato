@@ -89,6 +89,16 @@ export function normSpecType(t: string): string {
  * slice (nothing to check against) or the type belongs to that slice. Used by
  * the caller's skip rule — this is what makes re-runs idempotent AND forces
  * re-assignment when a product's category changed out from under its old type.
+ *
+ * ALSO current when the stored value is exactly assignSpecProductTypes' level
+ * fallback for the product's CURRENT path (its deepest segment — Product Type
+ * Group, or Category) — that fallback is only ever written after a genuine,
+ * fully-exhausted attempt found no real type, so recomputing it on an
+ * unrelated re-run (nothing about the product changed) would just spend an
+ * AI batch to re-derive the identical answer. A category change still
+ * invalidates it, same as a real type: the new path's deepest segment won't
+ * match the old stored value, so isSpecTypeCurrent correctly returns false
+ * and the caller re-attempts a real type against the new path first.
  */
 export function isSpecTypeCurrent(
   existingType: string | null | undefined,
@@ -96,11 +106,16 @@ export function isSpecTypeCurrent(
   validTypesNorm: ReadonlySet<string>,
 ): boolean {
   const t = existingType?.trim();
-  if (!t || !validTypesNorm.has(normSpecType(t))) return false;
-  const slice = categoryPath ? productTypesForCategoryPath(categoryPath) : null;
-  if (!slice?.length) return true;
-  const tn = normSpecType(t);
-  return slice.some((s) => normSpecType(s) === tn);
+  if (!t) return false;
+  if (validTypesNorm.has(normSpecType(t))) {
+    const slice = categoryPath ? productTypesForCategoryPath(categoryPath) : null;
+    if (!slice?.length) return true;
+    const tn = normSpecType(t);
+    if (slice.some((s) => normSpecType(s) === tn)) return true;
+  }
+  const segments = (categoryPath ?? "").split(">").map((s) => s.trim()).filter(Boolean);
+  const deepest = segments.at(-1);
+  return !!deepest && normSpecType(deepest) === normSpecType(t);
 }
 
 /**
@@ -192,12 +207,17 @@ export type SpecAssignOptions = {
 };
 
 export type SpecAssignResult = {
-  /** productId → verbatim taxonomy type (pre-pass + AI, validated). */
+  /** productId → taxonomy type (pre-pass + AI, validated) OR, for
+   *  levelFallback rows, the deepest ASSIGNED category level (Product Type
+   *  Group, or Category) when no real level-3 type fits — see levelFallback. */
   assigned: Map<string, string>;
   /** Products actually processed (pre-pass or sent to the AI). */
   attempted: number;
   /** True when the deadline cut work short — the caller reports partial/resume. */
   deadlineHit: boolean;
+  /** Count of `assigned` entries that are a level fallback, not a real,
+   *  Walmart-approved Product Type — see the note above the fallback loop. */
+  levelFallback: number;
 };
 
 const BATCH = 15;
@@ -218,16 +238,19 @@ const MAX_ATTEMPTS = 3;
 const MAX_LEFTOVER_ROUNDS = 3;
 
 /**
- * Assign a valid Spec Product Type to each product. Never throws; products the
- * model can't place stay out of the map (blank-for-retry — the caller's skip
- * rule re-attempts them on the next run rather than persisting a guess).
+ * Assign a Product Type to each product. Never throws. When the deadline cuts
+ * work short, a product the model hasn't reached yet stays out of the map
+ * (blank-for-retry — the caller's skip rule re-attempts it next run). When
+ * the pass instead runs to completion and the model genuinely cannot place a
+ * product in any real level-3 type, see the level-fallback note near the
+ * bottom of this function for what gets assigned instead.
  */
 export async function assignSpecProductTypes(
   products: SpecTypeInput[],
   opts?: SpecAssignOptions,
 ): Promise<SpecAssignResult> {
   const assigned = new Map<string, string>();
-  const res: SpecAssignResult = { assigned, attempted: 0, deadlineHit: false };
+  const res: SpecAssignResult = { assigned, attempted: 0, deadlineHit: false, levelFallback: 0 };
   if (!products.length || !moonshotConfigured()) return res;
 
   const types = await loadSpecProductTypes();
@@ -436,6 +459,45 @@ Respond ONLY with a JSON array, no markdown:
     // No forward movement this round — further rounds would just repeat the
     // same non-answer for the same items. Stop rather than spend the budget.
     if (assigned.size === assignedBefore) break;
+  }
+
+  // ── Level fallback ─────────────────────────────────────────────────────────
+  // Policy: the Product Type is whichever level classification actually
+  // reached. The pre-pass, every AI batch, and the leftover rounds above are
+  // all a genuine attempt at the real level-3 type; when a product survives
+  // all of that still unassigned, the model has tried in earnest and found no
+  // listed type that fits (e.g. a battery charger in a group whose only real
+  // types are EPIRBs/autopilots/depth finders). Rather than leave the field
+  // blank, fall back to the deepest level that IS resolved — the product's
+  // assigned Product Type Group (or Category, if no group resolved at all).
+  //
+  // Skipped on a deadline stop: those products haven't had their real attempt
+  // yet (they simply weren't reached before time ran out), so falling back
+  // now would lock in a worse answer than the resumed invocation would find
+  // with a fresh time budget.
+  //
+  // IMPORTANT: unlike every other value this function assigns, a level
+  // fallback is NOT guaranteed to be one of Walmart's own approved Product
+  // Type values — a Product Type Group name usually isn't a Product Type in
+  // Walmart's own schema (verified against the real taxonomy: only 10 of 492
+  // groups double as their own approved type). This was a deliberate choice
+  // to never leave the field blank, over the alternative of flagging these
+  // few rows for manual review before upload — see the PR/commit this landed
+  // in for the tradeoff. res.levelFallback lets the caller tell the user how
+  // many rows this touched.
+  if (!res.deadlineHit) {
+    const fallbackRows: Array<{ productId: string; specProductType: string }> = [];
+    for (const p of products) {
+      if (assigned.has(p.id)) continue;
+      const segments = (p.category ?? "").split(">").map((s) => s.trim()).filter(Boolean);
+      const fallback = segments.at(-1);
+      if (!fallback) continue; // nothing resolved at any level — stays blank for retry
+      assigned.set(p.id, fallback);
+      fallbackRows.push({ productId: p.id, specProductType: fallback });
+    }
+    res.levelFallback = fallbackRows.length;
+    await flush(fallbackRows);
+    progress();
   }
 
   return res;

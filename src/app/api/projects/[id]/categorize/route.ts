@@ -859,6 +859,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     let specTypesRemaining = 0;
     let specPartial = false;
     let specTypeError: string | undefined;
+    // Of specTypesAssigned, how many are a level fallback (Product Type Group
+    // or Category) rather than a real, Walmart-approved Product Type — see
+    // assignSpecProductTypes' level-fallback note. Reported so the client can
+    // tell the user which rows are worth a manual double-check before upload.
+    let specTypesLevelFallback = 0;
     // Skipped on a categorize partial stop (budget already spent) — the
     // resumed invocation reaches it once the whole catalog is processed.
     if (mpLower === "walmart" && !partial) {
@@ -927,6 +932,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           specTypesAssigned = specRes.assigned.size;
           specTypesRemaining = specTypesRequested - specRes.assigned.size;
           specPartial = specRes.deadlineHit;
+          specTypesLevelFallback = specRes.levelFallback;
         } catch (err) {
           // Surfaced in the job summary — a failed spec pass must not report as
           // a clean run (the export would silently fall back to category-leaf
@@ -1003,19 +1009,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     //
     // A spec pass that finished WITHIN its deadline (specPartial === false) has
     // already done everything it will ever do this run: the deterministic
-    // pre-pass, every AI batch, AND up to MAX_LEFTOVER_ROUNDS extra retries on
-    // whatever stayed blank — self-terminating only once a round assigns
-    // nothing new. Anything still blank at that point isn't "not done yet", it
-    // is the model having genuinely found no listed type that fits (e.g. a
-    // product whose assigned category's own type list has nothing matching
-    // it — a battery charger in a group that only lists EPIRBs/autopilots/
-    // depth finders). This USED to also count as partial, which forced the
-    // client to resume anyway; every resume re-ran the identical, already-
-    // exhausted attempt and could only ever reproduce the identical result, so
-    // it just burned two more rounds before the client's own no-progress guard
+    // pre-pass, every AI batch, up to MAX_LEFTOVER_ROUNDS extra retries, AND
+    // (assignSpecProductTypes) a level fallback to whatever category level DID
+    // resolve for anything still blank after all of that — so specTypesRemaining
+    // stays 0 in essentially every case now (only a product with no resolved
+    // category at all, any level, can still come back genuinely empty). This
+    // USED to count a genuine leftover as partial, which forced the client to
+    // resume anyway; every resume re-ran the identical, already-exhausted
+    // attempt on the exact same items (e.g. a battery charger in a group whose
+    // only real Product Types are EPIRBs/autopilots/depth finders — none of
+    // which fits) and could only ever reproduce the identical result, so it
+    // just burned two more rounds before the client's own no-progress guard
     // gave up with a "keeps stopping without progress" error — on a run whose
     // actual categorization had already finished cleanly. Only a real deadline
-    // stop is worth resuming; a genuine leftover count is still reported below
+    // stop is worth resuming; a rare genuine leftover is still reported below
     // (specTypesRemaining) so the UI can say so plainly instead of erroring.
     const anyPartial = partial || specPartial;
     await prisma.project.update({
@@ -1055,6 +1062,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             specTypesRequested,
             specTypesAssigned,
             specTypesRemaining,
+            ...(specTypesLevelFallback > 0 ? { specTypesLevelFallback } : {}),
             ...(specTypeError ? { specTypeError } : {}),
           }
         : {}),
