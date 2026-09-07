@@ -9,13 +9,14 @@ export const maxDuration = 120;
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
-import { applyAiVerificationPasses, type VerifyResult } from "@/lib/marketplaces/verify";
+import { applyAiVerificationPasses, rollupStatus, type VerifyResult } from "@/lib/marketplaces/verify";
 import { checkAiAvailable } from "@/lib/ai/moonshot";
 import {
   PENDING_MARKER,
   REQUEUE_NOTE_FRAGMENTS,
   hasComparablePair,
   needsImageRequeue,
+  groupByKey,
 } from "@/lib/marketplaces/image-check-state";
 
 // Products per sweep request. Matches the comparison lib's concurrency below:
@@ -160,13 +161,40 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
 
-    const results = swept.map((s) => s.result).filter((r): r is VerifyResult => !!r);
+    // Same-chunk image-verdict reuse: if two products IN THIS CHUNK share the
+    // exact same (catalog image, marketplace image) pair — sibling SKUs
+    // uploaded adjacently often land in the same or a nearby chunk — only ONE
+    // of them (the "representative") actually needs the AI; the rest
+    // ("followers") copy its verdict once it comes back. Deliberately
+    // in-memory and scoped to this one chunk rather than a database lookup
+    // across the whole project: measured against production data, that EXACT
+    // pair has never once repeated across separate requests (each product in
+    // these catalogs carries genuinely distinct images), so a cross-request
+    // query would only add real latency (a multi-second JSONB scan) to every
+    // chunk for a payoff that has never materialized. This version costs
+    // nothing when it doesn't fire.
+    const aiBound = swept.filter((s): s is typeof s & { result: VerifyResult } => !!s.result);
+    const groups = groupByKey(aiBound, (s) => {
+      const f = s.fields.find((field) => field.field === "images")!;
+      return `${f.stored ?? ""}|${f.liveImage ?? ""}`;
+    });
+    // Followers are excluded from `results` below (the AI never sees them);
+    // resolved by copying the representative's outcome once it's known.
+    const followerIds = new Set<string>();
+    for (const group of groups) {
+      for (const follower of group.slice(1)) followerIds.add(follower.row.id);
+    }
+    if (followerIds.size) {
+      console.log(`[verify-images] ${followerIds.size} product(s) share an image pair with another product in this chunk — one AI call will cover both`);
+    }
+
+    const results = swept.map((s) => s.result).filter((r): r is VerifyResult => !!r && !followerIds.has(r.productId));
     let aiUnavailable: string | null = null;
     // Rows whose AI call hit the outage: their fields were left exactly as they
     // were and must not be re-persisted as if the AI had answered.
     const untouched = new Set<string>();
     if (results.length) {
-      const productsArg = swept.filter((s) => s.result).map((s) => ({ id: s.row.id, name: s.row.name }));
+      const productsArg = swept.filter((s) => s.result && !followerIds.has(s.row.id)).map((s) => ({ id: s.row.id, name: s.row.name }));
       const { withImageCache } = await import("@/lib/ai/compare-images");
       // Runs BOTH post-passes: image comparison plus (Walmart) the semantic
       // title check, which is idempotent — settled titles are skipped.
@@ -180,6 +208,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       );
       aiUnavailable = outcome.aiUnavailable;
       for (const pid of outcome.untouched) untouched.add(pid);
+    }
+
+    // Copy each representative's now-resolved outcome to its followers. If
+    // the representative's call hit an outage, its fields were left exactly
+    // as they were (per applyAiVerificationPasses's contract) — the follower
+    // must be left untouched too, not resolved from a non-answer.
+    for (const group of groups) {
+      const [rep, ...followers] = group;
+      if (!followers.length) continue;
+      if (untouched.has(rep.row.id)) {
+        // The representative's own fields were left exactly as they were —
+        // the follower gets the same treatment instead of a no-op rewrite.
+        for (const follower of followers) untouched.add(follower.row.id);
+        continue;
+      }
+      const repImg = rep.fields.find((field) => field.field === "images")!;
+      for (const follower of followers) {
+        const f = follower.fields.find((field) => field.field === "images")!;
+        f.severity = repImg.severity;
+        f.note = `${repImg.note} (same image pair as another product in this batch)`;
+        f.match = repImg.match;
+        delete f.aiAttempts;
+        follower.result!.status = rollupStatus(follower.result!);
+      }
     }
 
     // At most CHUNK sequential single-row writes — no need for batching here.

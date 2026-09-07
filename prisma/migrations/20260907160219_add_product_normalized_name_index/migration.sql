@@ -1,0 +1,22 @@
+-- Speeds up lib/categorize/category-reuse.ts's cross-project category-reuse
+-- lookup, which matches products by normalized name
+-- (lower(regexp_replace(trim(name), '[[:space:]]+', ' ', 'g'))) across the
+-- WHOLE Product table. Without this index that query is a sequential scan
+-- computing the expression on every row — measured at ~6-13s per 500-name
+-- chunk against an 88k-row table, and only getting slower as it grows.
+--
+-- CONCURRENTLY avoids locking the table against writes while the index
+-- builds (important: Product is written continuously by live verify/
+-- categorize runs), at the cost of this statement being unable to run inside
+-- a transaction. NOTE: this project's DATABASE_URL is a PgBouncer
+-- transaction-pooled connection with no `directUrl` configured, which is a
+-- well-known limitation for Prisma's migration engine (advisory locks/session
+-- features it needs don't work through transaction pooling) — `prisma
+-- migrate deploy/status/resolve` all hang or fail here, matching why
+-- package.json's prestart already tolerates `prisma migrate deploy` failing
+-- (`|| echo "...starting anyway"`). This index was created directly via a
+-- one-off script (scripts/) rather than through the Prisma CLI; kept here so
+-- a FRESH database (one that isn't behind a pooler) gets it automatically via
+-- `prisma migrate deploy`.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "Product_norm_name_idx"
+  ON "Product" (lower(regexp_replace(trim(name), '[[:space:]]+', ' ', 'g')));

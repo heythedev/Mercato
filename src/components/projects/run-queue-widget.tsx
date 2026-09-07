@@ -15,7 +15,7 @@ import type { CategorizeStatus } from "@/lib/client/headless-categorize";
  * empty, which is the common case.
  */
 export function RunQueueWidget() {
-  const { active, queue } = useSyncExternalStore(runQueue.subscribe, runQueue.getSnapshot, runQueue.getSnapshot);
+  const { active, queue, policy } = useSyncExternalStore(runQueue.subscribe, runQueue.getSnapshot, runQueue.getSnapshot);
 
   if (active.length === 0 && queue.length === 0) return null;
 
@@ -23,8 +23,31 @@ export function RunQueueWidget() {
     <div className="fixed bottom-4 right-4 z-40 w-[320px] max-w-[calc(100vw-2rem)] flex flex-col gap-2">
       {active.map((entry) => <RunCard key={entry.projectId} entry={entry} />)}
       {queue.length > 0 && (
-        <div className="rounded-xl border bg-card/95 backdrop-blur px-3.5 py-2.5 shadow-lg text-xs text-muted-foreground">
-          {queue.length} more project{queue.length === 1 ? "" : "s"} queued — starts as a slot frees up
+        <div className="rounded-xl border bg-card/95 backdrop-blur px-3.5 py-2.5 shadow-lg text-xs">
+          <div className="flex items-center justify-between gap-2 text-muted-foreground">
+            <span>{queue.length} more project{queue.length === 1 ? "" : "s"} queued</span>
+            {queue.length > 1 && (
+              <select
+                value={policy}
+                onChange={(e) => runQueue.setPolicy(e.target.value as "fifo" | "smallest-first")}
+                title="Which queued project starts next"
+                aria-label="Queue order"
+                className="shrink-0 rounded-md border bg-background px-1.5 py-0.5 text-[11px]"
+              >
+                <option value="fifo">Click order</option>
+                <option value="smallest-first">Smallest first</option>
+              </select>
+            )}
+          </div>
+          {queue.length > 1 && (
+            <ol className="mt-1.5 space-y-0.5 text-[11px] truncate">
+              {queue.map((q, i) => (
+                <li key={q.projectId} className="truncate">
+                  {i + 1}. {q.projectName}{typeof q.size === "number" ? ` (${q.size.toLocaleString()})` : ""}
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       )}
     </div>

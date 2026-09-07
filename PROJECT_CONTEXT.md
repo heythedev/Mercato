@@ -509,6 +509,35 @@ kimi-k2.6 in non-thinking mode (`thinking: disabled`, sent as a header the
 provider fetch turns into the body field) — with thinking on, more than half
 the calls returned empty text at full output price.
 
+**Same-chunk image-verdict reuse** (verify/images/route.ts, 2026-09 cost work) —
+within one sweep chunk, products sharing the EXACT same (catalog image,
+marketplace image) pair (sibling SKUs uploaded adjacently often land
+together) only pay for ONE AI call: `groupByKey` (image-check-state.ts) finds
+the groups, the AI only sees one "representative" per group, and once it
+resolves, its verdict (severity/note/match, then a fresh `rollupStatus`) is
+copied to the "followers" — who are excluded from the AI pass but still
+persisted normally. Deliberately in-memory and chunk-scoped, NOT a database
+lookup across the whole project: measured against production data, that
+exact pair has never once repeated across separate requests (each product in
+these catalogs carries genuinely distinct images), so a cross-request query
+was built, benchmarked at a very real 2-6+ second cost per chunk with ZERO
+historical hits, and removed — a slower sweep for a payoff that never
+materializes is a worse trade than not having the feature.
+
+**Cross-project category reuse's index** — `lib/categorize/category-reuse.ts`'s
+normalized-name lookup is backed by `Product_norm_name_idx`, a functional
+`CREATE INDEX CONCURRENTLY` on `lower(regexp_replace(trim(name),
+'[[:space:]]+', ' ', 'g'))` (28x speedup measured on production: 6.5s → 231ms
+for a 500-name chunk). The migration file lives in `prisma/migrations/` for a
+fresh database, but this project's `DATABASE_URL` is a PgBouncer transaction-
+pooled connection with no `directUrl` — `prisma migrate deploy/status/resolve`
+all hang against it (a well-known Prisma+pgbouncer limitation; it's WHY
+package.json's `prestart` already tolerates `prisma migrate deploy` failing).
+The index itself was created directly via a plain, non-Prisma `pg` client
+(a single `CREATE INDEX CONCURRENTLY` statement needs no session features
+pgbouncer breaks) — verified present, valid, and actually chosen by the query
+planner for the real query shape before considering this done.
+
 **Prisma singleton** ([db.ts](src/lib/db.ts)) — cached on `globalThis` in
 development to survive HMR; pg pool with `keepAlive`, 30s idle, 10s connect timeout.
 
@@ -556,12 +585,26 @@ one already-manual run be in flight at once.
   visible from any page) and a `Play` button per card in `projects-view.tsx`
   (`nextActionFor(status, isSkipVerify)` decides verify vs. categorize vs.
   nothing to offer).
-- Policy: click order (FIFO), `MAX_ACTIVE = 3` truly-in-flight runs; a 4th
-  queues and starts the instant a slot frees. A finished/errored/paused card
-  stays visible for `SETTLE_MS` (10s) after the run itself ends — tracked via
-  a SEPARATE `runningIds` Set from the display `active` Map, since the
-  concurrency slot must free immediately even while the card lingers, or a
-  quick 200-product run would block a queued one for 10 needless seconds.
+- Policy: click order (FIFO) by default, `MAX_ACTIVE = 3` truly-in-flight
+  runs; a 4th queues and starts the instant a slot frees. A second policy,
+  "smallest-first" (`SchedulingPolicy`, `setPolicy()`), starts whichever
+  QUEUED project has the fewest products next regardless of arrival order —
+  a toggle in the widget's queued-list footer, which also shows the queue in
+  actual pick order under the current policy (`orderedQueue()`, recomputed
+  only on `emit()` so `useSyncExternalStore`'s stable-reference contract
+  holds). Only reorders the WAITING list; active runs are never touched.
+  A finished/errored/paused card stays visible for `SETTLE_MS` (10s) after
+  the run itself ends — tracked via a SEPARATE `runningIds` Set from the
+  display `active` Map, since the concurrency slot must free immediately
+  even while the card lingers, or a quick 200-product run would block a
+  queued one for 10 needless seconds.
+- Fair share of the image lane specifically: [shared-sweep-limiter.ts](src/lib/client/shared-sweep-limiter.ts)
+  is a plain counting semaphore (max 2), shared by EVERY active project's
+  sweep loop in the tab — without it, 3 active projects could each
+  independently fire their own 12-wide chunk request at once, up to 36
+  simultaneous vision calls against one shared Kimi account. Waiters queue
+  FIFO, so throughput on the shared resource divides fairly across whichever
+  projects are actively sweeping, with no per-policy bookkeeping needed.
 - [headless-verify.ts](src/lib/client/headless-verify.ts) /
   [headless-categorize.ts](src/lib/client/headless-categorize.ts) are
   DELIBERATELY independent reimplementations of `project-detail.tsx`'s own

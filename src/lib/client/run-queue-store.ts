@@ -24,11 +24,25 @@ import { runCategorizeHeadless, type CategorizeStatus } from "@/lib/client/headl
 
 export type RunKind = "verify" | "categorize";
 
+/**
+ * Which QUEUED project starts next when a slot frees:
+ *   - "fifo" (default): click order — the project waiting longest goes next.
+ *   - "smallest-first": whichever queued project has the fewest products goes
+ *     next, regardless of arrival order, so a quick project isn't stuck
+ *     behind one that will run for hours.
+ * Only affects the order queued entries are PICKED UP in — it never reorders
+ * or interrupts runs already active.
+ */
+export type SchedulingPolicy = "fifo" | "smallest-first";
+
 export type RunEntry = {
   /** Stable key for this run — same as projectId (one run per project at a time). */
   projectId: string;
   projectName: string;
   kind: RunKind;
+  /** Product count, when known — only used to order the queue under
+   *  "smallest-first"; irrelevant once a run is active. */
+  size?: number;
   status: RunStatus | CategorizeStatus | null;
   startedAt: number;
 };
@@ -43,6 +57,7 @@ const SETTLE_MS = 10_000;
 // Exported (not just the singleton below) so tests can instantiate an
 // isolated store instead of sharing app-wide mutable state between cases.
 export class RunQueueStore {
+  private policy: SchedulingPolicy = "fifo";
   private queue: RunEntry[] = [];
   // Display map: everything shown in the widget, including a just-finished
   // entry kept visible for SETTLE_MS after its run actually ended.
@@ -57,7 +72,8 @@ export class RunQueueStore {
   // when nothing has changed — recomputing fresh arrays on every call would
   // make every render look like a change and (in some React versions) loop
   // forever. Cache the snapshot and only rebuild it when emit() fires.
-  private cachedSnapshot: { active: RunEntry[]; queue: RunEntry[] } = { active: [], queue: [] };
+  private cachedSnapshot: { active: RunEntry[]; queue: RunEntry[]; policy: SchedulingPolicy } =
+    { active: [], queue: [], policy: this.policy };
 
   subscribe = (fn: Listener): (() => void) => {
     this.listeners.add(fn);
@@ -65,20 +81,43 @@ export class RunQueueStore {
   };
 
   private emit(): void {
-    this.cachedSnapshot = { active: [...this.active.values()], queue: [...this.queue] };
+    // The displayed queue order matches what pump() will actually pick next,
+    // under the current policy — so switching policy visibly reorders the
+    // waiting list immediately, not just the next pick.
+    this.cachedSnapshot = { active: [...this.active.values()], queue: this.orderedQueue(), policy: this.policy };
     for (const fn of this.listeners) fn();
   }
 
-  getSnapshot = (): { active: RunEntry[]; queue: RunEntry[] } => this.cachedSnapshot;
+  getSnapshot = (): { active: RunEntry[]; queue: RunEntry[]; policy: SchedulingPolicy } => this.cachedSnapshot;
+
+  getPolicy(): SchedulingPolicy {
+    return this.policy;
+  }
+
+  setPolicy(policy: SchedulingPolicy): void {
+    if (policy === this.policy) return;
+    this.policy = policy;
+    this.emit();
+  }
+
+  /** The queue in PICK order under the current policy — smallest-first sorts
+   *  by known size (unknown-size entries last, conservatively); fifo is
+   *  arrival order. Does not mutate the underlying queue. */
+  private orderedQueue(): RunEntry[] {
+    if (this.policy === "fifo") return [...this.queue];
+    return [...this.queue].sort((a, b) => (a.size ?? Infinity) - (b.size ?? Infinity));
+  }
 
   isBusy(projectId: string): boolean {
     return this.runningIds.has(projectId) || this.queue.some((q) => q.projectId === projectId);
   }
 
-  /** Add a project's next run to the queue. No-op if it's already running or queued. */
-  enqueue(projectId: string, projectName: string, kind: RunKind): void {
+  /** Add a project's next run to the queue. No-op if it's already running or
+   *  queued. `size` (product count), when known, only matters for ordering
+   *  under the "smallest-first" policy. */
+  enqueue(projectId: string, projectName: string, kind: RunKind, size?: number): void {
     if (this.isBusy(projectId)) return;
-    this.queue.push({ projectId, projectName, kind, status: null, startedAt: 0 });
+    this.queue.push({ projectId, projectName, kind, size, status: null, startedAt: 0 });
     this.emit();
     this.pump();
   }
@@ -107,10 +146,22 @@ export class RunQueueStore {
     this.emit();
   }
 
-  /** Start queued entries until MAX_ACTIVE truly-in-flight runs are reached. */
+  /** The queue entry `pump()` should start next, under the current policy. */
+  private pickNext(): RunEntry {
+    if (this.policy === "fifo") return this.queue[0];
+    let best = this.queue[0];
+    for (const entry of this.queue) {
+      if ((entry.size ?? Infinity) < (best.size ?? Infinity)) best = entry;
+    }
+    return best;
+  }
+
+  /** Start queued entries, in policy order, until MAX_ACTIVE truly-in-flight
+   *  runs are reached. */
   private pump(): void {
     while (this.runningIds.size < MAX_ACTIVE && this.queue.length > 0) {
-      const next = this.queue.shift()!;
+      const next = this.pickNext();
+      this.queue = this.queue.filter((q) => q !== next);
       this.stopFlags.set(next.projectId, false);
       this.runningIds.add(next.projectId);
       const entry: RunEntry = { ...next, startedAt: Date.now() };

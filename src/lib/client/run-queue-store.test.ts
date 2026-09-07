@@ -145,6 +145,58 @@ describe("RunQueueStore", () => {
     expect(store.getSnapshot().active.find((e) => e.projectId === "p1")?.kind).toBe("categorize");
   });
 
+  it("defaults to fifo and starts queued projects in click order", async () => {
+    expect(store.getPolicy()).toBe("fifo");
+    store.enqueue("p1", "P1", "verify", 3000);
+    store.enqueue("p2", "P2", "verify", 100);
+    store.enqueue("p3", "P3", "verify", 500);
+    store.enqueue("p4", "P4", "verify", 10); // smallest, but arrives last
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p4"]);
+    finish("p1");
+    // p1's card lingers for SETTLE_MS (a separate, already-covered behavior) —
+    // this test only cares that p4 (fifo, next in line) started.
+    await vi.waitFor(() => expect(verifyRunner).toHaveBeenCalledTimes(4));
+    const activeIds = store.getSnapshot().active.map((e) => e.projectId);
+    expect(activeIds).toEqual(expect.arrayContaining(["p2", "p3", "p4"]));
+  });
+
+  it("smallest-first starts the queued project with the fewest products next, regardless of arrival order", async () => {
+    store.enqueue("p1", "P1", "verify", 3000);
+    store.enqueue("p2", "P2", "verify", 100);
+    store.enqueue("p3", "P3", "verify", 500);
+    store.setPolicy("smallest-first");
+    store.enqueue("p4", "P4", "verify", 10); // arrives last, smallest overall
+    store.enqueue("p5", "P5", "verify"); // unknown size sorts last
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p4", "p5"]);
+
+    finish("p1");
+    await vi.waitFor(() => expect(verifyRunner).toHaveBeenCalledTimes(4));
+    // p4 (size 10, smallest of the two still waiting) takes the freed slot;
+    // p5 (unknown size, sorted last) keeps waiting.
+    expect(store.getSnapshot().active.map((e) => e.projectId)).toContain("p4");
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p5"]);
+  });
+
+  it("switching policy re-orders the DISPLAYED queue immediately, without touching active runs", () => {
+    store.enqueue("p1", "P1", "verify", 3000);
+    store.enqueue("p2", "P2", "verify", 100);
+    store.enqueue("p3", "P3", "verify", 500);
+    store.enqueue("p4", "P4", "verify", 50); // queued (4th)
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p4"]);
+    store.enqueue("p5", "P5", "verify", 10);
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p4", "p5"]);
+    store.setPolicy("smallest-first");
+    expect(store.getSnapshot().queue.map((e) => e.projectId)).toEqual(["p5", "p4"]);
+    expect(store.getSnapshot().active.map((e) => e.projectId).sort()).toEqual(["p1", "p2", "p3"]);
+  });
+
+  it("setPolicy to the same value is a no-op (no extra notifications)", () => {
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.setPolicy("fifo");
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("notifies subscribers on every state change and returns a stable snapshot reference otherwise", () => {
     const listener = vi.fn();
     const unsubscribe = store.subscribe(listener);

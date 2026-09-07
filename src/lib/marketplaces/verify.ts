@@ -63,7 +63,7 @@ const MAX_IMAGE_AI_ATTEMPTS = 3;
  * same rule as the pre-AI rollup — so a Match doesn't flicker to Warning
  * between background-sweep retry rounds.
  */
-function rollupStatus(result: VerifyResult): "ok" | "warning" | "mismatch" {
+export function rollupStatus(result: VerifyResult): "ok" | "warning" | "mismatch" {
   const fields = result.fields;
   const hasHardMismatch = fields.some((f) => f.severity === "mismatch" && HARD_FIELDS.has(f.field));
   const hasMismatch = fields.some((f) => f.severity === "mismatch");

@@ -1,5 +1,7 @@
 "use client";
 
+import { sweepLimiter } from "@/lib/client/shared-sweep-limiter";
+
 // Headless verify + image-sweep driver for the multi-project Run Queue
 // (run-queue-context.tsx). Deliberately independent of project-detail.tsx's
 // own runVerify: that version is wired into ONE page's component state
@@ -113,7 +115,15 @@ export async function runVerifyHeadless(
   for (let round = 0; round < 3; round++) {
     for (;;) {
       if (shouldStop()) return;
-      const { res, data } = await postWithRetry<SweepResponse>(`/api/projects/${projectId}/verify/images`, { cursor });
+      // Fair share: wait for a slot shared across every project's sweep loop
+      // in this tab before firing the next chunk — see shared-sweep-limiter.ts.
+      const release = await sweepLimiter.acquire();
+      let res: Response | null, data: SweepResponse | null;
+      try {
+        ({ res, data } = await postWithRetry<SweepResponse>(`/api/projects/${projectId}/verify/images`, { cursor }));
+      } finally {
+        release();
+      }
       if (!res || !data) {
         onStatus({ phase: "error", done: 0, total: 0, message: "Image sweep lost connection." });
         return;

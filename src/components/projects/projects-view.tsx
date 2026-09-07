@@ -523,7 +523,9 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
   function handleRunAction(e: React.MouseEvent, p: Project, action: "verify" | "categorize") {
     e.preventDefault();
     e.stopPropagation();
-    runQueue.enqueue(p.id, p.name, action);
+    // Product count powers the queue's "smallest-first" ordering option; it
+    // has no effect at all under the default click-order (fifo) policy.
+    runQueue.enqueue(p.id, p.name, action, p.productCount);
     toast.success(
       action === "verify" ? `Verify queued for "${p.name}"` : `Categorize queued for "${p.name}"`,
       { description: "Watch its progress in the corner of the screen — no need to open the project." },

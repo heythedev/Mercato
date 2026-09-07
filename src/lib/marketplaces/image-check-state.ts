@@ -76,3 +76,27 @@ export function requeueImageField(f: ImageFieldLike): string {
   f.match = false;
   return cause;
 }
+
+/**
+ * Group items by a key, preserving first-seen order within each group and
+ * across groups. Used by the sweep to find products sharing the EXACT same
+ * (catalog image, marketplace image) pair within one chunk — sibling SKUs
+ * uploaded adjacently often land together — so only the first of a group
+ * ("the representative") needs an AI call; the rest ("followers") copy its
+ * verdict. Deliberately in-memory and chunk-scoped rather than a database
+ * lookup across the whole project: measured against production data, an
+ * EXACT pair has never once repeated across separate requests, so a
+ * cross-request query would add real latency to every chunk for a payoff
+ * that has never materialized. This costs nothing when no group has more
+ * than one member.
+ */
+export function groupByKey<T>(items: T[], keyOf: (item: T) => string): T[][] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+  return [...groups.values()];
+}
