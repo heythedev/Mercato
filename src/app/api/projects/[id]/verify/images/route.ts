@@ -18,10 +18,17 @@ import {
   needsImageRequeue,
 } from "@/lib/marketplaces/image-check-state";
 
-// Products per sweep request. Matches the comparison lib's concurrency (6): one
-// chunk is one fully parallel wave of vision calls, and the 512 MB instance
-// never holds more than 6 products' image bytes at once.
-const CHUNK = 6;
+// Products per sweep request. Matches the comparison lib's concurrency below:
+// one chunk is one fully parallel wave of vision calls.
+//
+// Raised from 6: that number was sized for a 512 MB instance holding several
+// full-size marketplace images per product AND a thinking-enabled model that
+// took many seconds per call. Images are now compressed to ~20-60 KB before
+// upload, only the primary image is compared, and the vision verdict runs
+// with thinking off (a few seconds per call) — the real ceiling today is the
+// Kimi account's rate limit (200 requests/minute), not memory, and 12 stays
+// comfortably under it even when another project's sweep runs at the same time.
+const CHUNK = 12;
 
 type StoredField = {
   field: string;

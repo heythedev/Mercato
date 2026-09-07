@@ -1,3 +1,5 @@
+import { approvedCategoryForType } from "@/lib/ai/walmart-taxonomy";
+
 /**
  * Deciding whether Walmart's own category for a product is usable.
  *
@@ -103,5 +105,69 @@ export function parseWalmartCategoryPath(
   return {
     category: limited[limited.length - 1],
     path: limited.join(" > "),
+  };
+}
+
+// ── Spec Product Type sourced straight from a Walmart listing ────────────────
+// A product's Spec Product Type can arrive with NO AI involved — either from
+// OUR OWN published listing (Seller API) or from Walmart's whole-catalog
+// search keyed to the exact item verification matched. Either way it is
+// Walmart's own answer for that specific listing, not a model guess, and the
+// approved sheet maps every valid type onto exactly one client-approved
+// category — more authoritative than parsing a site-navigation breadcrumb.
+
+export type WalmartLiveCategoryResult = {
+  /** Verbatim taxonomy Spec Product Type, or null when nothing usable. */
+  specType: string | null;
+  /** The client-approved category this type belongs to, derived 1:1 from the
+   *  approved sheet; null when the type didn't resolve one. */
+  category: { category: string; path: string } | null;
+  /** True when a productType was present but rejected (an implausible
+   *  listing, or off the local valid-type list) — purely for caller logging. */
+  rejected: boolean;
+};
+
+const NO_RESULT: WalmartLiveCategoryResult = { specType: null, category: null, rejected: false };
+
+/**
+ * Resolve a Spec Product Type + approved category for ONE product from its
+ * stored liveData. Returns nulls when there is nothing usable — the caller
+ * falls through to AI categorization exactly as if this function didn't exist.
+ *
+ * `catalogCategoryPath` is Walmart's own department breadcrumb for the search
+ * result — present ONLY when `rawProductType` came from the whole-catalog
+ * source (the seller-owned lookup IS our own listing, so it carries no
+ * separate breadcrumb to sanity-check). When present, it goes through the
+ * SAME `implausibleWalmartCategory` guard already proven on the Affiliate
+ * breadcrumb, so a Walmart keyword-driven misfiling (a masonry tool under
+ * "Toys", per the module doc above) is caught the same way regardless of
+ * which of the two sources produced the type.
+ *
+ * `validTypeByNorm` looks up a punctuation/case-insensitive candidate against
+ * the local taxonomy; pass a Map with `size === 0` (taxonomy unavailable) to
+ * accept `rawProductType` verbatim rather than reject everything.
+ */
+export function resolveWalmartLiveCategory(
+  productName: string,
+  rawProductType: string | null | undefined,
+  catalogCategoryPath: string[] | null | undefined,
+  normalize: (s: string) => string,
+  validTypeByNorm: ReadonlyMap<string, string>,
+): WalmartLiveCategoryResult {
+  const pt = rawProductType?.trim();
+  if (!pt) return NO_RESULT;
+
+  if (catalogCategoryPath?.length && implausibleWalmartCategory(productName, catalogCategoryPath.join(" > "))) {
+    return { specType: null, category: null, rejected: true };
+  }
+
+  const canonical = validTypeByNorm.size ? validTypeByNorm.get(normalize(pt)) : pt;
+  if (!canonical) return { specType: null, category: null, rejected: true };
+
+  const approvedCat = approvedCategoryForType(canonical);
+  return {
+    specType: canonical,
+    category: approvedCat ? { category: approvedCat, path: `${approvedCat} > ${canonical}` } : null,
+    rejected: false,
   };
 }

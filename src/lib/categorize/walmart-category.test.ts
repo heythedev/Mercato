@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { implausibleWalmartCategory, parseWalmartCategoryPath } from "./walmart-category";
+import { implausibleWalmartCategory, parseWalmartCategoryPath, resolveWalmartLiveCategory } from "./walmart-category";
 
 describe("parseWalmartCategoryPath", () => {
   it("strips the Home Page prefix and collapses deep paths to top level + leaf", () => {
@@ -74,5 +74,83 @@ describe("implausibleWalmartCategory", () => {
   it("keeps genuine cross-category trade products", () => {
     // Leather work gloves really do belong under Clothing > Gloves.
     expect(implausibleWalmartCategory("Bon 84-375 Gloves - Leather Palm - XL", "Clothing > Bags & Accessories > Hats, Gloves & Scarves > Gloves")).toBe(false);
+  });
+});
+
+describe("resolveWalmartLiveCategory", () => {
+  // Real approved-sheet values (walmart_approved_categories.csv), verified
+  // live against Walmart's own taxonomy on 2026-09-03.
+  const normalize = (s: string) => s.trim().toLowerCase();
+  const validTypes = new Map([
+    [normalize("Vehicle Rotors"), "Vehicle Rotors"],
+    [normalize("Disc Brake Calipers"), "Disc Brake Calipers"],
+  ]);
+
+  it("resolves both the Spec Product Type and its approved category with no path to check", () => {
+    // The seller-owned lookup (our own listing) carries no separate breadcrumb.
+    expect(resolveWalmartLiveCategory("R1 Concepts Brake Rotor Set", "Vehicle Rotors", null, normalize, validTypes))
+      .toEqual({
+        specType: "Vehicle Rotors",
+        category: { category: "Vehicles, Parts & Accessories", path: "Vehicles, Parts & Accessories > Vehicle Rotors" },
+        rejected: false,
+      });
+  });
+
+  it("canonicalizes a near-miss answer (case/whitespace) onto the listed value", () => {
+    const result = resolveWalmartLiveCategory("A rotor", "  vehicle rotors ", null, normalize, validTypes);
+    expect(result.specType).toBe("Vehicle Rotors");
+    expect(result.rejected).toBe(false);
+  });
+
+  it("rejects a Spec Product Type not on the local valid-type list", () => {
+    const result = resolveWalmartLiveCategory("Something", "Not A Real Type", null, normalize, validTypes);
+    expect(result).toEqual({ specType: null, category: null, rejected: true });
+  });
+
+  it("accepts the type verbatim when the local taxonomy is unavailable (empty map)", () => {
+    const result = resolveWalmartLiveCategory("Something", "Whatever Walmart Says", null, normalize, new Map());
+    expect(result.specType).toBe("Whatever Walmart Says");
+    expect(result.rejected).toBe(false);
+  });
+
+  it("rejects a whole-catalog match whose own breadcrumb is implausible for the product", () => {
+    // Same real misfiling pattern as implausibleWalmartCategory's own tests —
+    // a trade tool's Product Type must not be trusted when Walmart's own
+    // department for THIS search result is a non-tool top level.
+    const result = resolveWalmartLiveCategory(
+      "Bon 21-101 Lewis Pin - 1 2-inch Diameter",
+      "Disc Brake Calipers",
+      ["Auto & Tires", "Automotive Replacement Parts"],
+      normalize,
+      validTypes,
+    );
+    expect(result).toEqual({ specType: null, category: null, rejected: true });
+  });
+
+  it("trusts a whole-catalog match whose breadcrumb is plausible", () => {
+    const result = resolveWalmartLiveCategory(
+      "R1 Concepts Brake Caliper",
+      "Disc Brake Calipers",
+      ["Auto & Tires", "Automotive Replacement Parts", "Brakes & Brake Parts"],
+      normalize,
+      validTypes,
+    );
+    expect(result.specType).toBe("Disc Brake Calipers");
+    expect(result.category?.category).toBe("Vehicles, Parts & Accessories");
+  });
+
+  it("returns nothing usable when there is no productType at all", () => {
+    expect(resolveWalmartLiveCategory("Anything", null, null, normalize, validTypes))
+      .toEqual({ specType: null, category: null, rejected: false });
+    expect(resolveWalmartLiveCategory("Anything", "", null, normalize, validTypes))
+      .toEqual({ specType: null, category: null, rejected: false });
+  });
+
+  it("a type resolving no approved category still counts as a valid spec type, just with no category shortcut", () => {
+    const noCategoryMap = new Map([[normalize("Orphan Type"), "Orphan Type"]]);
+    const result = resolveWalmartLiveCategory("Something", "Orphan Type", null, normalize, noCategoryMap);
+    expect(result.specType).toBe("Orphan Type");
+    expect(result.category).toBeNull();
+    expect(result.rejected).toBe(false);
   });
 });

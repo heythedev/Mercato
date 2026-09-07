@@ -201,8 +201,21 @@ export type SpecAssignResult = {
 };
 
 const BATCH = 15;
-const CONCURRENCY = 3;
+// Raised from 3: this pass and the image sweep are the two throughput floors
+// on a large catalog, and kimi-k line calls at this size run 8-12s regardless
+// of concurrency — the account tier (50 concurrent, 200 req/min) has ample
+// headroom left even shared with a concurrent image sweep.
+const CONCURRENCY = 10;
 const MAX_ATTEMPTS = 3;
+// Extra full rounds over whatever is STILL blank after the first leftover
+// re-pass (an off-list pick, or a genuine empty answer) — each round only
+// gets fewer, smaller batches, so this is bounded, not open-ended. Without
+// this, a product could reach the end of `assignSpecProductTypes` blank
+// simply because it landed in the one batch that had a bad moment, with
+// nothing to distinguish it from a product the model genuinely cannot place —
+// both looked identical: silently empty until someone clicked Categorize
+// again by hand.
+const MAX_LEFTOVER_ROUNDS = 3;
 
 /**
  * Assign a valid Spec Product Type to each product. Never throws; products the
@@ -394,16 +407,24 @@ Respond ONLY with a JSON array, no markdown:
 
   // ── Leftover re-pass ───────────────────────────────────────────────────────
   // Items whose batch ran but stayed blank (empty answers, out-of-slice picks)
-  // get one more chance in half-size batches. Whatever remains after this is an
-  // honest blank for the next run.
-  if (!res.deadlineHit) {
+  // get more chances in progressively smaller batches — up to
+  // MAX_LEFTOVER_ROUNDS rounds, each only over what the PREVIOUS round still
+  // left blank. Bounded and self-terminating: a round that assigns nothing new
+  // stops the loop immediately rather than burning the remaining rounds on a
+  // batch that is genuinely stuck, and whatever is still blank after the last
+  // round is an honest "the model could not place this" for the caller to
+  // report — not indistinguishable from "nobody has looked at it yet".
+  for (let round = 0; round < MAX_LEFTOVER_ROUNDS && !res.deadlineHit; round++) {
     const leftovers: SpecBatch[] = [];
+    const halfBatch = Math.max(1, Math.ceil(BATCH / 2 ** (round + 1)));
     for (const b of batches) {
       const missing = b.batch.filter((p) => !assigned.has(p.id));
-      for (let i = 0; i < missing.length; i += Math.ceil(BATCH / 2)) {
-        leftovers.push({ ...b, batch: missing.slice(i, i + Math.ceil(BATCH / 2)) });
+      for (let i = 0; i < missing.length; i += halfBatch) {
+        leftovers.push({ ...b, batch: missing.slice(i, i + halfBatch) });
       }
     }
+    if (!leftovers.length) break;
+    const assignedBefore = assigned.size;
     for (let i = 0; i < leftovers.length; i += CONCURRENCY) {
       if (opts?.deadlineAt && Date.now() > opts.deadlineAt - 10_000) {
         res.deadlineHit = true;
@@ -412,6 +433,9 @@ Respond ONLY with a JSON array, no markdown:
       await Promise.all(leftovers.slice(i, i + CONCURRENCY).map((b) => runBatch(b, 1)));
       progress();
     }
+    // No forward movement this round — further rounds would just repeat the
+    // same non-answer for the same items. Stop rather than spend the budget.
+    if (assigned.size === assignedBefore) break;
   }
 
   return res;

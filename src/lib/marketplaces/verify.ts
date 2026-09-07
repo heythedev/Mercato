@@ -378,7 +378,10 @@ async function applySemanticTitleCheck(results: VerifyResult[], products: Produc
   const { moonshot, MOONSHOT_TEXT_MODEL } = await import("@/lib/ai/moonshot");
 
   let unavailable: string | null = null;
-  const CONCURRENCY = 5;
+  // Raised from 5 — the account's rate limit (200 requests/minute) is the
+  // real ceiling now, not any per-call memory cost (this pass sends text
+  // only, no images), and it needs headroom to run alongside the image sweep.
+  const CONCURRENCY = 10;
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
     // Stop starting waves once the provider is down — every call would fail
     // identically, and a failure here never writes anything anyway.
@@ -1865,7 +1868,84 @@ async function verifyWalmart(products: Product[]): Promise<VerifyResult[]> {
       `slowest ${limiter.stats.maxLatencyMs}ms`,
   );
 
+  // Deterministic Spec Product Type, straight from Walmart — no AI. Runs as its
+  // own pass, after identity is settled, so a lookup failure here can only ever
+  // cost a product its AI-categorization shortcut, never a wrong verify verdict.
+  await enrichWalmartProductTypes(results, activeProducts);
+
   return [...discontinuedResults, ...results];
+}
+
+/**
+ * Fill in the Spec Product Type Walmart already has on file for each confirmed
+ * match, straight from Walmart's whole-catalog search — the exact value the
+ * client's export needs, with no AI guess involved.
+ *
+ * Only asked for products verification actually matched (ok/warning — a
+ * mismatch or not_found has no listing to ask about) and only when the seller-
+ * owned lookup (getSellerItemByGtin, inside the main pass above) didn't already
+ * answer for free. Stored under the SAME `liveData.productType` key that path
+ * already writes, so every downstream consumer (categorize's spec-type skip,
+ * the export mapping) needs no changes to use it. `catalogCategoryPath` is new
+ * and kept separate: it is Walmart's own department breadcrumb for THIS
+ * search result, used only to sanity-check the type before trusting it, never
+ * written to an export — overwriting the existing `categoryPath` field would
+ * destroy the Affiliate breadcrumb categorize's OWN rich-taxonomy path parsing
+ * depends on.
+ *
+ * Own bounded-concurrency pool, deliberately separate from the Affiliate
+ * `limiter` above: Walmart's catalog-search endpoint pushes back hard past
+ * roughly 3 requests/second, far below the Affiliate API's ceiling, and mixing
+ * the two under one adaptive limiter would let this endpoint's 429s needlessly
+ * throttle Affiliate lookups (or vice versa).
+ */
+export async function enrichWalmartProductTypes(results: VerifyResult[], products: Product[]): Promise<void> {
+  const byId = new Map(products.map((p) => [p.id, p]));
+  type Target = { result: VerifyResult; upc: string; itemId: string };
+  const targets: Target[] = [];
+  for (const r of results) {
+    if (r.status !== "ok" && r.status !== "warning") continue;
+    const ld = r.liveData as Record<string, unknown> | undefined;
+    if (typeof ld?.productType === "string" && ld.productType.trim()) continue; // already sourced (seller catalog)
+    // Walmart's Affiliate API returns itemId as a JSON NUMBER, not a string —
+    // confirmed against production data (45,186/45,186 stored itemIds are the
+    // number type). WalmartItem.itemId's `string` type is aspirational, not
+    // what actually arrives; a strict `typeof === "string"` check here would
+    // silently skip every product ever matched through the Affiliate path.
+    const rawItemId = ld?.itemId;
+    const itemId = typeof rawItemId === "string" || typeof rawItemId === "number" ? String(rawItemId) : "";
+    const upc = byId.get(r.productId)?.upc ?? "";
+    if (!upc || !itemId) continue;
+    targets.push({ result: r, upc, itemId });
+  }
+  if (!targets.length) return;
+
+  const { findWalmartCatalogMatch } = await import("@/lib/walmart/seller-client");
+  const { AdaptiveLimiter, runPool } = await import("@/lib/walmart/throttle");
+  const catalogLimiter = new AdaptiveLimiter({ start: 3, min: 1, max: 8, growthThreshold: 30 });
+
+  // Belt-and-braces: seller-client.ts's underlying fetch carries no timeout of
+  // its own, so a single hung connection to Walmart (observed once live while
+  // building this) can otherwise occupy a limiter slot forever and stall this
+  // whole pass — inside a verify request that has its OWN 300s ceiling — with
+  // nothing to notice or recover. Giving up waiting after 20s can't cancel the
+  // real request, but it guarantees this pass always finishes.
+  const CATALOG_LOOKUP_TIMEOUT_MS = 20_000;
+  const withTimeout = <T,>(p: Promise<T>): Promise<T | undefined> =>
+    Promise.race([p, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), CATALOG_LOOKUP_TIMEOUT_MS))]);
+
+  await runPool(targets, catalogLimiter, async (t) => {
+    const match = await withTimeout(findWalmartCatalogMatch(t.upc, t.itemId).catch(() => undefined));
+    if (!match) return;
+    const ld = t.result.liveData as Record<string, unknown>;
+    if (match.productType) ld.productType = match.productType;
+    if (match.categoryPath?.length) ld.catalogCategoryPath = match.categoryPath;
+  });
+
+  console.log(
+    `[walmart-catalog] product-type lookup: ${targets.length} requested, ` +
+      `concurrency settled at ${catalogLimiter.width}, ${catalogLimiter.stats.rateLimited} rate-limited`,
+  );
 }
 
 // ── BestBuy ───────────────────────────────────────────────────────────────────

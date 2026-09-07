@@ -186,6 +186,70 @@ export async function getSellerItemByGtin(rawCode: string): Promise<SellerItem |
   }
 }
 
+// ── Whole-catalog Product Type lookup ─────────────────────────────────────────
+// /v3/items/walmart/search covers every seller's listings on Walmart, unlike
+// /v3/items/search above (our own catalog only) — so it can answer "what Spec
+// Product Type does Walmart have on file for this UPC" for products we don't
+// personally sell, which is the common case for a vendor's brand-new catalog.
+// Same OAuth token, same host, distinct path — kept alongside getSellerItemByGtin.
+
+export type WalmartCatalogMatch = {
+  itemId: string;
+  /** Verbatim Spec Product Type (level-3 taxonomy leaf) for this exact listing. */
+  productType?: string;
+  /** Walmart's own department breadcrumb for this listing, most general first
+   *  (from `properties.categories`). Used only as a plausibility check before
+   *  trusting `productType` — never written to an export as-is. */
+  categoryPath?: string[];
+};
+
+/**
+ * Look up the Spec Product Type Walmart has on file for a specific, ALREADY
+ * confirmed listing (by UPC + the exact itemId verification matched).
+ *
+ * The search ranks by relevance, not identity — on a real 1,930-product run,
+ * 262 UPC searches returned a DIFFERENT item first than the one verification
+ * matched (a sibling listing, a different seller's copy of the same barcode).
+ * Taking `items[0]` on faith would import that other product's category, so
+ * this only returns a match when the search result set actually CONTAINS
+ * `wantItemId` — never a nearby guess.
+ *
+ * Returns null when Walmart answered but doesn't carry this exact item (or the
+ * UPC at all), undefined when the lookup itself failed — callers must not
+ * treat a failure as "Walmart doesn't know this product".
+ */
+export async function findWalmartCatalogMatch(
+  rawUpc: string,
+  wantItemId: string,
+): Promise<WalmartCatalogMatch | null | undefined> {
+  if (!rawUpc?.trim() || !wantItemId?.trim()) return null;
+  try {
+    const data = await sellerFetch(`/v3/items/walmart/search?upc=${encodeURIComponent(rawUpc.trim())}`);
+    if (data === undefined) return undefined;
+    if (data === null) return null;
+    const items = (data.items as Record<string, unknown>[] | undefined) ?? [];
+    const hit = items.find((it) => String(it.itemId ?? "").trim() === wantItemId.trim());
+    if (!hit) return null;
+    const props = hit.properties as Record<string, unknown> | undefined;
+    const rawCats = props?.categories;
+    const categoryPath = Array.isArray(rawCats)
+      ? rawCats.map((c) => (typeof c === "string" ? c.trim() : "")).filter(Boolean)
+      : undefined;
+    const productType = typeof hit.productType === "string" ? hit.productType.trim() : "";
+    return {
+      itemId: wantItemId,
+      ...(productType ? { productType } : {}),
+      ...(categoryPath?.length ? { categoryPath } : {}),
+    };
+  } catch (e) {
+    // Auth errors and rate limiting must propagate — see getSellerItemByGtin.
+    if (e instanceof Error && /auth failed/.test(e.message)) throw e;
+    if (e instanceof RateLimitError) throw e;
+    console.error("[walmart-catalog] type lookup error:", e);
+    return undefined;
+  }
+}
+
 // ── Product-type taxonomy ─────────────────────────────────────────────────────
 // GET /v3/items/taxonomy returns Walmart's Product Type (PT) taxonomy — the
 // authoritative list of "Spec Product Type" values a new listing may use. This

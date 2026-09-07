@@ -519,13 +519,16 @@ export async function compareProductImagesBatch(
  */
 export async function compareVendorAgainstAllImagesBatch(
   items: Array<{ vendorImageUrl: string; liveImageUrls: string[]; productName: string }>,
-  // Memory, not throughput, sets this ceiling: each in-flight comparison holds
-  // a vendor image plus up to 3 marketplace angles as raw bytes (up to
-  // MAX_IMAGE_BYTES each) AND their base64 copies inside the model call. At 12
-  // concurrent that peak reaches into the hundreds of MB — enough to OOM the
-  // 512 MB production instance mid-run. 6 halves the peak; the vision call's
-  // latency dominates each slot, so wall-clock cost is far less than 2x.
-  concurrency = 6,
+  // Raised from 6. That number was sized when every in-flight comparison held
+  // up to 3 full-size marketplace angles as raw bytes plus their base64 copies
+  // — hundreds of MB at 12 concurrent, enough to OOM the 512 MB instance.
+  // Today compareVendorAgainstAllImages only ever fetches the PRIMARY image
+  // (maxAngles=1, see its own doc comment) and every image is compressed to a
+  // ~20-60 KB JPEG before upload, so the real per-slot footprint is a small
+  // fraction of what it was. The account's rate limit (200 requests/minute)
+  // is the actual ceiling now, not memory — this stays comfortably under it
+  // even with a second project's sweep running at the same time.
+  concurrency = 12,
 ): Promise<ImageCompareResult[]> {
   const results: ImageCompareResult[] = new Array(items.length);
   for (let i = 0; i < items.length; i += concurrency) {

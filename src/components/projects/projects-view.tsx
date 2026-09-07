@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Plus, FolderOpen, Package, Clock, CheckCircle2, Loader2, Trash2,
   Search, ChevronLeft, ChevronRight, X, ChevronDown, Check, Square, CheckSquare,
-  CalendarDays,
+  CalendarDays, Play,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,12 @@ import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 import { toTileId } from "@/lib/marketplaces/catalog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { NewProjectModal } from "@/components/projects/new-project-modal";
+import { runQueue, nextActionFor } from "@/lib/client/run-queue-store";
+
+// Statuses the classic per-project page already owns — a run started there
+// (or a still-finishing one from a previous session) must not ALSO get
+// picked up by the queue, which would double-run the same project.
+const SERVER_BUSY_STATUSES = new Set(["verifying", "categorizing", "exporting"]);
 
 const PAGE_SIZE = 12;
 
@@ -395,6 +401,9 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  // Re-renders this list whenever the Run Queue changes, so a card's Run
+  // button disables the instant it's enqueued (or a slot frees and it starts).
+  useSyncExternalStore(runQueue.subscribe, runQueue.getSnapshot, runQueue.getSnapshot);
 
   const marketplaceOptions = useMemo(() => {
     const allowed = new Set(allowedTiles);
@@ -509,6 +518,16 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
     } finally {
       setDeleting(null);
     }
+  }
+
+  function handleRunAction(e: React.MouseEvent, p: Project, action: "verify" | "categorize") {
+    e.preventDefault();
+    e.stopPropagation();
+    runQueue.enqueue(p.id, p.name, action);
+    toast.success(
+      action === "verify" ? `Verify queued for "${p.name}"` : `Categorize queued for "${p.name}"`,
+      { description: "Watch its progress in the corner of the screen — no need to open the project." },
+    );
   }
 
   async function handleBulkDelete() {
@@ -708,6 +727,14 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
             const StatusIcon = status.icon;
             const isDeleting = deleting === p.id;
             const isSelected = selected.has(p.id);
+            // Run Queue trigger: only offered when there's an obvious next
+            // step AND nothing is already working this project (queued, in
+            // the queue's active set, or mid-run from the classic per-project
+            // page — a server-side transient status covers that last case).
+            const runAction = SERVER_BUSY_STATUSES.has(p.status)
+              ? null
+              : nextActionFor(displayStatus, SKIP_VERIFY_MARKETPLACES.has(p.marketplace.toLowerCase()));
+            const runQueued = runAction ? runQueue.isBusy(p.id) : false;
 
             return (
               <div key={p.id} className="relative group">
@@ -751,6 +778,31 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
                         <StatusIcon className={cn("w-3 h-3", ["verifying","categorizing","exporting"].includes(p.status) && "animate-spin")} />
                         {status.label}
                       </span>
+                      {runAction && (
+                        <button
+                          onClick={(e) => handleRunAction(e, p, runAction)}
+                          disabled={runQueued}
+                          title={
+                            runQueued
+                              ? "Already queued or running"
+                              : runAction === "verify" ? "Run Verify" : "Run Categorize"
+                          }
+                          aria-label={runAction === "verify" ? "Run Verify" : "Run Categorize"}
+                          className={cn(
+                            "shrink-0 flex items-center justify-center overflow-hidden rounded-lg text-gray-500",
+                            "border border-gray-200 bg-white shadow-sm",
+                            "hover:border-primary/40 hover:bg-primary/5 hover:text-primary hover:shadow-none",
+                            "transition-[width,opacity,margin] duration-200 ease-out",
+                            "w-0 h-7 opacity-0 -ml-2 group-hover:w-7 group-hover:opacity-100 group-hover:ml-0",
+                            "disabled:opacity-30 disabled:cursor-not-allowed"
+                          )}
+                        >
+                          {runQueued
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                            : <Play className="w-3 h-3 shrink-0" />
+                          }
+                        </button>
+                      )}
                       <button
                         onClick={(e) => handleDelete(e, p.id, p.name)}
                         disabled={isDeleting}

@@ -275,6 +275,29 @@ newline-joined) using `WALMART_AFFILIATE_PRIVATE_KEY`.
 
 Both degrade silently to no-ops without `ANTHROPIC_API_KEY`.
 
+**Walmart Spec Product Type enrichment** (`enrichWalmartProductTypes` in
+verify.ts, added for item 1 of the 2026-09 cost/accuracy work) — a THIRD pass,
+Walmart-only, after identity is settled: for every confirmed match (`ok` /
+`warning`) verification didn't already resolve via the seller-owned lookup
+(`getSellerItemByGtin`), it asks Walmart's WHOLE-CATALOG search
+(`findWalmartCatalogMatch` in [seller-client.ts](src/lib/walmart/seller-client.ts),
+`/v3/items/walmart/search?upc=`) for the Spec Product Type on file for the
+EXACT item id verification matched — never the search's own top-ranked result
+(a real run found 262/1930 UPC searches ranked a different listing first).
+Deliberately its own `AdaptiveLimiter` (start 3, separate from the Affiliate
+`limiter` above): the catalog-search endpoint pushes back hard past ~3 req/s,
+far below the Affiliate ceiling, and sharing one limiter would let either
+endpoint's pushback wrongly throttle the other. Stores the result under the
+SAME `liveData.productType` key the seller-owned path already writes (so every
+downstream consumer needs no changes) plus a NEW `liveData.catalogCategoryPath`
+(Walmart's own department breadcrumb for that search result, array form) used
+only as a plausibility check before the category step below trusts it — never
+written to an export. ⚠️ Walmart returns `itemId` as a JSON **number**, not a
+string, in the Affiliate response (confirmed against 45,186/45,186 production
+rows) — `WalmartItem.itemId?: string`'s declared type is aspirational; code
+reading it back out of stored `liveData` must accept `string | number` and
+coerce, not `typeof x === "string"`, or it silently matches nothing.
+
 **Severity model.** `HARD_FIELDS = {title, brand, model}`. Only a hard-field
 mismatch escalates the product to `mismatch`; soft fields (images, description,
 dimensions) cap at `warning`. This exists specifically so an AI-detected colour
@@ -334,6 +357,56 @@ written back to the `Product` row.
 **`PUT`** on the same route imports categories from a CSV (`SKU`/`name` + `Category`
 [+ `Category Path`]), matching by exact `vendorSku` then normalized name. This
 supports the workflow: AI categorize → download → human review → re-upload.
+
+**Deterministic sources ahead of the AI, in priority order** (2026-09 cost/
+accuracy work — the AI now only ever sees the leftover fraction):
+
+1. **Walmart's own Spec Product Type**, from EITHER the seller-owned lookup or
+   the whole-catalog one above. [resolveWalmartLiveCategory](src/lib/categorize/walmart-category.ts)
+   validates it against the local taxonomy, runs the SAME
+   `implausibleWalmartCategory` guard against `catalogCategoryPath` when that
+   field is present (rejecting a Walmart keyword-driven misfiling — measured
+   well under 1% of listings), and derives the client-approved category 1:1
+   via `approvedCategoryForType`. A hit sets confidence 1.0 and skips BOTH the
+   AI category call and (via the existing `walmartSpecTypeById` skip check)
+   the AI spec-type pass below. On the client's Walmart files this alone
+   resolved ~92% of products with zero AI calls.
+2. **Cross-project reuse** ([category-reuse.ts](src/lib/categorize/category-reuse.ts)) —
+   before anything left goes to the AI, a single query checks whether ANY
+   other project (any user, same marketplace) already categorized a product
+   with the EXACT SAME normalized name, confidently (`categoryConfidence >
+   0.6`), and reuses that verdict (category, path, confidence, spec type)
+   verbatim. This durably extends `categorize.ts`'s own in-memory
+   `categorizationCache` — that Map dies on cold start and never sees a name
+   categorized under a different project; the `Product` table itself is the
+   permanent record of every judgment ever made, so it doubles as a free
+   cache with no new storage. Raw SQL (`$queryRaw`, chunks of 500 names) — the
+   normalizing regex MUST use a bracket expression (`'[[:space:]]+'`), not
+   `'\s+'`: verified against the real DB that the latter silently collapses to
+   `s+` and eats trailing "s" characters in product names (a Postgres string-
+   literal/backslash interaction, reproduced independent of
+   `standard_conforming_strings`). No index yet on the normalizing expression —
+   accepted as a ~6-13s-per-500-names cost against an 88k-row table; a fast-
+   follow if the table grows enough for that to matter.
+3. **The AI**, for whatever remains — same batching/model/confidence-gate
+   behavior as before, just a much smaller input set.
+
+**Spec Product Type convergence** ([walmart-spec-product-type.ts](src/lib/ai/walmart-spec-product-type.ts)) —
+production evidence (2026-09) showed large catalogs finishing with 35-55% of
+products' level-3 type still blank despite the project showing a completed
+run: the leftover re-pass ran exactly ONE extra round, and a spec pass that
+finished WITHIN its time budget but left genuine blanks (an empty model
+answer, not a deadline cutoff) never set the job's `partial` flag — so nothing
+ever revisited those products unless a person read the toast and clicked
+Categorize again by hand. Fixed by (a) up to `MAX_LEFTOVER_ROUNDS` (3) shrinking
+rounds instead of one, stopping early the moment a round assigns nothing new,
+and (b) the route's `anyPartial` now also true whenever `specTypesRemaining >
+0`, which feeds the client's EXISTING resume loop (it already tracked
+`specTypesRemaining` for exactly this case, per its own comments — only the
+server side was never wired to use it) — the loop's own no-progress bail-out
+(two resumes with no movement) still caps a genuinely-stuck item at a bounded
+number of attempts, so this cannot loop forever. Concurrency raised 3 → 10 to
+match the account's real rate-limit headroom.
 
 ### 6.4 Export — `POST /api/projects/[id]/export`
 
@@ -467,6 +540,51 @@ Server Components fetch and pass initial data down; interactive views are
 
 Feedback is `sonner` toasts throughout; destructive actions route through
 `ui/confirm-dialog.tsx`.
+
+**Multi-project Run Queue** (item 2 of the 2026-09 cost/accuracy work —
+[run-queue-store.ts](src/lib/client/run-queue-store.ts)) lets a user start
+Verify or Categorize on several projects from the list page and let them run
+without keeping each project's own page open, in ONE browser tab. Steps stay
+manual (a click starts each one, same as always) — this only lets more than
+one already-manual run be in flight at once.
+
+- A plain module-level singleton (`export const runQueue`), not React state —
+  a background task scheduler is exactly the kind of thing that gets subtly
+  wrong (double-starts, stale closures) as a `useEffect` chain, so the actual
+  queue/concurrency bookkeeping is synchronous, ordinary JS. The UI subscribes
+  via `useSyncExternalStore` (`RunQueueWidget`, mounted once in `(app)/layout.tsx`,
+  visible from any page) and a `Play` button per card in `projects-view.tsx`
+  (`nextActionFor(status, isSkipVerify)` decides verify vs. categorize vs.
+  nothing to offer).
+- Policy: click order (FIFO), `MAX_ACTIVE = 3` truly-in-flight runs; a 4th
+  queues and starts the instant a slot frees. A finished/errored/paused card
+  stays visible for `SETTLE_MS` (10s) after the run itself ends — tracked via
+  a SEPARATE `runningIds` Set from the display `active` Map, since the
+  concurrency slot must free immediately even while the card lingers, or a
+  quick 200-product run would block a queued one for 10 needless seconds.
+- [headless-verify.ts](src/lib/client/headless-verify.ts) /
+  [headless-categorize.ts](src/lib/client/headless-categorize.ts) are
+  DELIBERATELY independent reimplementations of `project-detail.tsx`'s own
+  `runVerify`/`runCategorize` resume loops (same retry-on-502/503/504, same
+  resume-until-done, same no-progress bail-out for categorize) — reporting via
+  a status callback instead of component state and toasts. Not shared code
+  with the page's version: refactoring the page to depend on the SAME driver
+  the background queue uses would risk the working single-project flow for no
+  real benefit. `runVerifyHeadless` also drives the image sweep to completion
+  itself (verify-step.tsx's sweep effect only fires while that page is
+  mounted; a queue-driven run has no page mounted, so "Verify" wouldn't
+  otherwise include images at all).
+- Known gap: no server-side lock against the SAME project being run BOTH from
+  the queue AND from its own open detail page at the same time — a narrow,
+  pre-existing class of risk (two browser tabs on one project page could
+  already race today) that a full fix would need a per-project run lock for,
+  left for the server-side worker (a later step) rather than solved here.
+- Throughput backing this: image-sweep chunk size 6 → 12 ([verify/images/route.ts](src/app/api/projects/[id]/verify/images/route.ts)),
+  `compareVendorAgainstAllImagesBatch` default concurrency 6 → 12, Walmart
+  semantic-title-check concurrency 5 → 10 — all three comments explain the
+  ORIGINAL numbers were sized for full-size images / a thinking-enabled model
+  on a 512 MB instance, none of which is still true; the account's rate limit
+  (200 req/min) is the real ceiling now.
 
 ---
 

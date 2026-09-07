@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { SidebarProvider, SidebarInset } from "@/components/layout/sidebar-context";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AppNavbar } from "@/components/layout/app-navbar";
+import { RunQueueWidget } from "@/components/projects/run-queue-widget";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
@@ -53,6 +54,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <main className="flex-1 pt-14 lg:pt-0 lg:pr-52">{children}</main>
         </SidebarInset>
       </div>
+      {/* Multi-project Run Queue status — visible from any page, renders
+          nothing while the queue is empty. */}
+      <RunQueueWidget />
     </SidebarProvider>
   );
 }

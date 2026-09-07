@@ -18,11 +18,13 @@ import { preCategorizeStatus } from "@/lib/projects/marketplace-flow";
 import {
   implausibleWalmartCategory,
   parseWalmartCategoryPath,
+  resolveWalmartLiveCategory,
 } from "@/lib/categorize/walmart-category";
 import {
   loadWalmartRichTaxonomy,
   loadWalmartProductTypes,
 } from "@/lib/ai/walmart-taxonomy";
+import { findReusableCategories, normalizeProductName } from "@/lib/categorize/category-reuse";
 import { checkAiAvailable } from "@/lib/ai/moonshot";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
@@ -512,28 +514,42 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           let breadcrumbHint: string | null = null;
           if (mpLower === "walmart") {
             const ld = p.liveData as Record<string, unknown> | null;
-            // productType is present when the Seller API was the match source.
-            // Independent of the breadcrumb; stored only when it's a real
-            // taxonomy value (accepted as-is if the local list is unavailable).
-            const pt = typeof ld?.productType === "string" ? ld.productType.trim() : null;
-            if (pt) {
-              const canonical = walmartSpecByNorm.size ? walmartSpecByNorm.get(normTax(pt)) : pt;
-              if (canonical) walmartSpecTypeById.set(p.id, canonical);
-              else walmartSpecRejected++;
+            // productType is present when the match source was OUR OWN
+            // catalog (Seller API) or Walmart's whole-catalog search keyed to
+            // the exact matched listing (verify.ts's enrichWalmartProductTypes)
+            // — either way, Walmart's own answer for this specific item, not a
+            // guess. catalogCategoryPath (whole-catalog source only) is used
+            // inside resolveWalmartLiveCategory purely as a plausibility check.
+            const rawProductType = typeof ld?.productType === "string" ? ld.productType : null;
+            const catalogPath = Array.isArray(ld?.catalogCategoryPath)
+              ? (ld!.catalogCategoryPath as unknown[]).filter((s): s is string => typeof s === "string")
+              : null;
+            const live = resolveWalmartLiveCategory(p.name, rawProductType, catalogPath, normTax, walmartSpecByNorm);
+            if (live.specType) {
+              walmartSpecTypeById.set(p.id, live.specType);
+              // Skips the AI entirely for both the category AND (via the
+              // existing skip check further down) the spec-type pass.
+              if (live.category) walmartCategoryById.set(p.id, live.category);
+            } else if (live.rejected) {
+              walmartSpecRejected++;
             }
-            const parsed = parseWalmartCategoryPath(ld?.categoryPath);
-            if (parsed) {
-              const canonicalPath = walmartPathByNorm.get(normTax(parsed.path));
-              if (canonicalPath && !implausibleWalmartCategory(p.name, canonicalPath)) {
-                walmartCategoryById.set(p.id, {
-                  category: canonicalPath.split(" > ").pop() ?? canonicalPath,
-                  path: canonicalPath,
-                });
-              } else {
-                // Site-navigation breadcrumb (or a misfiled listing) — not a
-                // taxonomy value. Hand the AI the evidence instead.
-                walmartRejected++;
-                breadcrumbHint = parsed.path;
+            // Breadcrumb path — only consulted when the Spec Product Type
+            // above didn't already resolve the category.
+            if (!walmartCategoryById.has(p.id)) {
+              const parsed = parseWalmartCategoryPath(ld?.categoryPath);
+              if (parsed) {
+                const canonicalPath = walmartPathByNorm.get(normTax(parsed.path));
+                if (canonicalPath && !implausibleWalmartCategory(p.name, canonicalPath)) {
+                  walmartCategoryById.set(p.id, {
+                    category: canonicalPath.split(" > ").pop() ?? canonicalPath,
+                    path: canonicalPath,
+                  });
+                } else {
+                  // Site-navigation breadcrumb (or a misfiled listing) — not a
+                  // taxonomy value. Hand the AI the evidence instead.
+                  walmartRejected++;
+                  breadcrumbHint = parsed.path;
+                }
               }
             }
           }
@@ -593,6 +609,43 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         `[categorize] ${fromWalmart.length} products took Walmart's own category; ` +
           `${productInputs.length} left for the AI`,
       );
+    }
+
+    // Reuse an already-categorized product from ANOTHER project (or an earlier
+    // run of this one) with the exact same name, same marketplace. The
+    // in-process cache inside categorizeProducts only survives one server
+    // instance's lifetime and never sees a name categorized under a different
+    // project; the Product table itself is the durable record of every
+    // judgment already made, so it doubles as a free cache with nothing new
+    // to store. Confidence is carried over unchanged — this reuses a real
+    // decision (AI or Walmart-sourced), not a guess of its own.
+    if (productInputs.length > 0) {
+      const reusable = await findReusableCategories(
+        projectMeta.marketplace,
+        id,
+        productInputs.map((p) => p.name),
+      );
+      if (reusable.size > 0) {
+        const fromCache = productInputs
+          .filter((p) => reusable.has(normalizeProductName(p.name)))
+          .map((p) => {
+            const r = reusable.get(normalizeProductName(p.name))!;
+            return { productId: p.id, category: r.category, path: r.path, confidence: r.confidence };
+          });
+        await bulkUpdateCategories(fromCache);
+        for (const r of fromCache) existingCatById.set(r.productId, r.category);
+        // A reused row's Spec Product Type also skips the AI spec-type pass
+        // below, the same way a fresh Walmart-sourced one does.
+        for (const p of productInputs) {
+          const r = reusable.get(normalizeProductName(p.name));
+          if (r?.specProductType) walmartSpecTypeById.set(p.id, r.specProductType);
+        }
+        productInputs = productInputs.filter((p) => !reusable.has(normalizeProductName(p.name)));
+        console.log(
+          `[categorize] ${fromCache.length} products reused a category from another project; ` +
+            `${productInputs.length} left for the AI`,
+        );
+      }
     }
 
     // Save Spec Product Types sourced directly from the Seller API live data.
@@ -921,7 +974,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // A deadline stop in the spec pass is a partial run too: the client's
     // resume chain POSTs again, the categorize loop finds nothing to do, and
     // the spec pass continues from whatever the skip rule says remains.
-    const anyPartial = partial || specPartial;
+    //
+    // A spec pass that finished WITHIN its deadline but still left products
+    // blank (the model had no answer, or every attempt failed) must count as
+    // partial too — otherwise the project silently reports "categorized" with
+    // Spec Product Type still empty on some products, and nothing ever
+    // revisits them unless a person notices the toast and clicks Categorize
+    // again by hand. The client's own resume loop already guards against
+    // looping forever on genuinely-unresolvable items (it bails out after two
+    // resumes make no further progress), so it is safe to let it keep trying.
+    const anyPartial = partial || specPartial || specTypesRemaining > 0;
     await prisma.project.update({
       where: { id },
       data: anyPartial
