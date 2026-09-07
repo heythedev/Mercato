@@ -136,8 +136,17 @@ export function normalizeSku(sku: string): string {
  * Look up products in any OTHER project (any user, any marketplace) whose
  * vendor SKU exactly matches one of `skus` and that carry a real name for it
  * (a name that is not simply the SKU itself — the cheap SQL-side guard; the
- * caller applies looksLikeSkuName as the full one). Ties broken by most
- * recently updated. Returns a Map keyed by `normalizeSku(sku)`. Never throws.
+ * caller applies looksLikeSkuName as the full one).
+ *
+ * Unanimity guard (same rule as sku-family.ts): a SKU is reused ONLY when every
+ * project that carries it agrees on the (normalized) name. Measured on
+ * production: 15,151 SKUs appear in 2+ projects, 97% with the identical name;
+ * the rest differ by wording or pack size ("Pack of 1" vs "Pkg of 3") — the
+ * same product, but a title we can't pick between blindly, and a pack-size
+ * mismatch in a reused title would be a real export error. Those few fall
+ * through to the other resolvers / review instead. Among agreeing rows, the
+ * most recently updated one supplies the fields. Returns a Map keyed by
+ * `normalizeSku(sku)`. Never throws.
  */
 export async function findResolvedNamesBySku(
   excludeProjectId: string,
@@ -161,11 +170,10 @@ export async function findResolvedNamesBySku(
           image_url: string | null;
         }>
       >`
-        SELECT DISTINCT ON (norm_sku)
-          norm_sku, name, brand, description, upc, image_url
-        FROM (
+        WITH base AS (
           SELECT
             lower(trim(pr."vendorSku")) AS norm_sku,
+            lower(regexp_replace(trim(pr.name), '[[:space:]]+', ' ', 'g')) AS norm_name,
             pr.name AS name,
             pr.brand AS brand,
             pr.description AS description,
@@ -179,8 +187,15 @@ export async function findResolvedNamesBySku(
             AND trim(pr.name) <> ''
             AND lower(trim(pr.name)) <> lower(trim(pr."vendorSku"))
             AND lower(trim(pr."vendorSku")) = ANY(${slice}::text[])
-        ) matched
-        ORDER BY norm_sku, updated_at DESC NULLS LAST`;
+        ),
+        unanimous AS (
+          SELECT norm_sku FROM base GROUP BY norm_sku HAVING count(DISTINCT norm_name) = 1
+        )
+        SELECT DISTINCT ON (b.norm_sku)
+          b.norm_sku, b.name, b.brand, b.description, b.upc, b.image_url
+        FROM base b
+        JOIN unanimous u USING (norm_sku)
+        ORDER BY b.norm_sku, b.updated_at DESC NULLS LAST`;
       for (const r of rows) {
         out.set(r.norm_sku, {
           name: r.name,
