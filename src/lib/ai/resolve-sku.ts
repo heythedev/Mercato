@@ -220,6 +220,26 @@ export function looksLikeSkuName(name: string, vendorSku?: string | null): boole
 }
 
 /**
+ * True when a product's identity is still unknown after every resolution
+ * attempt this run: its name is a raw SKU code (looksLikeSkuName) AND there is
+ * no description or vendor category left to anchor even a rough guess.
+ * Nothing — AI, vendor catalog, or barcode lookup — can categorize such a
+ * row, so callers should neither spend an AI call on it nor trust any answer
+ * it returns; the only honest result is "Uncategorized". Shared by the
+ * categorize route's pre-AI skip (don't pay for a verdict this will discard)
+ * and its post-AI bulletproofing gate (don't trust one if it slipped through
+ * anyway) — the two must agree on exactly which rows are hopeless.
+ */
+export function isUnresolvedSkuOnly(input: {
+  name: string;
+  sku?: string | null;
+  description?: string | null;
+  vendorCategory?: string | null;
+}): boolean {
+  return looksLikeSkuName(input.name, input.sku) && !input.description && !input.vendorCategory;
+}
+
+/**
  * Emit catalog-style variants for a single vendor code segment.
  * Handles the TOV Furniture MPN style: <prefix><seriesLetter><digits><optional suffix>
  * e.g. "TOVL54566" → "TOV-L54566", "TOVT54304FBMP" → "TOV-T54304" (drops the FBMP suffix),

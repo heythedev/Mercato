@@ -530,7 +530,7 @@ export function ProjectDetail({ project: initial, productCount }: {
           matched?: number; unmatched?: number; categorized?: number;
           partial?: boolean; interrupted?: boolean; remaining?: number; resumeFrom?: number;
           specTypesRequested?: number; specTypesAssigned?: number; specTypesRemaining?: number;
-          specTypeError?: string;
+          specTypeError?: string; skuOnlyUnresolved?: number;
         };
         let verdict: PollData | null = null;
 
@@ -651,6 +651,16 @@ export function ProjectDetail({ project: initial, productCount }: {
           (verdict.specTypesAssigned ?? 0) < verdict.specTypesRequested
         ) {
           toast.warning(`Spec product types: ${verdict.specTypesAssigned ?? 0} of ${verdict.specTypesRequested} assigned — re-run Categorize to fill the rest.`);
+        }
+        // Bare-SKU rows with no name, description, or barcode to go on — no
+        // matcher (AI, vendor catalog, or barcode lookup) can identify what
+        // they physically are, so they were skipped rather than spending an
+        // AI call on a guaranteed "no match". Distinct from the warnings
+        // above: re-running Categorize will not change this outcome.
+        if (verdict.skuOnlyUnresolved) {
+          toast.warning(
+            `${verdict.skuOnlyUnresolved} product${verdict.skuOnlyUnresolved === 1 ? "" : "s"} skipped — the file has no name, description, or barcode for ${verdict.skuOnlyUnresolved === 1 ? "it" : "them"}, so nothing can identify what ${verdict.skuOnlyUnresolved === 1 ? "it is" : "they are"}.`,
+          );
         }
         await refreshProject();
         setActiveStep(2);

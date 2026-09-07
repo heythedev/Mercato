@@ -5,7 +5,7 @@ import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { categorizeProducts, type ProductInput } from "@/lib/ai/categorize";
-import { enrichSkuOnlyProducts, looksLikeSkuName } from "@/lib/ai/resolve-sku";
+import { enrichSkuOnlyProducts, looksLikeSkuName, isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
 import { inheritFamilyCategories, type FamilyRow } from "@/lib/ai/sku-family";
 import {
   createCategorizeJob,
@@ -675,6 +675,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     let partial = false;
     let sliceMsTotal = 0;
     let sliceCount = 0;
+    // Bare-SKU rows the bulletproofing gate below would force to "Uncategorized"
+    // no matter what the model answers (see hopeless/aiEligible split) — tracked
+    // so the run can tell the user why, instead of leaving them to wonder why a
+    // whole file came back "No match found".
+    let hopelessTotal = 0;
 
     // Bulletproofing thresholds (used per-slice below): route uncertain products
     // to review instead of guessing. It is always safer to mark a product
@@ -757,45 +762,66 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
 
       setCategorizeJobPhase(jobId, `Assigning categories ${processed}/${totalToProcess}…`);
-      const results = await categorizeProducts(
-        projectMeta.marketplace,
-        slice,
-        undefined,
-        // Live progress → job.updatedAt advances every wave, so the client sees a slow
-        // run as alive rather than stalled. Counters are offset to the whole logical
-        // run so the user sees 320/852, not a per-slice 20/100.
-        (done, total, note) => {
-          heartbeat();
-          const globalDone = processed + Math.min(done, slice.length);
-          const pct = totalToProcess > 0 ? Math.floor((globalDone / totalToProcess) * 100) : 0;
-          // `note` marks a refinement pass (off-list retry, web-search rescue,
-          // forced-choice), which runs AFTER every product already has a result
-          // and reports its own much smaller totals — name the pass instead.
-          setCategorizeJobPhase(
-            jobId,
-            note
-              ? `${note.charAt(0).toUpperCase()}${note.slice(1)} ${done}/${total}`
-              : `Categorizing ${globalDone}/${totalToProcess} (${pct}%)…`,
-          );
-        },
-        // Stream each wave's verdicts to the DB as soon as they land — the client
-        // shows finished results while the rest keeps running. Provisional: the
-        // gate below may downgrade a result, and the authoritative slice write
-        // overwrites it.
-        async (wave) => {
-          await bulkUpdateCategories(wave).catch(() => {});
-        },
-      );
+
+      // Rows that are STILL a raw SKU code after enrichment, with no description
+      // or vendor category to anchor a guess, are exactly what the bulletproofing
+      // gate below unconditionally forces to "Uncategorized" once the model
+      // answers — so skip the AI call for them entirely instead of paying for a
+      // verdict that is thrown away every time. A vendor sheet that is nothing
+      // but bare codes (no names, no UPCs, an unknown vendor) used to run a full
+      // categorize pass per product for a result that could never survive the
+      // gate, which is both wasted spend and the reason such a file looked like
+      // it was grinding through hundreds of "No match found" rows on a run that
+      // was never going to succeed.
+      const aiEligible = slice.filter((p) => !isUnresolvedSkuOnly(p));
+      const hopeless = slice.filter((p) => isUnresolvedSkuOnly(p));
+      hopelessTotal += hopeless.length;
+
+      const results = aiEligible.length
+        ? await categorizeProducts(
+            projectMeta.marketplace,
+            aiEligible,
+            undefined,
+            // Live progress → job.updatedAt advances every wave, so the client sees a slow
+            // run as alive rather than stalled. Counters are offset to the whole logical
+            // run so the user sees 320/852, not a per-slice 20/100.
+            (done, total, note) => {
+              heartbeat();
+              const globalDone = processed + Math.min(done, slice.length);
+              const pct = totalToProcess > 0 ? Math.floor((globalDone / totalToProcess) * 100) : 0;
+              // `note` marks a refinement pass (off-list retry, web-search rescue,
+              // forced-choice), which runs AFTER every product already has a result
+              // and reports its own much smaller totals — name the pass instead.
+              setCategorizeJobPhase(
+                jobId,
+                note
+                  ? `${note.charAt(0).toUpperCase()}${note.slice(1)} ${done}/${total}`
+                  : `Categorizing ${globalDone}/${totalToProcess} (${pct}%)…`,
+              );
+            },
+            // Stream each wave's verdicts to the DB as soon as they land — the client
+            // shows finished results while the rest keeps running. Provisional: the
+            // gate below may downgrade a result, and the authoritative slice write
+            // overwrites it.
+            async (wave) => {
+              await bulkUpdateCategories(wave).catch(() => {});
+            },
+          )
+        : [];
+      // Never sent to the model — write the same verdict the gate would have
+      // forced anyway, without pretending an AI pass ran.
+      for (const p of hopeless) {
+        results.push({ productId: p.id, category: "Uncategorized", path: "Uncategorized", confidence: 0 });
+      }
 
       // Bulletproofing gate (thresholds documented above the slice loop).
       const inputById = new Map(slice.map((p) => [p.id, p]));
       for (const r of results) {
         const input = inputById.get(r.productId);
         // Only treat as unresolved if the name is still a raw code AND there's no
-        // description or vendor category to anchor the AI's decision on.
-        const stillRawSku = input
-          ? looksLikeSkuName(input.name, input.sku) && !input.description && !input.vendorCategory
-          : false;
+        // description or vendor category to anchor the AI's decision on — same
+        // rule the pre-AI skip above uses, so the two never disagree.
+        const stillRawSku = input ? isUnresolvedSkuOnly(input) : false;
         const failsConfidence = isConstrainedTaxonomy
           ? r.confidence < CONSTRAINED_MIN_CONFIDENCE
           : r.confidence < MIN_CONFIDENCE;
@@ -975,15 +1001,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // resume chain POSTs again, the categorize loop finds nothing to do, and
     // the spec pass continues from whatever the skip rule says remains.
     //
-    // A spec pass that finished WITHIN its deadline but still left products
-    // blank (the model had no answer, or every attempt failed) must count as
-    // partial too — otherwise the project silently reports "categorized" with
-    // Spec Product Type still empty on some products, and nothing ever
-    // revisits them unless a person notices the toast and clicks Categorize
-    // again by hand. The client's own resume loop already guards against
-    // looping forever on genuinely-unresolvable items (it bails out after two
-    // resumes make no further progress), so it is safe to let it keep trying.
-    const anyPartial = partial || specPartial || specTypesRemaining > 0;
+    // A spec pass that finished WITHIN its deadline (specPartial === false) has
+    // already done everything it will ever do this run: the deterministic
+    // pre-pass, every AI batch, AND up to MAX_LEFTOVER_ROUNDS extra retries on
+    // whatever stayed blank — self-terminating only once a round assigns
+    // nothing new. Anything still blank at that point isn't "not done yet", it
+    // is the model having genuinely found no listed type that fits (e.g. a
+    // product whose assigned category's own type list has nothing matching
+    // it — a battery charger in a group that only lists EPIRBs/autopilots/
+    // depth finders). This USED to also count as partial, which forced the
+    // client to resume anyway; every resume re-ran the identical, already-
+    // exhausted attempt and could only ever reproduce the identical result, so
+    // it just burned two more rounds before the client's own no-progress guard
+    // gave up with a "keeps stopping without progress" error — on a run whose
+    // actual categorization had already finished cleanly. Only a real deadline
+    // stop is worth resuming; a genuine leftover count is still reported below
+    // (specTypesRemaining) so the UI can say so plainly instead of erroring.
+    const anyPartial = partial || specPartial;
     await prisma.project.update({
       where: { id },
       data: anyPartial
@@ -1014,6 +1048,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         : {}),
       reprocessed: processed,
       enrichedFromSku: enrichedCount,
+      ...(hopelessTotal > 0 ? { skuOnlyUnresolved: hopelessTotal } : {}),
       ...(familyInherited > 0 ? { familyInherited } : {}),
       ...(mpLower === "walmart"
         ? {

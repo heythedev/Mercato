@@ -7,7 +7,29 @@ vi.mock("./vendor-catalog", () => ({
   hasCatalogVendor: vi.fn(() => false),
 }));
 
-import { hitsReferenceSku, pickProductName, skuSearchVariants } from "./resolve-sku";
+import { hitsReferenceSku, isUnresolvedSkuOnly, pickProductName, skuSearchVariants } from "./resolve-sku";
+
+describe("isUnresolvedSkuOnly", () => {
+  it("is true for a bare SKU code with no description or vendor category", () => {
+    // VIDA-110112 — a real example: name and sku both the same opaque code,
+    // nothing else in the row to identify the product by.
+    expect(isUnresolvedSkuOnly({ name: "VIDA-110112", sku: "VIDA-110112" })).toBe(true);
+  });
+
+  it("is false once a description is present, even with a SKU-shaped name", () => {
+    expect(
+      isUnresolvedSkuOnly({ name: "VIDA-110112", sku: "VIDA-110112", description: "12-inch ceramic planter" }),
+    ).toBe(false);
+  });
+
+  it("is false once a vendor category is present, even with a SKU-shaped name", () => {
+    expect(isUnresolvedSkuOnly({ name: "VIDA-110112", sku: "VIDA-110112", vendorCategory: "Planters" })).toBe(false);
+  });
+
+  it("is false for a real product title regardless of description", () => {
+    expect(isUnresolvedSkuOnly({ name: "12-Inch Ceramic Planter, Set of 2" })).toBe(false);
+  });
+});
 
 // VICK-H1PLR000 — the 36" Ivory Plume Reed Bundle. Vickerman dropped the H1PLR
 // family from vickerman.com, Amazon/Walmart don't carry it, but plain Google
