@@ -1,5 +1,6 @@
 import { resolveSkuFromCatalog, hasCatalogVendor, type CatalogEntry } from "./vendor-catalog";
-import { findResolvedNamesBySku, normalizeSku } from "@/lib/categorize/category-reuse";
+import { findResolvedNamesBySku, normalizeSku, findBrandsBySkuPrefix } from "@/lib/categorize/category-reuse";
+import { resolveSkusViaKeepa, skuVendorPrefix, skuItemNumber, type KeepaSkuMatch } from "./keepa-sku-lookup";
 
 /**
  * Is any usable web-search provider configured?
@@ -551,6 +552,47 @@ export async function enrichSkuOnlyProducts(
     products.map(skuOf).filter(Boolean),
   );
 
+  // 0b. Keepa part-number lookup for whatever step 0 didn't resolve. Most
+  //     wholesale catalogues print the vendor's own item number as the
+  //     manufacturer part number on the Amazon listing, so the sheet code IS
+  //     the lookup key — measured at 75% coverage on a real bare-SKU file, and
+  //     every code it resolved matched the client's own record (12/12).
+  //
+  //     Needs the vendor's BRAND to be safe (part numbers are unique only
+  //     within a brand — see keepa-sku-lookup.ts), which a bare-SKU sheet never
+  //     carries. The brand is learned instead from any earlier upload sharing
+  //     the same SKU prefix; when no prefix resolves to one unambiguous brand,
+  //     the whole step is skipped rather than guessed.
+  const keepaByCode = new Map<string, KeepaSkuMatch>();
+  const stillUnresolved = products.filter((p) => {
+    const sku = skuOf(p);
+    return sku && !crossProject.has(normalizeSku(sku));
+  });
+  if (stillUnresolved.length > 0) {
+    const prefixes = [...new Set(stillUnresolved.map((p) => skuVendorPrefix(skuOf(p))).filter((x): x is string => !!x))];
+    const brands = prefixes.length ? await findBrandsBySkuPrefix(prefixes) : new Map<string, string>();
+    // One Keepa pass per brand, batching that brand's item numbers together.
+    const byBrand = new Map<string, string[]>();
+    for (const p of stillUnresolved) {
+      const sku = skuOf(p);
+      const brand = brands.get((skuVendorPrefix(sku) ?? "").toLowerCase());
+      const item = skuItemNumber(sku);
+      if (!brand || !item) continue;
+      const list = byBrand.get(brand) ?? [];
+      list.push(item);
+      byBrand.set(brand, list);
+    }
+    for (const [brand, items] of byBrand) {
+      const found = await resolveSkusViaKeepa(items, brand);
+      for (const [k, v] of found) keepaByCode.set(k, v);
+    }
+    if (keepaByCode.size > 0) {
+      console.log(`[keepa-sku] resolved ${keepaByCode.size}/${stillUnresolved.length} unresolved codes via part-number lookup`);
+    }
+  }
+  /** Keepa's map key form — must match keepa-sku-lookup's partKey(). */
+  const keepaKey = (s: string): string => s.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+
   // Enrichment is network-bound (catalog + product-page fetch), so run more of it at
   // once. The catalog index is cached after the first hit, so the remaining cost is the
   // per-product breadcrumb fetch; 10-wide keeps a large SKU-only sheet from crawling.
@@ -590,6 +632,42 @@ export async function enrichSkuOnlyProducts(
             brand: reused.brand || p.brand,
             description: reused.description || p.description,
             vendorContext: [p.vendorContext, `resolved_from_sku: ${sku}`, "source: same SKU in another project's upload"]
+              .filter(Boolean)
+              .join("; "),
+          };
+          return;
+        }
+
+        // 0b. (continued) The Keepa part-number match for this code, if the
+        //     brand-scoped lookup above found one. Same trust level as the
+        //     vendor catalog: an exact partNumber hit within the vendor's own
+        //     brand, not a search guess.
+        const itemNo = skuItemNumber(sku);
+        const keepaHit = itemNo ? keepaByCode.get(keepaKey(itemNo)) : undefined;
+        if (keepaHit && !looksLikeSkuName(keepaHit.name, sku)) {
+          enrichments.push({
+            productId: p.id,
+            name: keepaHit.name,
+            brand: keepaHit.brand || p.brand,
+            description: keepaHit.description || p.description,
+            searchContext: `keepa part-number: ${sku} | ${keepaHit.asin} | ${keepaHit.name}`,
+            upc: keepaHit.upc,
+            imageUrl: keepaHit.imageUrl,
+          });
+          results[idx] = {
+            ...p,
+            name: keepaHit.name,
+            brand: keepaHit.brand || p.brand,
+            description: keepaHit.description || p.description,
+            // Amazon's own tree — a hint for the categorizer, never written as
+            // a marketplace category (Amazon's taxonomy isn't Mathis/Walmart's).
+            vendorCategory: p.vendorCategory ?? keepaHit.categoryHint,
+            vendorContext: [
+              p.vendorContext,
+              `resolved_from_sku: ${sku}`,
+              `source: Keepa part-number match (${keepaHit.asin})`,
+              keepaHit.categoryHint ? `amazon_category: ${keepaHit.categoryHint}` : null,
+            ]
               .filter(Boolean)
               .join("; "),
           };

@@ -212,3 +212,70 @@ export async function findResolvedNamesBySku(
   }
   return out;
 }
+
+/**
+ * The brand a vendor SKU prefix belongs to ("VIDA" → "vidaXL"), learned from
+ * products anywhere in the system that share the prefix AND already carry a
+ * brand. This is what makes the Keepa part-number lookup safe: part numbers are
+ * only unique within a brand, so the lookup needs the brand and a bare-SKU
+ * sheet never supplies it — but an earlier upload of the same catalogue does.
+ *
+ * DOMINANCE guard rather than the strict unanimity used by sku-family.ts and
+ * findResolvedNamesBySku, because the failure mode here is different. Real data
+ * has long tails: "VIDA" is vidaXL on 1,827 products and Casafoyer on 20, and
+ * strict unanimity threw the whole prefix away over that 1%. A wrong brand here
+ * cannot produce a wrong ANSWER — the Keepa lookup filters on brand AND
+ * requires an exact partNumber match, so a mis-branded code simply finds
+ * nothing. (Dropping the brand filter entirely is the dangerous case, and that
+ * is what this function exists to prevent.) So: the top brand must hold at
+ * least MIN_BRAND_SHARE of the branded rows under the prefix, over a floor of
+ * MIN_BRAND_ROWS, else the prefix stays unresolved.
+ * Returns a Map keyed by the LOWERCASED prefix. Never throws.
+ */
+const MIN_BRAND_SHARE = 0.85;
+const MIN_BRAND_ROWS = 5;
+
+export async function findBrandsBySkuPrefix(prefixes: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const wanted = [...new Set(prefixes.map((p) => p.trim().toLowerCase()).filter(Boolean))];
+  if (!wanted.length) return out;
+
+  try {
+    const rows = await prisma.$queryRaw<Array<{ prefix: string; brand: string; n: bigint }>>`
+      SELECT
+        lower(split_part(trim(pr."vendorSku"), '-', 1)) AS prefix,
+        pr.brand AS brand,
+        count(*) AS n
+      FROM "Product" pr
+      WHERE pr."vendorSku" IS NOT NULL
+        AND pr.brand IS NOT NULL
+        AND trim(pr.brand) <> ''
+        AND lower(split_part(trim(pr."vendorSku"), '-', 1)) = ANY(${wanted}::text[])
+      GROUP BY 1, 2`;
+
+    // Collapse case variants ("vidaXL"/"VidaXL"), then require unanimity.
+    const byPrefix = new Map<string, Map<string, { spelling: string; n: number }>>();
+    for (const r of rows) {
+      const brands = byPrefix.get(r.prefix) ?? new Map();
+      const key = r.brand.trim().toLowerCase();
+      const prev = brands.get(key);
+      const n = Number(r.n);
+      // Keep the most-used original spelling for the value we hand back.
+      if (!prev || n > prev.n) brands.set(key, { spelling: r.brand.trim(), n: (prev?.n ?? 0) + n });
+      else brands.set(key, { spelling: prev.spelling, n: prev.n + n });
+      byPrefix.set(r.prefix, brands);
+    }
+    for (const [prefix, brands] of byPrefix) {
+      const ranked = [...brands.values()].sort((a, b) => b.n - a.n);
+      const total = ranked.reduce((sum, b) => sum + b.n, 0);
+      const top = ranked[0];
+      if (!top || total < MIN_BRAND_ROWS) continue;
+      if (top.n / total < MIN_BRAND_SHARE) continue; // genuinely split — don't guess
+      out.set(prefix, top.spelling);
+    }
+  } catch (e) {
+    console.error("[sku-reuse] brand-by-prefix lookup failed — proceeding without it:", e);
+    return new Map();
+  }
+  return out;
+}

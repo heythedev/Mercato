@@ -13,6 +13,9 @@ vi.mock("./vendor-catalog", () => ({
 vi.mock("@/lib/categorize/category-reuse", () => ({
   findResolvedNamesBySku: vi.fn(async () => new Map()),
   normalizeSku: (s: string) => s.trim().toLowerCase(),
+  // No prefix resolves to a brand by default, so the Keepa part-number step
+  // stays switched off unless a test opts into it.
+  findBrandsBySkuPrefix: vi.fn(async () => new Map()),
 }));
 
 import { findResolvedNamesBySku } from "@/lib/categorize/category-reuse";

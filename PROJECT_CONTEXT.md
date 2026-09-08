@@ -349,10 +349,35 @@ often contain nothing but codes like `TOVF-TOVL54566`. Resolution order is
 **cross-project SKU reuse** (`findResolvedNamesBySku`: one bulk DB query — any
 OTHER project, any user, any marketplace, that already carries a real name for the
 exact same vendor SKU; carries name/brand/description/UPC/main image only, never
-the source row's cost/price/listing fields) → the vendor's own Shopify
-`/products.json` catalog (downloaded once, indexed by normalized SKU, digit-core
-and series letter, cached 24h; only `VENDORS` in vendor-catalog.ts — TOV Furniture
-and Modway today) → web search (only with `SERPAPI_KEY`) → give up. When a catalog
+the source row's cost/price/listing fields) → **Keepa part-number lookup**
+([keepa-sku-lookup.ts](src/lib/ai/keepa-sku-lookup.ts), see below) → the vendor's
+own Shopify `/products.json` catalog (downloaded once, indexed by normalized SKU,
+digit-core and series letter, cached 24h; only `VENDORS` in vendor-catalog.ts —
+TOV Furniture and Modway today) → web search (only with `SERPAPI_KEY`) → give up.
+
+**Keepa part-number lookup** ([keepa-sku-lookup.ts](src/lib/ai/keepa-sku-lookup.ts)):
+most wholesale catalogues print the vendor's own item number as the manufacturer
+part number on the Amazon listing, and Keepa indexes `partNumber` — so the sheet
+code IS the lookup key for a vendor with no public catalogue of its own. Measured
+on a real bare-SKU file (vidaXL): **75% of codes resolve, and 12/12 of the ones
+checked matched the client's own product record**, several character-for-character.
+Returns the real title, brand, barcode, main image and Amazon category (passed as
+a `vendorCategory` HINT, never written as a marketplace category). The Product
+Finder is batched (25 codes/call — Keepa charges ~11 tokens per CALL, not per
+code, a ~9x saving) and each result is re-checked so the returned `partNumber`
+really is the code asked for.
+
+The **brand filter is what makes this safe and is mandatory**: part numbers are
+unique only WITHIN a brand, and an unbranded search returns confident nonsense
+(`134814` → a Port & Company t-shirt, `110112` → Paul Mitchell conditioner,
+`131015` → cat food). A bare-SKU sheet never carries the brand, so it is learned
+from the data: `findBrandsBySkuPrefix` ([category-reuse.ts](src/lib/categorize/category-reuse.ts))
+resolves a vendor prefix ("VIDA") to its brand ("vidaXL") from any earlier upload
+sharing that prefix. That guard is DOMINANCE (≥85% of branded rows, min 5), not
+the unanimity used elsewhere, because real data has long tails — "VIDA" is vidaXL
+on 1,827 rows and Casafoyer on 20 — and a wrong brand here cannot produce a wrong
+ANSWER, only no answer (the lookup filters on brand AND requires an exact
+partNumber match). No brand for a prefix ⇒ the whole Keepa step is skipped. When a catalog
 entry is found, the vendor's JSON-LD breadcrumb category is also pulled, which
 resolves the multi-room-tag ambiguity. Resolved titles/brands/descriptions are
 written back to the `Product` row; a reused UPC/image fills the column only when
