@@ -1,6 +1,6 @@
 import { resolveSkuFromCatalog, hasCatalogVendor, type CatalogEntry } from "./vendor-catalog";
 import { findResolvedNamesBySku, normalizeSku, findBrandsBySkuPrefix } from "@/lib/categorize/category-reuse";
-import { resolveSkusViaKeepa, skuVendorPrefix, skuItemNumber, type KeepaSkuMatch } from "./keepa-sku-lookup";
+import { resolveSkusViaPartNumber, skuVendorPrefix, skuItemNumber, type KeepaSkuMatch } from "./keepa-sku-lookup";
 
 /**
  * Is any usable web-search provider configured?
@@ -583,11 +583,11 @@ export async function enrichSkuOnlyProducts(
       byBrand.set(brand, list);
     }
     for (const [brand, items] of byBrand) {
-      const found = await resolveSkusViaKeepa(items, brand);
+      const found = await resolveSkusViaPartNumber(items, brand);
       for (const [k, v] of found) keepaByCode.set(k, v);
     }
     if (keepaByCode.size > 0) {
-      console.log(`[keepa-sku] resolved ${keepaByCode.size}/${stillUnresolved.length} unresolved codes via part-number lookup`);
+      console.log(`[sku-lookup] resolved ${keepaByCode.size}/${stillUnresolved.length} unresolved codes via part-number lookup (Keepa + Synccentric)`);
     }
   }
   /** Keepa's map key form — must match keepa-sku-lookup's partKey(). */

@@ -355,6 +355,22 @@ own Shopify `/products.json` catalog (downloaded once, indexed by normalized SKU
 digit-core and series letter, cached 24h; only `VENDORS` in vendor-catalog.ts —
 TOV Furniture and Modway today) → web search (only with `SERPAPI_KEY`) → give up.
 
+**Part-number lookup, Keepa + Synccentric** ([keepa-sku-lookup.ts](src/lib/ai/keepa-sku-lookup.ts),
+`resolveSkusViaPartNumber`): the two index overlapping but DIFFERENT catalogues,
+so both are run — measured on a real 19-product bare-SKU file, Keepa resolved 7,
+Synccentric 5 more, union 12 (63%). Keepa goes first because its tokens refill
+continuously (250/min) while Synccentric is a fixed daily quota (10k) that Amazon
+verification is already spending, so Synccentric only ever sees Keepa's leftovers
+(`searchByPartNumber` in [synccentric/client.ts](src/lib/synccentric/client.ts) —
+`type=mpn`, verified live; `part_num`/`sku` also work, `model`/`partnumber` 422).
+
+The brand filter is the whole safety mechanism on BOTH, and Synccentric's is
+client-side since its endpoint has no brand parameter. A row with no brand at all
+must be REJECTED: an empty string is a substring of everything, so a naive
+two-way `includes` accepted every unbranded row and wrote "Painting Knives",
+"Blu-ray" and "Ironing Board D" over real vidaXL products in a live test. After
+the fix: 12/12 resolved products matched their true product type, 0 wrong.
+
 **Keepa part-number lookup** ([keepa-sku-lookup.ts](src/lib/ai/keepa-sku-lookup.ts)):
 most wholesale catalogues print the vendor's own item number as the manufacturer
 part number on the Amazon listing, and Keepa indexes `partNumber` — so the sheet

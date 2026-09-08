@@ -134,33 +134,72 @@ export async function resolveSkusViaKeepa(
       if (!asinList.length) continue;
 
       const products = await getProducts(AMAZON_US, asinList, { stats: 0 });
-      for (const p of products) {
-        const pn = typeof p.partNumber === "string" ? p.partNumber : "";
-        const key = partKey(pn);
-        // The finder matches on more than partNumber alone, so confirm THIS
-        // product really carries the code we asked for before trusting it.
-        if (!key || !slice.some((c) => partKey(c) === key)) continue;
-        const title = typeof p.title === "string" ? p.title.trim() : "";
-        if (!title) continue;
-        // Several listings can share one partNumber (the same item relisted, or
-        // a size/colour sibling). They are the same product for categorization
-        // purposes; keep the first and stay deterministic.
-        if (out.has(key)) continue;
-        out.set(key, {
-          name: title,
-          brand: typeof p.brand === "string" ? p.brand : (typeof p.manufacturer === "string" ? p.manufacturer : null),
-          description: typeof p.description === "string" ? p.description.slice(0, 1000) : null,
-          upc: firstBarcode(p),
-          imageUrl: firstImage(p),
-          categoryHint: categoryPath(p),
-          asin: p.asin,
-        });
-      }
+      collect(products, slice, out);
     }
   } catch (e) {
     const why = e instanceof KeepaError ? `${e.message}` : String(e);
     console.warn(`[keepa-sku] lookup failed for brand "${b}" — continuing without it:`, why);
     return out;
+  }
+  return out;
+}
+
+/** Shared by the Keepa and Synccentric paths: keep only products whose OWN
+ *  partNumber is one of the codes asked for, first listing wins. */
+function collect(products: KeepaProduct[], slice: string[], out: Map<string, KeepaSkuMatch>): void {
+  for (const p of products) {
+    const pn = typeof p.partNumber === "string" ? p.partNumber : "";
+    const key = partKey(pn);
+    // The finder matches on more than partNumber alone, so confirm THIS
+    // product really carries the code we asked for before trusting it.
+    if (!key || !slice.some((c) => partKey(c) === key)) continue;
+    const title = typeof p.title === "string" ? p.title.trim() : "";
+    if (!title) continue;
+    // Several listings can share one partNumber (the same item relisted, or a
+    // size/colour sibling). They are the same product for categorization
+    // purposes; keep the first and stay deterministic.
+    if (out.has(key)) continue;
+    out.set(key, {
+      name: title,
+      brand: typeof p.brand === "string" ? p.brand : (typeof p.manufacturer === "string" ? p.manufacturer : null),
+      description: typeof p.description === "string" ? p.description.slice(0, 1000) : null,
+      upc: firstBarcode(p),
+      imageUrl: firstImage(p),
+      categoryHint: categoryPath(p),
+      asin: p.asin,
+    });
+  }
+}
+
+/**
+ * Resolve item numbers through BOTH part-number sources, Keepa first then
+ * Synccentric for whatever Keepa missed.
+ *
+ * They index overlapping but different catalogues, so running both materially
+ * raises coverage: measured on a real 19-product bare-SKU file, Keepa resolved
+ * 7, Synccentric 11, and the union 12. Keepa leads because its tokens refill
+ * continuously (250/min) while Synccentric is a fixed daily quota that Amazon
+ * verification is already spending — so Synccentric only ever sees the
+ * leftovers. Never throws; either source failing just yields fewer matches.
+ */
+export async function resolveSkusViaPartNumber(
+  itemNumbers: string[],
+  brand: string,
+): Promise<Map<string, KeepaSkuMatch>> {
+  const out = await resolveSkusViaKeepa(itemNumbers, brand);
+  const remaining = itemNumbers.filter((c) => !out.has(partKey(c)));
+  if (!remaining.length || !brand.trim()) return out;
+
+  try {
+    const { searchByPartNumber, synccentricConfigured } = await import("@/lib/synccentric/client");
+    if (!synccentricConfigured()) return out;
+    const found = await searchByPartNumber(remaining, brand);
+    // searchByPartNumber already brand-filtered and part-number-verified each
+    // row; collect() re-checks the code and normalises into KeepaSkuMatch.
+    collect([...found.values()], remaining, out);
+    if (found.size) console.log(`[synccentric-sku] resolved ${found.size} codes Keepa missed`);
+  } catch (e) {
+    console.warn("[synccentric-sku] lookup failed — continuing with Keepa results only:", (e as Error).message);
   }
   return out;
 }

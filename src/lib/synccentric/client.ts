@@ -243,6 +243,71 @@ const codeKey = (c: string): string => c.replace(/\D/g, "").replace(/^0+/, "");
 
 const MAX_IDENTIFIERS = 10; // hard API limit per request
 
+/**
+ * Look products up by MANUFACTURER PART NUMBER, scoped to one brand.
+ *
+ * The counterpart of keepa-sku-lookup.ts, for the same reason: a bare-SKU
+ * vendor sheet's item number is usually the part number on the product's Amazon
+ * listing, so the sheet code IS a lookup key. Synccentric accepts `mpn` as a
+ * search type (verified against the live API — as do `part_num` and `sku`,
+ * while `model` and `partnumber` are rejected 422), and it resolves a
+ * DIFFERENT, overlapping set to Keepa: on a real 19-product file Keepa found
+ * 7, Synccentric 11, and together 12. Worth running both.
+ *
+ * The brand argument is mandatory and filtered CLIENT-side, because unlike
+ * Keepa's finder this endpoint has no brand parameter: part numbers repeat
+ * across manufacturers, and "134804" alone also returns Petstages, Stokke and
+ * Hayabusa products. Only rows whose brand/manufacturer matches, AND whose
+ * returned part number really is the code asked for, are kept.
+ *
+ * Never throws: a failure returns whatever resolved before it, so the caller
+ * simply gets fewer matches rather than an error.
+ */
+export async function searchByPartNumber(
+  partNumbers: string[],
+  brand: string,
+): Promise<Map<string, KeepaProduct>> {
+  const out = new Map<string, KeepaProduct>();
+  const wantedBrand = brand.trim().toLowerCase();
+  if (!wantedBrand) return out; // no brand ⇒ no safe filter ⇒ don't search
+  const codes = [...new Set(partNumbers.map((c) => c.trim()).filter((c) => c.length >= 3))];
+  if (!codes.length || !synccentricConfigured()) return out;
+
+  const key = (s: string) => s.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const wanted = new Set(codes.map(key));
+
+  for (let i = 0; i < codes.length; i += MAX_IDENTIFIERS) {
+    const batch = codes.slice(i, i + MAX_IDENTIFIERS);
+    try {
+      const params = new URLSearchParams({ type: "mpn", locale: "US" });
+      for (const id of batch) params.append("identifier[]", id);
+      for (const f of FIELDS) params.append("fields[]", f);
+      const rows = rowsOf(await call(params));
+      for (const row of rows) {
+        const rowBrand = String(row.brand ?? row.manufacturer ?? "").trim().toLowerCase();
+        // A row with NO brand can never be verified as this vendor's, so it is
+        // rejected outright. This is not a formality: an empty string is a
+        // substring of everything, so a naive two-way `includes` silently
+        // accepted every unbranded row and wrote "Painting Knives", "Blu-ray"
+        // and "Ironing Board D" over real vidaXL products in a live test.
+        if (rowBrand.length < 3) continue;
+        const related =
+          rowBrand === wantedBrand ||
+          rowBrand.includes(wantedBrand) ||
+          (wantedBrand.includes(rowBrand) && rowBrand.length >= 4);
+        if (!related) continue;
+        const pn = key(String(row.mpn ?? row.part_num ?? ""));
+        if (!pn || !wanted.has(pn) || out.has(pn)) continue;
+        const product = toKeepaProduct(row);
+        if (product?.title) out.set(pn, product);
+      }
+    } catch (e) {
+      console.error(`[synccentric] mpn batch failed (${batch.length} codes):`, (e as Error).message);
+    }
+  }
+  return out;
+}
+
 async function searchBatch(
   identifiers: string[],
   type: "upc" | "ean" | "asin",
