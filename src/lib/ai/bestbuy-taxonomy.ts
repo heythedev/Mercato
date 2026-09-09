@@ -25,14 +25,26 @@ function parseCsvLine(line: string): string[] {
   return cols;
 }
 
+/** Leaf path → Mirakl hierarchy code. The code, not the label, is what the
+ *  attribute lookup (PM11) and Mirakl's product import both key on. */
+let cachedCodeByPath: Map<string, string> | null = null;
+
 /** Load and cache every leaf path from bestbuy_categories.csv.
- *  Automatically reloads if the CSV file has been modified. */
+ *  Automatically reloads if the CSV file has been modified.
+ *
+ *  Best Buy's real tree (pulled from Mirakl H11 by
+ *  scripts/fetch-bestbuy-taxonomy.ts) is 4 levels and RAGGED — of its 1,450
+ *  leaves, 666 sit at depth 4, 772 at depth 3 and 12 at depth 2. The old
+ *  parser required exactly three non-empty columns, which silently dropped
+ *  every leaf that wasn't depth-3 and truncated the deeper ones. Depth is
+ *  therefore taken from however many level columns a row actually fills. */
 export function loadBestBuyCategoryPaths(): BestBuyCategoryPath[] {
   const mtime = statSync(csvPath()).mtimeMs;
   if (cachedPaths && mtime === cachedMtime) return cachedPaths;
 
   cachedPaths = null;
   cachedPromptBlock = null;
+  cachedCodeByPath = new Map();
   cachedMtime = mtime;
 
   const raw = readFileSync(csvPath(), "utf8");
@@ -42,9 +54,15 @@ export function loadBestBuyCategoryPaths(): BestBuyCategoryPath[] {
     const trimmed = line.trim();
     if (!trimmed || trimmed.toLowerCase().startsWith("category,")) continue;
     const cols = parseCsvLine(trimmed);
-    const [category, subcategory, subSub] = cols;
-    if (!category || !subcategory || !subSub) continue;
-    paths.push(`${category} > ${subcategory} > ${subSub}`);
+    // Trailing column is the Mirakl code when present (5-column format); the
+    // legacy 3-column file has no code and still loads.
+    const hasCode = cols.length >= 5;
+    const levels = (hasCode ? cols.slice(0, 4) : cols).map((c) => c.trim()).filter(Boolean);
+    if (levels.length < 2) continue; // a bare top-level node is not a listable category
+    const path = levels.join(" > ");
+    paths.push(path);
+    const code = hasCode ? cols[4]?.trim() : "";
+    if (code) cachedCodeByPath.set(path, code);
   }
 
   if (paths.length === 0) {
@@ -58,6 +76,17 @@ export function loadBestBuyCategoryPaths(): BestBuyCategoryPath[] {
 export function clearBestBuyCache(): void {
   cachedPaths = null;
   cachedPromptBlock = null;
+  cachedCodeByPath = null;
+}
+
+/**
+ * The Mirakl hierarchy code for an assigned category path — the key PM11 and
+ * Mirakl's product import need. Null for the legacy CSV (no code column) or an
+ * unrecognised path.
+ */
+export function bestBuyCodeForPath(path: string): string | null {
+  loadBestBuyCategoryPaths(); // populates cachedCodeByPath
+  return cachedCodeByPath?.get(path.trim()) ?? null;
 }
 
 export function formatBestBuyTaxonomyForPrompt(): string {
