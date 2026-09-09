@@ -217,6 +217,64 @@ export async function generateFlatCategoryZip(
   return zip.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>;
 }
 
+// ── Best Buy: per-category sheets built from Mirakl's own attribute set ──────
+// Best Buy has 1,450 leaf categories, each with its OWN required attributes, and
+// its "templates" are generated per category in the seller portal — there is no
+// API that serves the file (probed: /api/products/*/template all 404). PM11 does
+// serve the attribute configuration those files are generated from, so each
+// category's sheet is rebuilt here instead of a human downloading them by hand.
+//
+// Best Buy ONLY. Every other marketplace keeps its existing path untouched:
+// this function is reached solely from the isBestBuy branch in the export route.
+export async function generateBestBuyCategoryZip(
+  products: Product[],
+  columnsByCategory: Map<string, Array<{ code: string; label: string; required: boolean; fill?: string }>>,
+): Promise<{ zip: Buffer; categoriesWithoutSchema: string[] }> {
+  const zip = new JSZip();
+  const eligible = eligibleProducts(products, "bestbuy");
+
+  const groups = new Map<string, Product[]>();
+  const uncategorized: Product[] = [];
+  for (const p of eligible) {
+    const cat = p.marketplaceCategory;
+    if (!cat || cat === "Uncategorized") { uncategorized.push(p); continue; }
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat)!.push(p);
+  }
+
+  const categoriesWithoutSchema: string[] = [];
+  for (const [category, categoryProducts] of groups) {
+    await new Promise<void>((r) => setImmediate(r));
+    const schema = columnsByCategory.get(category);
+
+    // No attribute set for this category (unknown path, or Mirakl unreachable)
+    // → fall back to the flat columns rather than emitting a wrong-shaped sheet
+    // that would fail Best Buy's import.
+    const columns: Column[] = schema?.length
+      ? schema.map((c) => ({
+          // `fill` names a product field we hold; otherwise resolve by the
+          // attribute's own label so a matching vendor column still lands.
+          key: c.fill ?? c.label,
+          label: c.label,
+          required: c.required,
+        }))
+      : (categoriesWithoutSchema.push(category), FLAT_COLUMNS);
+
+    const buffer = await createXlsxFromScratch(categoryProducts, columns, category.slice(0, 31));
+    zip.file(`${sanitize(category)}.xlsx`, buffer);
+  }
+
+  // Uncategorized never goes into a marketplace template — same rule as every
+  // other category-split export.
+  if (uncategorized.length) {
+    const buffer = await createXlsxFromScratch(uncategorized, FLAT_COLUMNS, "Uncategorized");
+    zip.file("Uncategorized.xlsx", buffer);
+  }
+
+  const out = (await zip.generateAsync({ type: "nodebuffer" })) as unknown as Buffer;
+  return { zip: out, categoriesWithoutSchema };
+}
+
 // ── Category-split export (primary mode) ─────────────────────────────────────
 // Each category is auto-matched to the closest template by name similarity.
 // The defaultTemplateId is used as the fallback when no close match is found.

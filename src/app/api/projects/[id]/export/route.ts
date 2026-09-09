@@ -3,7 +3,9 @@ import { after } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate, Prisma } from "@prisma/client";
-import { generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
+import { generateBestBuyCategoryZip, generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
+import { getBestBuyColumnsForCategories } from "@/lib/export/bestbuy-template";
+import { miraklConfigured } from "@/lib/bestbuy/mirakl-client";
 import { createJob, resolveJob, rejectJob, getJobStatus, getJobZip, setJobPhase, touchJob } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
 
@@ -400,6 +402,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
         zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
+      } else if (isBestBuy && miraklConfigured()) {
+        // Best Buy: build each category's sheet from Mirakl's own attribute set
+        // (PM11) rather than needing 1,450 templates uploaded by hand. Only
+        // reached for Best Buy — every other marketplace falls through to the
+        // existing template/flat paths below, unchanged.
+        await setJobPhase(jobId, "Fetching Best Buy category templates…");
+        const categories = [
+          ...new Set(
+            products
+              .map((p) => p.marketplaceCategory)
+              .filter((c): c is string => !!c && c !== "Uncategorized"),
+          ),
+        ];
+        const columnsByCategory = await getBestBuyColumnsForCategories(categories);
+        await setJobPhase(jobId, "Building spreadsheet files…");
+        const result = await generateBestBuyCategoryZip(products, columnsByCategory);
+        zipBuffer = result.zip;
+        // Categories Mirakl had no attribute set for fell back to flat columns —
+        // surface them the same way a missing template is surfaced.
+        missingTemplateCategories = result.categoriesWithoutSchema;
       } else if (usesCategoryExport && allTemplates.length) {
         // With uploaded templates: match each category to the closest template
         // and export in that template's column format — one file per matched category
