@@ -6,6 +6,7 @@ import type { ExportTemplate, Prisma } from "@prisma/client";
 import { generateBestBuyCategoryZip, generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
 import { getBestBuyColumnsForCategories } from "@/lib/export/bestbuy-template";
 import { miraklConfigured } from "@/lib/bestbuy/mirakl-client";
+import { setDropdownDeadline } from "@/lib/ai/match-dropdown";
 import { createJob, resolveJob, rejectJob, getJobStatus, getJobZip, setJobPhase, touchJob } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
 
@@ -17,6 +18,12 @@ export const maxDuration = 300;
 // gets a hard time budget instead. Fills are persisted, so each export run
 // picks up where the previous one stopped and the catalog heals incrementally.
 const BACKFILL_BUDGET_MS = 120_000;
+
+// Wall-clock budget for AI dropdown/mandatory-cell filling, measured from the
+// start of the job. maxDuration is 300s; stopping at 180s leaves room for the
+// image back-fill, the template writes and storing the ZIP. Cells not filled in
+// time land in Missing_Mandatory_Fields.csv — the same path an AI failure takes.
+const DROPDOWN_BUDGET_MS = 180_000;
 
 // Poll job status / download completed ZIP
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -117,6 +124,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // died with "timeout exceeded when trying to connect". `after()` keeps the
   // function alive (up to maxDuration) until the job finishes.
   after(async () => {
+    const jobStartedAt = Date.now();
+    // Cap the AI dropdown/mandatory-cell fill so it can never consume the whole
+    // invocation. It was unbounded — one model round-trip per category per
+    // template — which is why 8 consecutive Mathis exports of only 24-40
+    // products died at "Building spreadsheet files…" while a 1,251-product
+    // Walmart export (no dropdown fill) finished in under three minutes.
+    // Leaves ~90s to write and store the ZIP after the fill stops.
+    setDropdownDeadline(jobStartedAt + DROPDOWN_BUDGET_MS);
     // Mark exporting inside the background job so the POST can return the jobId
     // immediately without a DB round-trip. Previously this was awaited in the
     // request handler — if the DB was slow or the connection pool was exhausted

@@ -32,6 +32,31 @@ const MAX_ATTEMPTS = 3;
 /** Batches in flight at once — keeps large exports inside their time limit. */
 const CONCURRENCY = 4;
 
+// ── Serverless time budget ───────────────────────────────────────────────────
+// The export route is capped at maxDuration = 300s, but these AI calls were
+// unbounded: one dropdown batch per category per template, each a real model
+// round-trip. A Mathis project of just 24 products spread across many
+// categories therefore ran past the ceiling and the ENTIRE export died at
+// "Building spreadsheet files…" with nothing to show — 8 consecutive failures
+// over two days, while a 1,251-product Walmart export (which has no dropdown
+// fill) finished in under three minutes on the same instance.
+//
+// The deadline is advisory and checked BETWEEN batches: work already in flight
+// finishes, nothing new is dispatched once the budget is spent, and the cells
+// that never got filled fall through to the compliance report exactly as an AI
+// failure already does. A complete export that names its gaps beats no export.
+let dropdownDeadlineAt: number | null = null;
+
+/** Wall-clock instant after which no NEW dropdown batch starts. null = no budget. */
+export function setDropdownDeadline(at: number | null): void {
+  dropdownDeadlineAt = at;
+}
+
+/** Checked between batches, never mid-call. */
+function deadlinePassed(): boolean {
+  return dropdownDeadlineAt !== null && Date.now() >= dropdownDeadlineAt;
+}
+
 /**
  * Cache key for one (column, value) pair. Callers MUST build lookup keys with this
  * function rather than interpolating by hand, so the producer and consumer of the
@@ -150,14 +175,25 @@ No other text.`,
 
   // Simple worker pool: CONCURRENCY batches in flight at a time.
   let next = 0;
+  let skipped = 0;
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
       while (next < batches.length) {
+        // Out of time: leave the rest unmatched rather than overrun the export's
+        // own ceiling and lose the whole ZIP. Unmatched values stay as-is.
+        if (deadlinePassed()) {
+          skipped += batches.length - next;
+          next = batches.length;
+          break;
+        }
         const batch = batches[next++];
         if (batch) await runBatch(batch);
       }
     }),
   );
+  if (skipped > 0) {
+    console.warn(`[match-dropdown] time budget spent — ${skipped} batch(es) left unmatched`);
+  }
 
   return out;
 }
@@ -277,14 +313,28 @@ No other text.`,
   };
 
   let next = 0;
+  let skipped = 0;
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
       while (next < batches.length) {
+        // Out of time: the cells these batches would have filled go to the
+        // compliance report, the same route an AI failure already takes.
+        if (deadlinePassed()) {
+          skipped += batches.length - next;
+          next = batches.length;
+          break;
+        }
         const batch = batches[next++];
         if (batch) await runBatch(batch);
       }
     }),
   );
+  if (skipped > 0) {
+    console.warn(
+      `[match-dropdown] time budget spent — ${skipped} mandatory-fill batch(es) skipped; ` +
+      `those cells go to Missing_Mandatory_Fields.csv`,
+    );
+  }
 
   return out;
 }
