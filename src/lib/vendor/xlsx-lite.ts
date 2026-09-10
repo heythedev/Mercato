@@ -39,7 +39,12 @@ function attr(tag: string, name: string): string | null {
   return m ? m[1] : null;
 }
 
-const MAX_COLS = 1024;
+// Excel's own hard ceiling. This used to be 1,024, which silently truncated
+// wide sheets: Best Buy's category templates run to 4,108 columns, so every
+// attribute past column 1,024 was dropped on upload and the exporter had no
+// mapping for it. Cost is bounded by the cells a sheet actually contains — the
+// parser only ever allocates per present cell, not per possible column.
+const MAX_COLS = 16384;
 const SCORE_SCAN_ROWS = 60;
 
 const NAME_POSITIVE = /listing|template|catalog\b|product|items?\b|offers?\b|\bdata\b/i;

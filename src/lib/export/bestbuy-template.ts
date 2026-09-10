@@ -33,7 +33,8 @@ export type BestBuyColumn = {
 
 export type BestBuyFillKey =
   | "categoryName" | "name" | "upc" | "brand" | "description"
-  | "imageUrl" | "vendorSku" | "price" | "weight" | "height" | "width" | "depth";
+  | "imageUrl" | "vendorSku" | "price"
+  | "weight" | "height" | "width" | "depth" | "length" | "color";
 
 /**
  * Mirakl attribute (last dotted segment, lowercased) → the product field we can
@@ -56,41 +57,66 @@ const FILL_BY_ATTRIBUTE: Record<string, BestBuyFillKey> = {
   productweight: "weight",
   productheight: "height",
   productwidth: "width",
+  productlength: "length",
   productdepth: "depth",
+  // Vendor sheets carry a Color column; getProductField resolves it straight
+  // out of vendorData. The value still has to clear the column's own dropdown
+  // before it is written, so an off-list colour leaves the cell empty.
+  color: "color",
+  colour: "color",
 };
 
 /**
- * The plain attribute name for mapping, or "" when the code is a NESTED
- * structure that must never be auto-filled.
+ * The product field a Best Buy attribute CODE should be filled from, or null
+ * when we hold nothing for it.
  *
- * Two different dotted shapes exist and they mean opposite things:
- *   "Car_Amplifiers.productWeight"   category-code prefix + attribute → map it
- *   "featureBullets.1.description"   a repeating sub-structure       → do NOT
+ * Shared by both export paths so the mapping can never drift between them: the
+ * generated-sheet fallback in this file, and the real-template filler in
+ * zip.ts, which sees these codes as its column keys.
  *
- * Matching on the last segment alone conflates them: it filled Feature Bullets
- * 1-5 AND Product Documents 1-2 with the product description, because each of
- * those ends in ".description". Feature bullets are short selling points and
- * product documents are spec sheets — neither is the description, and wrong
- * content in a required Best Buy attribute fails validation on upload. So the
- * category prefix is stripped and anything still nested is left blank.
+ * Three code shapes have to be told apart, and conflating them causes real
+ * damage:
+ *   Floor_Tiles.productWidth                              category-prefixed → map
+ *   Floor_Tiles.tradeItemHierarchy.each.dimensions.width  packaging restatement → map
+ *   featureBullets.1.description                          repeating group → NEVER map
+ *
+ * That last one is why this is not a simple last-segment match: an earlier
+ * version filled all five feature bullets and both product-document fields with
+ * the product description, because each code ends in ".description". A wrong
+ * value in a required attribute fails Best Buy's validation and is harder to
+ * spot than an empty cell.
  */
-function attributeKey(code: string, hierarchyCode: string): string {
-  let s = code.trim();
-  if (hierarchyCode && s.toLowerCase().startsWith(`${hierarchyCode.toLowerCase()}.`)) {
-    s = s.slice(hierarchyCode.length + 1);
+export function bestBuyFillKeyForCode(code: string): BestBuyFillKey | null {
+  const raw = String(code ?? "").trim();
+  if (!raw) return null;
+  // Strip a leading category-code segment ("Floor_Tiles.", "Car_Amplifiers.").
+  const afterPrefix = /^[A-Z][A-Za-z0-9_]*\./.test(raw) ? raw.slice(raw.indexOf(".") + 1) : raw;
+  const lower = afterPrefix.toLowerCase();
+
+  // Mirakl's packaging block restates the product's own dimensions and weight.
+  if (lower.startsWith("tradeitemhierarchy.")) {
+    if (lower.endsWith(".dimensions.length")) return "length";
+    if (lower.endsWith(".dimensions.width")) return "width";
+    if (lower.endsWith(".dimensions.height")) return "height";
+    if (lower.endsWith(".weight.amount")) return "weight";
+    return null; // units of measure and the rest: nothing to fill them from
   }
-  if (s.includes(".")) return ""; // still nested → not a simple attribute
-  return s.toLowerCase();
+
+  // Still nested after the prefix ⇒ a repeating group, never auto-filled.
+  if (lower.includes(".")) return null;
+  return FILL_BY_ATTRIBUTE[lower] ?? null;
 }
 
 function toColumn(a: MiraklAttribute, hierarchyCode: string): BestBuyColumn {
-  const key = attributeKey(a.code, hierarchyCode);
+  // hierarchyCode is stripped by bestBuyFillKeyForCode itself; passing the code
+  // through the shared resolver keeps both export paths on one mapping table.
+  void hierarchyCode;
   return {
     code: a.code,
     label: a.label || a.code,
     required: !!a.required,
     type: a.type,
-    fill: key ? FILL_BY_ATTRIBUTE[key] : undefined,
+    fill: bestBuyFillKeyForCode(a.code) ?? undefined,
   };
 }
 

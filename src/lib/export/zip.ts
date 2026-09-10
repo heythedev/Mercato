@@ -29,6 +29,7 @@ type Product = Pick<
   | "liveData"
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
+import { bestBuyFillKeyForCode } from "./bestbuy-template";
 import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, fillDropdownValues, type DropdownQuery, type DropdownFillQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
@@ -1024,9 +1025,30 @@ async function fillTemplateXlsx(
   let bestMatches = 0;
   let bestCount = 0;
 
+  // ── Attribute-code row ─────────────────────────────────────────────────────
+  // Mirakl templates carry TWO header rows: human labels on top and, below them,
+  // the unique attribute code for each column. Best Buy's GROUP templates cover
+  // dozens of categories in one sheet and repeat the same label in every one of
+  // them — "Model Number" appears 83 times in the furniture template, once per
+  // category. Matching a stored column on its label alone therefore collapsed
+  // all 83 onto the first one's letter: 2,832 columns resolved to 564 distinct
+  // letters, and every category-specific value was written into another
+  // category's column or lost outright. Codes are unique, so they are matched
+  // first and the label match below is left as the fallback.
+  const keySet = new Set(columns.map((c) => normalizeKey(c.key)));
+  let codeLetterByKey = new Map<string, string>();
+  let bestCodeMatches = 0;
+
   for (const rm of rowMatches) {
     const labels = readRowLabels(rm[0]);
     if (!labels.size) continue;
+    // Same pass: keep whichever row resolves the most attribute CODES.
+    const codeMap = new Map<string, string>();
+    for (const [letter, text] of labels) {
+      const nk = normalizeKey(text);
+      if (keySet.has(nk) && !codeMap.has(nk)) codeMap.set(nk, letter);
+    }
+    if (codeMap.size > bestCodeMatches) { bestCodeMatches = codeMap.size; codeLetterByKey = codeMap; }
     let matches = 0;
     for (const label of labels.values()) {
       if (wantedKeys.has(normalizeKey(label))) matches++;
@@ -1059,15 +1081,30 @@ async function fillTemplateXlsx(
   // ── Map template columns to our column definitions ─────────────────────────
   type ColEntry = { col: Column; letter: string };
   const colEntries: ColEntry[] = [];
+  // A letter may back only ONE stored column: two columns sharing a letter means
+  // the second silently overwrites the first when the row is written.
+  const takenLetters = new Set<string>();
   for (const col of columns) {
-    for (const [letter, header] of colLetterToHeader) {
-      if (normalizeKey(header) === normalizeKey(col.label) || normalizeKey(header) === normalizeKey(col.key)) {
-        colEntries.push({ col, letter });
-        break;
+    // 1. exact attribute code — unique per column, so this is unambiguous
+    let letter = codeLetterByKey.get(normalizeKey(col.key));
+    if (letter && takenLetters.has(letter)) letter = undefined;
+    // 2. header label, left to right, skipping letters already claimed. Stored
+    //    columns and template columns are both in sheet order, so repeated
+    //    labels still pair up in the order they appear.
+    if (!letter) {
+      for (const [l, header] of colLetterToHeader) {
+        if (takenLetters.has(l)) continue;
+        if (normalizeKey(header) === normalizeKey(col.label) || normalizeKey(header) === normalizeKey(col.key)) {
+          letter = l;
+          break;
+        }
       }
     }
+    if (!letter) continue;
+    takenLetters.add(letter);
+    colEntries.push({ col, letter });
   }
-  console.log(`[export] colEntries matched: ${colEntries.length}, headerRowNum=${headerRowNum}, colLetterToHeader size=${colLetterToHeader.size}`);
+  console.log(`[export] colEntries matched: ${colEntries.length} (by code: ${bestCodeMatches}), headerRowNum=${headerRowNum}, colLetterToHeader size=${colLetterToHeader.size}`);
   if (colEntries.length === 0) {
     // The most common cause of a "downloaded file doesn't match my template" report:
     // the template's header labels don't normalize-match the stored column
@@ -1562,6 +1599,15 @@ async function fillTemplateXlsx(
 
   const isTemu = marketplace.toLowerCase() === "temu";
   const isWalmart = marketplace.toLowerCase() === "walmart";
+  const isBestBuyTpl = marketplace.toLowerCase() === "bestbuy";
+
+  // Best Buy column keys are Mirakl ATTRIBUTE CODES, not human labels
+  // ("Floor_Tiles.productWidth"), which getProductField normalises to
+  // "floortilesproductwidth" and matches against nothing — so a vendor file that
+  // genuinely carries Width, Length, Height and Weight still left 19 of a
+  // category's 24 REQUIRED columns empty, and Best Buy rejects on those.
+  // bestBuyFillKeyForCode owns the code→field mapping and is shared with the
+  // generated-sheet fallback so the two can never disagree.
   const isAmazon = marketplace.toLowerCase() === "amazon" || marketplace.toLowerCase() === "amazon_us";
   // Map a categorized value (a rich "A > B > C" path, or already a flat value)
   // down to one of the 75 categories the Walmart template dropdown accepts.
@@ -1643,6 +1689,13 @@ async function fillTemplateXlsx(
   // Compute the final value for a column (dropdown-safe)
   const colVal = (p: Product, col: Column, letter: string): string => {
     let raw = String(getProductField(p, col.key) ?? "");
+    // Best Buy: retry through the attribute-code translation when the raw code
+    // resolved nothing, so category-prefixed and packaging-dimension columns
+    // pick up the Length/Width/Height/Weight the vendor file already carries.
+    if (!raw.trim() && isBestBuyTpl) {
+      const mapped = bestBuyFillKeyForCode(col.key);
+      if (mapped) raw = String(getProductField(p, mapped) ?? "");
+    }
 
     // Temu-specific field coercions applied before dropdown matching
     if (isTemu) {
