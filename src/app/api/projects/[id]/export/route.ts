@@ -404,9 +404,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
       } else if (isBestBuy && miraklConfigured()) {
         // Best Buy: build each category's sheet from Mirakl's own attribute set
-        // (PM11) rather than needing 1,450 templates uploaded by hand. Only
-        // reached for Best Buy — every other marketplace falls through to the
-        // existing template/flat paths below, unchanged.
+        // (PM11). Only reached for Best Buy; other marketplaces are unaffected.
+        //
+        // NOTE — why this runs even though Best Buy's 22 REAL templates are now
+        // uploaded and matched correctly by embedded coverage: fillTemplateXlsx
+        // cannot process them. Measured on the smallest of them (Furniture,
+        // 1.4MB, 1,615 columns): ONE fill of ONE category used 2.6 GB of heap
+        // and 55s, and a full 41-category run died with "JavaScript heap out of
+        // memory" at a 4 GB ceiling. Production functions run far below that,
+        // so routing Best Buy through the real-template path would replace a
+        // working export with a guaranteed OOM. The filler is tuned for Mathis
+        // workbooks (20-44KB, 60-116 columns); Best Buy's are ~50x the size and
+        // ~30x the columns. Until it can stream wide sheets, the generated
+        // per-category sheets stay the shipping path.
         await setJobPhase(jobId, "Fetching Best Buy category templates…");
         const categories = [
           ...new Set(

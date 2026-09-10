@@ -332,8 +332,27 @@ export async function generateCategoryZip(
   // Chairs"). This means auto-assignment works for all templates, not just those
   // that happen to have an embedded category sheet.
   const isTemu = marketplace.toLowerCase() === "temu";
+  const isBestBuyMp = marketplace.toLowerCase() === "bestbuy";
   const tmplCats = new Map<string, Set<string>>();
   const normSepGlobal = (s: string) => s.replace(/ \/ /g, " > ");
+
+  // Best Buy: coverage comes from each template's Columns sheet, which lists
+  // every category that template serves. Its 22 real templates cover all 1,450
+  // leaf categories between them, so matching by embedded coverage is exact —
+  // matching by template NAME (the fallback below) cannot work here, because a
+  // file called "Electronics" has to claim "Electronics > Computer Accessories
+  // > Mice" and a hundred others.
+  if (isBestBuyMp) {
+    await Promise.all(templates.map(async (t) => {
+      if (!t.fileData) return;
+      const cats = await extractBestBuyTemplateCategories(t.fileData as Buffer);
+      if (cats.length) {
+        tmplCats.set(t.id, new Set(cats.map((c) => c.toLowerCase())));
+        console.log(`[export] Best Buy template "${t.name}" covers ${cats.length} categories`);
+      }
+    }));
+  }
+
   if (isTemu) {
     await Promise.all(templates.map(async (t) => {
       let cats: string[] = [];
@@ -624,6 +643,80 @@ function bestByColumnOverlap(
 // category-scope / sample sheets (values like "Jewelry & Accessories > Hats & Caps").
 // These are used for exact-path matching so each template is chosen based on the
 // actual categories it covers, not just its file name.
+/**
+ * The category paths a Best Buy template covers, read from its "Columns" sheet.
+ *
+ * Best Buy's templates are standard Mirakl workbooks: the Columns sheet's first
+ * row is `Code | Label | Description | Value example | <one column per category
+ * path>`, and that header row is the authoritative coverage list. Reading it
+ * directly (rather than scanning sharedStrings like the Temu extractor) avoids
+ * picking up unrelated slash-containing text elsewhere in a 4,000-column
+ * workbook.
+ *
+ * Paths arrive slash-separated with NO spaces
+ * ("Home and Garden/Furniture/Desks"), and — the catch — a category's own NAME
+ * can contain a slash: "Beverages and Food/Food/Prepared/Preserved Foods" is
+ * four levels, not five, because the leaf is literally "Prepared/Preserved
+ * Foods". Splitting on "/" therefore corrupts those paths. Instead each raw
+ * string is resolved against the real taxonomy by its slash-joined form, so the
+ * canonical " > " path comes back exactly right or not at all.
+ */
+async function extractBestBuyTemplateCategories(fileData: Buffer): Promise<string[]> {
+  try {
+    const { loadBestBuyCategoryPaths } = await import("@/lib/ai/bestbuy-taxonomy");
+    // slash-joined form → canonical " > " path
+    const bySlash = new Map<string, string>();
+    for (const p of loadBestBuyCategoryPaths()) {
+      bySlash.set(p.split(" > ").join("/").toLowerCase(), p);
+    }
+
+    const zip = await JSZip.loadAsync(fileData);
+    const wbXml = await zip.file("xl/workbook.xml")?.async("string");
+    const relsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("string");
+    if (!wbXml || !relsXml) return [];
+    const sheet = [...wbXml.matchAll(/<sheet[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"/g)]
+      .map((m) => ({ name: m[1]!, rid: m[2]! }))
+      .find((s) => s.name.toLowerCase() === "columns");
+    if (!sheet) return [];
+    const rel = new RegExp(`Id="${sheet.rid}"[^>]*Target="([^"]+)"`).exec(relsXml);
+    if (!rel) return [];
+    const sheetXml = await zip.file("xl/" + rel[1]!.replace(/^\/?xl\//, ""))?.async("string");
+    if (!sheetXml) return [];
+
+    const ssXml = (await zip.file("xl/sharedStrings.xml")?.async("string")) ?? "";
+    const strings = [...ssXml.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) =>
+      [...m[1]!.matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/g)]
+        .map((t) => t[1]!)
+        .join("")
+        .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"').replace(/&apos;/g, "'"),
+    );
+
+    const firstRow = /<row[^>]*>([\s\S]*?)<\/row>/.exec(sheetXml);
+    if (!firstRow) return [];
+    const cells: string[] = [];
+    // Both <c …>…</c> and self-closing <c … /> must be matched: missing the
+    // self-closing form shifts every column after a blank cell, which silently
+    // emptied 8 of the 22 real templates when this was first written.
+    for (const cm of firstRow[1]!.matchAll(/<c\b[^>]*>[\s\S]*?<\/c>|<c\b[^>]*\/>/g)) {
+      const chunk = cm[0];
+      const type = /\st="(\w+)"/.exec(chunk)?.[1];
+      const v = /<v>([\s\S]*?)<\/v>/.exec(chunk)?.[1];
+      const inline = /<is>[\s\S]*?<t[^>]*>([\s\S]*?)<\/t>/.exec(chunk)?.[1];
+      cells.push(inline ?? (type === "s" && v ? strings[Number(v)] ?? "" : v ?? ""));
+    }
+
+    const found: string[] = [];
+    for (const raw of cells.slice(4)) {
+      const canonical = bySlash.get(raw.trim().toLowerCase());
+      if (canonical) found.push(canonical);
+    }
+    return [...new Set(found)];
+  } catch {
+    return [];
+  }
+}
+
 async function extractTemuTemplateCategories(fileData: Buffer): Promise<string[]> {
   try {
     const tplZip = await JSZip.loadAsync(fileData);
