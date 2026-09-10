@@ -41,3 +41,7 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+# Best Buy template workbooks — loaded into the DB by
+# scripts/upload-bestbuy-templates.ts, not source code (39MB of xlsx).
+Best buy templates/
