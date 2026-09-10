@@ -1340,7 +1340,7 @@ async function fillTemplateXlsx(
       // other Amazon dropdown fails to match and gets blanked by the hard invariant).
       const bare = evalIndirectConcat(formula.replace(/^=/, "").trim());
       const ref = definedNames.get(bare) ?? bare;
-      opts = await resolveXmlRangeDropdown(tplZip, ref, sheetNameToPath, ssArr);
+      opts = await resolveXmlRangeDropdown(tplZip, ref, sheetNameToPath, ssArr, fileData);
     }
     if (opts.length) {
       for (const letter of letters) {
@@ -2129,36 +2129,80 @@ ${originalSiXmls.map(si => `<si>${si}</si>`).join("")}${newSiTexts.map(s => `<si
 
 /** Resolve a dataValidation range reference (e.g. =Lists!$A$1:$A$10) by reading
  *  cells from the referenced sheet in the template ZIP. */
+/**
+ * Every referenced sheet, parsed ONCE into column letter → [{row, value}].
+ *
+ * resolveXmlRangeDropdown used to decompress the whole referenced sheet and
+ * regex-scan it on EVERY call. That is invisible on a Mathis template (a 20-44KB
+ * workbook with ~60 dropdowns) and fatal on a Best Buy one: its ReferenceData
+ * sheet is 12.7 MB uncompressed and every one of its 1,615 columns carries a
+ * dataValidation, so the old path did ~20 GB of string allocation per template.
+ * Measured before this cache: 2.6 GB of heap and 55 seconds to fill ONE
+ * category, and a full export died with "JavaScript heap out of memory".
+ *
+ * Keyed by the workbook itself so the cache lives exactly as long as the fill
+ * and never leaks between templates.
+ */
+type SheetColumnIndex = Map<string, Array<{ row: number; val: string }>>;
+// Keyed on the TEMPLATE BUFFER, not the JSZip. fillTemplateXlsx builds a fresh
+// JSZip per category group (it mutates the zip while filling), so a zip-keyed
+// cache never survives across groups — the 12.7 MB ReferenceData sheet would be
+// re-parsed once per category. The same template row is reused for every group,
+// so its fileData Buffer is a stable identity for the whole export.
+const sheetColumnCache = new WeakMap<object, Map<string, SheetColumnIndex>>();
+
+async function indexSheetColumns(
+  tplZip: JSZip,
+  path: string,
+  ssArr: string[],
+  cacheKey: object,
+): Promise<SheetColumnIndex> {
+  let byPath = sheetColumnCache.get(cacheKey);
+  if (!byPath) {
+    byPath = new Map();
+    sheetColumnCache.set(cacheKey, byPath);
+  }
+  const cached = byPath.get(path);
+  if (cached) return cached;
+
+  const index: SheetColumnIndex = new Map();
+  const xml = (await tplZip.file(path)?.async("string")) ?? "";
+  for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
+    const rn = parseInt(rm[1]!);
+    for (const cm of rm[2]!.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const isShared = /\bt="s"/.test(cm[2]!);
+      const vVal = cm[3]!.match(/<v>(\d+)<\/v>/)?.[1] ?? "";
+      const tVal = cm[3]!.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? "";
+      const val = isShared && vVal ? (ssArr[parseInt(vVal)] ?? "") : xmlUnescape(tVal || vVal);
+      if (!val.trim()) continue;
+      const letter = cm[1]!.toUpperCase();
+      let col = index.get(letter);
+      if (!col) index.set(letter, (col = []));
+      col.push({ row: rn, val: val.trim() });
+    }
+  }
+  byPath.set(path, index);
+  return index;
+}
+
 async function resolveXmlRangeDropdown(
   tplZip: JSZip,
   formula: string,
   sheetNameToPath: Map<string, string>,
   ssArr: string[],
+  cacheKey: object,
 ): Promise<string[]> {
   const m = /^(?:'?([^'!]+)'?!)?\$?([A-Z]+)\$?(\d+)?(?::\$?[A-Z]+\$?(\d+)?)?$/i.exec(formula);
   if (!m) return [];
   const [, sheetName, colLetter, r1, r2] = m;
   const path = sheetName ? sheetNameToPath.get(sheetName.toLowerCase()) : null;
   if (!path) return [];
-  const xml = await tplZip.file(path)?.async("string") ?? "";
-  if (!xml) return [];
+  const index = await indexSheetColumns(tplZip, path, ssArr, cacheKey);
+  const cells = index.get(colLetter.toUpperCase());
+  if (!cells) return [];
   const startRow = r1 ? parseInt(r1) : 1;
   const endRow = r2 ? parseInt(r2) : 9999;
-  const targetCol = colLetter.toUpperCase();
-  const opts: string[] = [];
-  for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
-    const rn = parseInt(rm[1]);
-    if (rn < startRow || rn > endRow) continue;
-    for (const cm of rm[2].matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"([^>]*)>([\s\S]*?)<\/c>/g)) {
-      if (cm[1].toUpperCase() !== targetCol) continue;
-      const isShared = /\bt="s"/.test(cm[2]);
-      const vVal = cm[3].match(/<v>(\d+)<\/v>/)?.[1] ?? "";
-      const tVal = cm[3].match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? "";
-      const val = isShared && vVal ? (ssArr[parseInt(vVal)] ?? "") : xmlUnescape(tVal || vVal);
-      if (val.trim()) opts.push(val.trim());
-    }
-  }
-  return opts;
+  return cells.filter((c) => c.row >= startRow && c.row <= endRow).map((c) => c.val);
 }
 
 /**

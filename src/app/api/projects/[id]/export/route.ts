@@ -417,21 +417,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
         zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
-      } else if (isBestBuy && miraklConfigured()) {
-        // Best Buy: build each category's sheet from Mirakl's own attribute set
-        // (PM11). Only reached for Best Buy; other marketplaces are unaffected.
+      } else if (isBestBuy && miraklConfigured() && !allTemplates.length) {
+        // Best Buy FALLBACK ONLY — no templates uploaded. Builds each category's
+        // sheet from Mirakl's attribute set (PM11) so an export is still
+        // possible, but the result is our own workbook, not Best Buy's.
         //
-        // NOTE — why this runs even though Best Buy's 22 REAL templates are now
-        // uploaded and matched correctly by embedded coverage: fillTemplateXlsx
-        // cannot process them. Measured on the smallest of them (Furniture,
-        // 1.4MB, 1,615 columns): ONE fill of ONE category used 2.6 GB of heap
-        // and 55s, and a full 41-category run died with "JavaScript heap out of
-        // memory" at a 4 GB ceiling. Production functions run far below that,
-        // so routing Best Buy through the real-template path would replace a
-        // working export with a guaranteed OOM. The filler is tuned for Mathis
-        // workbooks (20-44KB, 60-116 columns); Best Buy's are ~50x the size and
-        // ~30x the columns. Until it can stream wide sheets, the generated
-        // per-category sheets stay the shipping path.
+        // Best Buy's REAL templates are preferred whenever they are present and
+        // are handled by the generic category branch below, which fills the
+        // uploaded workbook in place — two header rows (labels, then attribute
+        // codes), data from row 3, ReferenceData/Columns/dropdowns/styling all
+        // untouched. That is what Best Buy's importer expects.
+        //
+        // This used to be unreachable-by-necessity: filling those workbooks cost
+        // 2.6 GB of heap for a SINGLE category because the dropdown resolver
+        // re-decompressed and re-scanned the 12.7 MB ReferenceData sheet for
+        // every one of the template's 1,615 dataValidations. Indexing each
+        // referenced sheet once (see sheetColumnCache in zip.ts) brought the
+        // same work to 177 MB, so the real templates are now the shipping path.
         await setJobPhase(jobId, "Fetching Best Buy category templates…");
         const categories = [
           ...new Set(
