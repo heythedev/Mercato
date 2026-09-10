@@ -130,6 +130,27 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
     return () => { mountedRef.current = false; };
   }, []);
 
+  // Best Buy builds each category's sheet from Mirakl's own required-attribute
+  // set, so no template needs uploading. Ask the server whether that path is
+  // actually available (credentials configured) — without this the screen
+  // warns "no matching template" for categories the export will generate.
+  useEffect(() => {
+    if (!isBestBuy) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch("/api/bestbuy/status", { cache: "no-store" });
+        const d = await r.json();
+        if (!cancelled) setBestBuyAutoTemplates(!!d.autoTemplates);
+      } catch {
+        // Unreachable → assume no auto-templates, so the screen keeps telling
+        // the truth (upload prompts) rather than promising generated sheets.
+        if (!cancelled) setBestBuyAutoTemplates(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isBestBuy]);
+
   // Load templates for this marketplace. Extracted so the "Refresh" button can
   // re-run it after the user uploads a new template in another tab — without a
   // full page reload. `isRefresh` drives the button spinner (vs. initial fetch)
