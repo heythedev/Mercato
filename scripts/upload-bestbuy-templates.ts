@@ -27,7 +27,10 @@ import { prisma } from "../src/lib/db";
 
 const DIR = process.env.BESTBUY_TEMPLATE_DIR ?? "Best buy templates";
 const MARKETPLACE = "bestbuy";
-const DRY = process.argv.includes("--dry-run");
+// Accepts --dry-run and --dry. It used to test only for "--dry-run", so a run
+// invoked as `--dry` wrote for real and created a second, duplicate set of all
+// 22 templates (see scripts/dedupe-bestbuy-templates.ts, which cleaned it up).
+const DRY = process.argv.some((a) => a === "--dry-run" || a === "--dry");
 
 /** Read one sheet's first N rows as a string grid. */
 async function readSheetRows(buf: Buffer, sheetName: string, maxRows: number): Promise<string[][]> {
