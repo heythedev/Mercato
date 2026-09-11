@@ -50,9 +50,16 @@ describe("Best Buy per-category template columns", () => {
     ]);
     const cols = (await getBestBuyColumnsForCategory("Automotive > Car Audio > Car Amplifiers"))!;
     expect(cols.find((c) => c.code === "description")?.fill).toBe("description");
-    for (const nested of ["featureBullets.1.description", "productDocuments.2.description", "Car_Amplifiers.tradeItemHierarchy.each.weight.amount"]) {
+    // Repeating groups are selling points and spec sheets, not the description —
+    // matching on the last dotted segment once filled all seven with it.
+    for (const nested of ["featureBullets.1.description", "productDocuments.2.description"]) {
       expect(cols.find((c) => c.code === nested)?.fill).toBeUndefined();
     }
+    // The packaging block is the exception: tradeItemHierarchy restates the
+    // product's OWN weight and dimensions, so it is filled from them. Leaving it
+    // blank cost eight required cells per Best Buy row.
+    expect(cols.find((c) => c.code === "Car_Amplifiers.tradeItemHierarchy.each.weight.amount")?.fill)
+      .toBe("weight");
   });
 
   it("returns null for a category outside the taxonomy rather than a wrong sheet", async () => {

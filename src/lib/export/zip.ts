@@ -296,7 +296,7 @@ export async function generateCategoryZip(
   templates: TemplateRow[],
   marketplace = "amazon",
   defaultTemplateId?: string,
-): Promise<{ zip: Buffer; missingTemplateCategories: string[] }> {
+): Promise<{ zip: Buffer; missingTemplateCategories: string[]; complianceIssues: ComplianceIssue[] }> {
   console.log(`[export] generateCategoryZip called: ${products.length} products, ${templates.length} templates, marketplace=${marketplace}`);
 
   // ── Real catalog data for the mandatory cells the sheet cannot supply ──────
@@ -568,15 +568,34 @@ export async function generateCategoryZip(
   }
 
   // Rows where the template's requirement matrix marks a cell mandatory (pink)
-  // but no data was available. Values are never invented, so surface the gaps
-  // in a review file the client can fill before importing.
+  // but no data was available.
+  //
+  // This used to ship as Missing_Mandatory_Fields.csv inside the ZIP. The ZIP is
+  // what the client opens, and a file whose whole purpose is to list what we
+  // could not supply reads as a defect report attached to the delivery — so it
+  // stays out of the download by explicit instruction. The gaps themselves are
+  // unchanged and still never invented; they are reported in the server log,
+  // where the team can see them without the client having to.
   if (complianceRows.length > 0) {
-    console.log(`[export] ${complianceRows.length} rows missing mandatory template fields → Missing_Mandatory_Fields.csv`);
-    zipOut.file("Missing_Mandatory_Fields.csv", generateComplianceCsv(complianceRows));
+    const byField = new Map<string, number>();
+    for (const row of complianceRows) {
+      for (const f of row.missingRequired) byField.set(f, (byField.get(f) ?? 0) + 1);
+    }
+    const summary = [...byField]
+      .sort((a, b) => b[1] - a[1])
+      .map(([f, n]) => `${f} (${n})`)
+      .join(", ");
+    console.log(
+      `[export] ${complianceRows.length} row(s) still missing mandatory values — ` +
+      `NOT written to the ZIP. By column: ${summary}`,
+    );
   }
 
   const zipBuffer = await (zipOut.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>);
-  return { zip: zipBuffer, missingTemplateCategories };
+  // Returned rather than written into the ZIP: callers (and tests) can still see
+  // exactly which cells went unfilled without the client finding a defect report
+  // in their download.
+  return { zip: zipBuffer, missingTemplateCategories, complianceIssues: complianceRows };
 }
 
 // Pick the best-matching template for a category using word-overlap scoring.
@@ -2626,18 +2645,6 @@ function generateUncategorizedCsv(products: Product[]): string {
   const header = ["SKU", "Category", "Product Name", "Brand", "UPC", "Description", "Image URL"];
   const rows = products.map((p) =>
     [p.vendorSku, "", p.name, p.brand, toDisplayBarcode(p.upc), p.description, p.imageUrl].map(esc).join(","),
-  );
-  return [header.map(esc).join(","), ...rows].join("\n");
-}
-
-// Review file for rows whose template-mandatory (pink) cells came out empty.
-// Lets the client fill the gaps before importing instead of discovering them
-// as Mirakl rejections.
-function generateComplianceCsv(issues: (ComplianceIssue & { file: string })[]): string {
-  const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const header = ["Category File", "Shop SKU", "Product Name", "Category", "Missing Mandatory Fields"];
-  const rows = issues.map((i) =>
-    [i.file, i.sku, i.name, i.category, i.missingRequired.join("; ")].map(esc).join(","),
   );
   return [header.map(esc).join(","), ...rows].join("\n");
 }

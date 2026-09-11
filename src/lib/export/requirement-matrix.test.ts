@@ -174,7 +174,8 @@ describe("dimensionFromText / weightLbFromText", () => {
 
 describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
   let dataRows: Map<number, Map<string, string>>;
-  let reportCsv: string | null;
+  let issues: { sku: string; missingRequired: string[] }[];
+  let zipEntries: string[];
 
   beforeAll(async () => {
     const fileData = await buildTemplate();
@@ -204,10 +205,11 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
       vendorData: { color: "Green" },
     });
 
-    const { zip } = await generateCategoryZip([vase, pillow], [template], "mathis");
-    const out = await JSZip.loadAsync(zip);
+    const res = await generateCategoryZip([vase, pillow], [template], "mathis");
+    const out = await JSZip.loadAsync(res.zip);
     dataRows = await readDataRows(await out.file("Decor.xlsx")!.async("nodebuffer"));
-    reportCsv = (await out.file("Missing_Mandatory_Fields.csv")?.async("string")) ?? null;
+    issues = res.complianceIssues;
+    zipEntries = Object.keys(out.files);
   });
 
   it("writes products with their categories into the data rows", () => {
@@ -240,15 +242,21 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
   });
 
   it("reports rows whose pink cells could not be filled", () => {
-    expect(reportCsv).toBeTruthy();
-    const lines = (reportCsv ?? "").split("\n");
-    const pillowLine = lines.find((l) => l.includes("PIL-1"));
-    expect(pillowLine).toContain("Fabric Color");
+    const pillowIssue = issues.find((i) => i.sku === "PIL-1");
+    expect(pillowIssue).toBeTruthy();
+    const missing = (pillowIssue?.missingRequired ?? []).join(";");
+    expect(missing).toContain("Fabric Color");
     // grey attributes never appear as "missing" — color is NA for Pillows
-    expect(pillowLine).not.toContain("Color;");
+    expect(missing).not.toContain("Color;");
     // auto-filled columns are no longer "missing"
-    expect(pillowLine).not.toContain("Made in USA");
+    expect(missing).not.toContain("Made in USA");
     // the vase filled everything its category requires — no report row
-    expect(lines.some((l) => l.includes("VASE-1"))).toBe(false);
+    expect(issues.some((i) => i.sku === "VASE-1")).toBe(false);
+  });
+
+  // The gaps are reported to the caller, never shipped to the client as a
+  // defect report sitting next to their data.
+  it("never puts Missing_Mandatory_Fields.csv in the download", () => {
+    expect(zipEntries).not.toContain("Missing_Mandatory_Fields.csv");
   });
 });

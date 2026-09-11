@@ -5,6 +5,10 @@ vi.mock("@/lib/ai/moonshot", () => ({
   moonshot: (m: string) => m,
   moonshotConfigured: () => true,
   moonshotTemperature: () => 0.2,
+  // The fill calls run in non-thinking mode, which carries its own temperature
+  // rule — without these the module throws before it ever reaches generateText.
+  noThinkingHeaders: () => ({}),
+  noThinkingTemperature: () => 0.6,
   MOONSHOT_TEXT_MODEL: "test-model",
   getAiOutage: () => null,
   classifyAiError: () => ({ fatal: false, reason: "x" }),
