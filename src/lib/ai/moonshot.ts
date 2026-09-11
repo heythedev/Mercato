@@ -347,6 +347,20 @@ export function moonshotTemperature(modelId: string, desired: number): number {
   return /^kimi-k[23]/.test(modelId) ? 1 : desired;
 }
 
+/**
+ * Temperature for a call that sends `noThinkingHeaders`.
+ *
+ * kimi-k2.6 accepts temperature 1 while it is thinking but rejects everything
+ * except 0.6 once thinking is switched off — "invalid temperature: only 0.6 is
+ * allowed for this model", a hard 400 that fails the entire call. Turning
+ * thinking off without also changing the temperature therefore trades a slow
+ * call for a broken one, which is exactly what happened to the template
+ * dropdown fill. Models that get no thinking header keep the ordinary rule.
+ */
+export function noThinkingTemperature(modelId: string, desired: number): number {
+  return /^kimi-k2\.6/.test(modelId) ? 0.6 : moonshotTemperature(modelId, desired);
+}
+
 // The moonshot-v1 line (moonshot-v1-auto, moonshot-v1-32k-vision-preview, …)
 // was RETIRED from this account (~2026-08-28): every call 404s with "Not found
 // the model … or Permission denied". The platform now serves the kimi-k line

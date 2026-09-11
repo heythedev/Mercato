@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, moonshotTemperature } from "@/lib/ai/moonshot";
+import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, noThinkingHeaders, noThinkingTemperature } from "@/lib/ai/moonshot";
 
 /**
  * AI fallback for template dropdown (dataValidation) columns.
@@ -27,6 +27,19 @@ const MODEL = process.env.DROPDOWN_MODEL ?? MOONSHOT_TEXT_MODEL;
 const MAX_OPTIONS = 300;
 /** Unresolved values matched per request. */
 const BATCH_SIZE = 40;
+
+// Both calls below answer with one short "n: value" line per item — no prose,
+// no working out. The default model is kimi-k2.6, which reasons at length
+// unless told not to, and neither call used to say so or cap its output. On a
+// 12-product Mathis export that cost ~130 SECONDS PER CALL and returned EMPTY
+// text (in=0 out=0 tokens), so every pink cell it was meant to fill stayed
+// blank AND the export ran past the 300s serverless ceiling and was killed
+// mid-write — the "Export stalled - no progress from the server" the UI shows.
+// compare-images.ts already had to learn this; these two calls never did.
+const OUT_TOKENS_PER_ITEM = 40;
+const OUT_TOKENS_FLOOR = 1000;
+const dropdownOutputBudget = (items: number) =>
+  Math.max(OUT_TOKENS_FLOOR, items * OUT_TOKENS_PER_ITEM);
 /** Attempts per batch before its values are left blank. */
 const MAX_ATTEMPTS = 3;
 /** Batches in flight at once — keeps large exports inside their time limit. */
@@ -124,7 +137,9 @@ export async function matchDropdownValues(
 
         const { text } = await generateText({
           model: moonshot(MODEL),
-          temperature: moonshotTemperature(MODEL, 0),
+          temperature: noThinkingTemperature(MODEL, 0),
+          headers: noThinkingHeaders(MODEL),
+          maxOutputTokens: dropdownOutputBudget(batch.length),
           prompt: `You map vendor product values onto a marketplace template's fixed dropdown options.
 
 For each item choose the single allowed option that is the nearest compatible match for the vendor value.
@@ -266,7 +281,9 @@ export async function fillDropdownValues(
 
         const { text } = await generateText({
           model: moonshot(MODEL),
-          temperature: moonshotTemperature(MODEL, 0),
+          temperature: noThinkingTemperature(MODEL, 0),
+          headers: noThinkingHeaders(MODEL),
+          maxOutputTokens: dropdownOutputBudget(batch.length),
           prompt: `You complete REQUIRED product-attribute dropdowns on a marketplace listing sheet. The vendor supplied no value, so choose from the product information the way a human operator would.
 
 For each item choose the single allowed option that best describes the product.

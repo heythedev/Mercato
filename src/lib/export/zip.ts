@@ -446,10 +446,15 @@ export async function generateCategoryZip(
         // (e.g. "office" scoring "Office Supplies File Cabinets" for "Office Furniture").
         // When no template reaches the threshold, findBestTemplate returns fallback
         // so the column-overlap pass below can make a better choice.
-        tpl = findBestTemplate(catLabel, templates, fallback, 4);
-        // 3) Column overlap — only when no designated catch-all exists
-        if (tpl === fallback && templates.length > 1 && !hasCatchAll) {
-          tpl = bestByColumnOverlap(catProducts, templates, fallback);
+        const named = findBestTemplateOrNull(catLabel, templates, 4);
+        if (named) {
+          tpl = named;
+          console.log(`[export] Name match: "${tpl.name}" for "${catLabel}"`);
+        } else {
+          // 3) Column overlap — only when the name matched nothing at all.
+          tpl = templates.length > 1 && !hasCatchAll
+            ? bestByColumnOverlap(catProducts, templates, fallback)
+            : fallback;
         }
       }
 
@@ -517,7 +522,30 @@ export function findBestTemplate<T extends { id: string; name: string; category?
   fallback: T,
   minScore = 0,
 ): T {
-  if (templates.length <= 1) return fallback;
+  return findBestTemplateOrNull(category, templates, minScore) ?? fallback;
+}
+
+/**
+ * Name/category match for a category path, or null when nothing clears
+ * `minScore`.
+ *
+ * findBestTemplate signals "no match" by handing back the caller's fallback,
+ * which is ambiguous whenever the RIGHT template IS the fallback. The fallback
+ * is whichever template has the most columns, and on Mathis that is
+ * "Furniture" — so a Furniture group matched the Furniture template exactly
+ * (+10), the caller read `tpl === fallback` as a miss, and column-overlap
+ * matching replaced it with "Outdoor". Queen beds were written into the Outdoor
+ * template and their rows resolved to "Gardening > Garden Beds"; an office desk
+ * became "Outdoor Furniture Covers", and the columns the data landed in were
+ * the wrong template's. Reporting a miss as null keeps it distinct from a match
+ * that happens to be the fallback.
+ */
+export function findBestTemplateOrNull<T extends { id: string; name: string; category?: string | null }>(
+  category: string,
+  templates: T[],
+  minScore = 0,
+): T | null {
+  if (templates.length <= 1) return null;
 
   // Fold accents so "Décor" ↔ "Decor", then strip to alphanumerics.
   // Also normalise " / " → " > " so Temu template names ("Home & Kitchen / Furniture / Chairs")
@@ -561,7 +589,7 @@ export function findBestTemplate<T extends { id: string; name: string; category?
     return sc;
   };
 
-  let best = fallback;
+  let best: T | null = null;
   let bestScore = 0;
 
   for (const t of templates) {
@@ -577,9 +605,9 @@ export function findBestTemplate<T extends { id: string; name: string; category?
     if (score > bestScore) { bestScore = score; best = t; }
   }
 
-  // If nothing scored above the caller's minimum, the "best" is still too weak
-  // to be trusted — return the fallback so column-based matching can take over.
-  if (bestScore < minScore) return fallback;
+  // Nothing cleared the caller's minimum — too weak to trust, so report no
+  // match and let the caller choose (its fallback, or column-based matching).
+  if (!best || bestScore < minScore) return null;
   return best;
 }
 
