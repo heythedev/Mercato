@@ -540,6 +540,33 @@ export async function generateCategoryZip(
     byCategory.set(catKey, { template: tpl, catLabel, products: catProducts });
   }
 
+  // ── Best Buy: one file per TEMPLATE, not per category ─────────────────────
+  // Best Buy issues 22 GROUP templates, each covering ~100 categories, with a
+  // categoryName column and per-category attribute columns — one workbook is
+  // meant to carry every category it covers. Emitting one file per category
+  // instead re-inflates, fills and re-compresses the same multi-megabyte
+  // workbook once per category: 118 products spanning 61 categories produced 61
+  // copies of those templates, a 135 MB ZIP that the browser never finished
+  // downloading, and 1.1 GB of heap to build it.
+  //
+  // Grouping by template makes the file count depend on the TEMPLATES a catalog
+  // touches (at most 22) instead of its categories (up to 1,450), so a
+  // thousand-product upload costs no more workbook work than this one does.
+  // Mathis already groups this way — one file per department, not per leaf.
+  if (isBestBuyMp && byCategory.size > 1) {
+    const merged = new Map<string, { template: TemplateRow; catLabel: string; products: Product[] }>();
+    for (const entry of byCategory.values()) {
+      const key = entry.template.id;
+      const seen = merged.get(key);
+      if (seen) seen.products.push(...entry.products);
+      // The file is the template now, so it is named after the template.
+      else merged.set(key, { template: entry.template, catLabel: entry.template.name, products: [...entry.products] });
+    }
+    console.log(`[export] Best Buy: ${byCategory.size} categories grouped into ${merged.size} template file(s)`);
+    byCategory.clear();
+    for (const [key, entry] of merged) byCategory.set(key, entry);
+  }
+
   const complianceRows: (ComplianceIssue & { file: string })[] = [];
   for (const { template, catLabel, products: catProducts } of byCategory.values()) {
     await new Promise<void>((r) => setImmediate(r)); // yield so HTTP polls can be served
@@ -1074,13 +1101,13 @@ async function fillTemplateXlsx(
   // colored text, fonts) in template header cells is fully preserved.
   // New plain-text entries for product data are appended after the originals.
   const ssPath = "xl/sharedStrings.xml";
-  const existingSsXml = await tplZip.file(ssPath)?.async("string") ?? "";
-  const originalSiXmls: string[] = [];   // raw inner XML of each <si>, kept as-is
-  const ssArr: string[] = [];            // plain-text equivalent (for header parsing & dropdown resolution)
-  for (const m of existingSsXml.matchAll(/<si>([\s\S]*?)<\/si>/g)) {
-    originalSiXmls.push(m[1]);
-    ssArr.push(extractSsText(m[1]));
-  }
+  // Scanning the table is cached per template FILE: a Best Buy workbook holds
+  // ~25k <si> entries and one template serves many category groups, so this was
+  // 25k regex matches plus a text extraction per entry, repeated once per group.
+  // Both arrays are read-only here — appended values go into newSiTexts — so
+  // they are safe to share. ssMap is NOT shared: ssIdx adds to it as rows are
+  // written, so each fill gets its own built cheaply from the cached array.
+  const { originalSiXmls, ssArr } = await cachedSharedStrings(fileData, tplZip, ssPath);
   const ssMap = new Map<string, number>(ssArr.map((s, i) => [s, i]));
   const newSiTexts: string[] = [];       // product-data values appended as plain text
   const ssIdx = (s: string): number => {
@@ -1438,8 +1465,13 @@ async function fillTemplateXlsx(
   // REQUIRED/OPTIONAL/NA column per category path. It was simply never read,
   // so nothing knew which Best Buy cells were mandatory and the whole fill
   // layer below never ran for them: every pink cell came out blank.
+  // Cached per template FILE, because one template serves many category groups
+  // and the matrix is identical every time. A Best Buy export of 118 products
+  // spans 61 category groups over 22 templates, so this is 61 parses of a sheet
+  // with ~950 attributes x up to 100 categories collapsed to 22 — and the parse
+  // is pure XML scanning over a multi-megabyte sheet.
   const reqMatrix = isMathis || isBestBuyTpl
-    ? await parseRequirementMatrix(tplZip, sheetNameToPath, ssArr)
+    ? await cachedRequirementMatrix(fileData, tplZip, sheetNameToPath, ssArr)
     : null;
   const letterByNormKey = (nk: string): string | undefined =>
     colEntries.find(({ col, letter }) => {
@@ -2470,6 +2502,52 @@ async function resolveXmlRangeDropdown(
  * unrecognised cell is treated as NA — the grey "leave empty" state — since
  * that is what the template's colour coding renders for it.
  */
+/** The template's shared-string table, parsed once per template file. */
+type SharedStrings = { originalSiXmls: string[]; ssArr: string[] };
+const sharedStringsCache = new WeakMap<object, SharedStrings>();
+
+async function cachedSharedStrings(
+  fileData: Buffer,
+  tplZip: JSZip,
+  ssPath: string,
+): Promise<SharedStrings> {
+  const key = fileData as unknown as object;
+  const hit = sharedStringsCache.get(key);
+  if (hit) return hit;
+  const xml = (await tplZip.file(ssPath)?.async("string")) ?? "";
+  const originalSiXmls: string[] = [];
+  const ssArr: string[] = [];
+  for (const m of xml.matchAll(/<si>([\s\S]*?)<\/si>/g)) {
+    originalSiXmls.push(m[1]);
+    ssArr.push(extractSsText(m[1]));
+  }
+  const parsed = { originalSiXmls, ssArr };
+  sharedStringsCache.set(key, parsed);
+  return parsed;
+}
+
+/**
+ * parseRequirementMatrix, memoised on the template's own bytes.
+ *
+ * Keyed on the fileData Buffer rather than the JSZip instance: fillTemplateXlsx
+ * builds a fresh JSZip per category group (it mutates the archive to write the
+ * rows), while the Buffer is the one object every group shares.
+ */
+const requirementMatrixCache = new WeakMap<object, RequirementMatrix | null>();
+
+async function cachedRequirementMatrix(
+  fileData: Buffer,
+  tplZip: JSZip,
+  sheetNameToPath: Map<string, string>,
+  ssArr: string[],
+): Promise<RequirementMatrix | null> {
+  const key = fileData as unknown as object;
+  if (requirementMatrixCache.has(key)) return requirementMatrixCache.get(key) ?? null;
+  const parsed = await parseRequirementMatrix(tplZip, sheetNameToPath, ssArr);
+  requirementMatrixCache.set(key, parsed);
+  return parsed;
+}
+
 async function parseRequirementMatrix(
   tplZip: JSZip,
   sheetNameToPath: Map<string, string>,
