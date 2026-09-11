@@ -1,3 +1,4 @@
+import { bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/bestbuy/mirakl-client", () => ({
@@ -65,5 +66,26 @@ describe("Best Buy per-category template columns", () => {
   it("returns null for a category outside the taxonomy rather than a wrong sheet", async () => {
     clearBestBuyTemplateCache();
     expect(await getBestBuyColumnsForCategory("Not > A > Category")).toBeNull();
+  });
+});
+
+describe("Best Buy category-scoped attribute codes", () => {
+  it("reads the category a code is scoped to", () => {
+    expect(bestBuyCategoryScopeOf("Beds.color")).toBe("Beds");
+    expect(bestBuyCategoryScopeOf("Bed_Rails.color")).toBe("Bed_Rails");
+    expect(bestBuyCategoryScopeOf("Darts_and_Dart_Sets.numberOfDartsIncluded")).toBe("Darts_and_Dart_Sets");
+  });
+
+  it("treats an unprefixed code as global", () => {
+    // These apply to every row regardless of its category.
+    for (const global of ["color", "brand", "gtin", "frontZoom", "featureBullets.1.title"]) {
+      expect(bestBuyCategoryScopeOf(global)).toBeNull();
+    }
+  });
+
+  it("does not mistake a repeating group for a category", () => {
+    // featureBullets/productDocuments are lower-case groups, not category codes;
+    // reading them as a scope would make every row fail its own scope check.
+    expect(bestBuyCategoryScopeOf("productDocuments.2.description")).toBeNull();
   });
 });

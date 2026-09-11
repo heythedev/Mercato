@@ -29,7 +29,8 @@ type Product = Pick<
   | "liveData"
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
-import { bestBuyFillKeyForCode } from "./bestbuy-template";
+import { bestBuyFillKeyForCode, bestBuyCategoryScopeOf } from "./bestbuy-template";
+import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
 import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, fillDropdownValues, fillFreeTextValues, neverInventColumn, type DropdownQuery, type DropdownFillQuery, type FreeTextFillQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
@@ -1399,6 +1400,7 @@ async function fillTemplateXlsx(
   // template styling but never receive data. Codes and display labels are both
   // matched because stored templates key columns either way.
   const isMathis = marketplace.toLowerCase() === "mathis";
+  const isBestBuyTpl = marketplace.toLowerCase() === "bestbuy";
   const MIRAKL_OFFER_KEYS = new Set([
     // row-2 field codes            // row-1 display labels
     "sku",                          "offersku",
@@ -1425,12 +1427,18 @@ async function fillTemplateXlsx(
     ? bandedEntries.filter((e) => !isMiraklOfferEntry(e))
     : bandedEntries;
 
-  // ── Mathis: per-category requirement matrix (pink/grey enforcement) ────────
+  // ── Per-category requirement matrix (pink/grey enforcement) ───────────────
   // Parsed from the template's own "Columns" sheet, so each template file (and
   // each category inside it) carries its own rules. Enforced per ROW below:
   // the same attribute can be REQUIRED (pink) for one row's category and NA
   // (grey — must stay empty) for the next row's.
-  const reqMatrix = isMathis
+  //
+  // Best Buy's group templates carry this sheet in exactly the same shape as
+  // Mathis — A=Code, B=Label, C=Description, D=Value example, then one
+  // REQUIRED/OPTIONAL/NA column per category path. It was simply never read,
+  // so nothing knew which Best Buy cells were mandatory and the whole fill
+  // layer below never ran for them: every pink cell came out blank.
+  const reqMatrix = isMathis || isBestBuyTpl
     ? await parseRequirementMatrix(tplZip, sheetNameToPath, ssArr)
     : null;
   const letterByNormKey = (nk: string): string | undefined =>
@@ -1741,8 +1749,6 @@ async function fillTemplateXlsx(
 
   const isTemu = marketplace.toLowerCase() === "temu";
   const isWalmart = marketplace.toLowerCase() === "walmart";
-  const isBestBuyTpl = marketplace.toLowerCase() === "bestbuy";
-
   // Best Buy column keys are Mirakl ATTRIBUTE CODES, not human labels
   // ("Floor_Tiles.productWidth"), which getProductField normalises to
   // "floortilesproductwidth" and matches against nothing — so a vendor file that
@@ -1828,6 +1834,25 @@ async function fillTemplateXlsx(
     return urls;
   };
 
+  // A Best Buy group template carries one column per category per attribute
+  // ("Bed_Rails.color", "Beds.color", "Desks.color" — 83 colour columns in the
+  // furniture template). They all translate to the same product field, so
+  // filling on the mapping alone wrote one bed's colour into every category's
+  // column. Only the row's OWN category may be written.
+  const _bbCodeCache = new Map<string, string | null>();
+  const bestBuyCategoryCodeOf = (p: Product): string | null => {
+    if (!_bbCodeCache.has(p.id)) {
+      _bbCodeCache.set(p.id, bestBuyCodeForPath(String(p.marketplaceCategory ?? "")) ?? null);
+    }
+    return _bbCodeCache.get(p.id) ?? null;
+  };
+  const bestBuyColumnInScope = (key: string, p: Product): boolean => {
+    const scope = bestBuyCategoryScopeOf(String(key ?? ""));
+    if (!scope) return true; // global attribute — applies to every row
+    const own = bestBuyCategoryCodeOf(p);
+    return !!own && own.toLowerCase() === scope.toLowerCase();
+  };
+
   // Compute the final value for a column (dropdown-safe)
   const colVal = (p: Product, col: Column, letter: string): string => {
     let raw = String(getProductField(p, col.key) ?? "");
@@ -1845,7 +1870,7 @@ async function fillTemplateXlsx(
     // Best Buy: retry through the attribute-code translation when the raw code
     // resolved nothing, so category-prefixed and packaging-dimension columns
     // pick up the Length/Width/Height/Weight the vendor file already carries.
-    if (!raw.trim() && isBestBuyTpl) {
+    if (!raw.trim() && isBestBuyTpl && bestBuyColumnInScope(col.key, p)) {
       const mapped = bestBuyFillKeyForCode(col.key);
       if (mapped) raw = String(getProductField(p, mapped) ?? "");
     }
@@ -2039,7 +2064,7 @@ async function fillTemplateXlsx(
   // constrained to the colour vocabulary. Collected across all products up
   // front so the model answers in a few batches instead of per row.
   const aiFill = new Map<string, string>();
-  if (isMathis && reqMatrix) {
+  if (reqMatrix) {
     const COLOUR_KEYS = new Set(["color", "colour", "casingfinishcolor", "finishcolor"]);
     const fillQueries: DropdownFillQuery[] = [];
     const freeTextQueries: FreeTextFillQuery[] = [];

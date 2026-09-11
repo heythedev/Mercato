@@ -179,3 +179,20 @@ export async function getBestBuyColumnsForCategories(
 export function clearBestBuyTemplateCache(): void {
   cache.clear();
 }
+
+/**
+ * The category code a Best Buy attribute code is scoped to, or null when the
+ * attribute is global.
+ *
+ * Best Buy's group templates hold one column per category per attribute:
+ * "Bed_Rails.color", "Beds.color", "Desks.color" — 83 colour columns in the
+ * furniture template alone. They all map to the same product field, so filling
+ * on the mapping alone wrote one bed's "Teal" into all 83 of them. Only the
+ * column belonging to the ROW's own category may be written; the rest are
+ * marked NA for that category and must stay empty.
+ */
+export function bestBuyCategoryScopeOf(code: string): string | null {
+  const raw = String(code ?? "").trim();
+  const m = /^([A-Z][A-Za-z0-9_]*)\./.exec(raw);
+  return m ? m[1]! : null;
+}
