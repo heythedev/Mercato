@@ -39,6 +39,10 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const isTemu = marketplace === "temu";
   const isBestBuy = marketplace === "bestbuy";
   const isWalmart = marketplace === "walmart";
+  // Marketplaces whose categories come from a FIXED sheet we cannot add to, so
+  // "no match" is a property of the sheet rather than a failed attempt.
+  const closedTaxonomyLabel =
+    isMathis ? "Mathis" : isBestBuy ? "Best Buy" : isTemu ? "Temu" : null;
   const hasResults = products.some((p) => p.marketplaceCategory);
   const total = products.length;
   const [uploading, setUploading] = useState(false);
@@ -47,6 +51,8 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   const INITIAL_ROWS = 200;
   const ROWS_STEP = 500;
   const [visibleRows, setVisibleRows] = useState(INITIAL_ROWS);
+  /** Which tile is selected, or null for "everything". */
+  const [activeFilter, setActiveFilter] = useState<"categorized" | "review" | "uncategorized" | null>(null);
   const csvRef = useRef<HTMLInputElement>(null);
 
   const uncategorized = products.filter((p) => p.marketplaceCategory === "Uncategorized");
@@ -75,6 +81,23 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
   // results table render mid-run instead of waiting for the whole catalog to finish —
   // same streaming pattern as the Verify step.
   const hasStreamedResults = loading && (categorized.length > 0 || uncategorized.length > 0);
+
+  // Rows the table renders. While a run is streaming, show only products that
+  // already have a verdict — the not-yet-processed remainder would otherwise
+  // render as a wall of "—" placeholder rows. Once the run finishes, show
+  // everything (matches the Verify step's resultPool pattern), narrowed to
+  // whichever tile is selected.
+  const resultPool = loading ? products.filter((p) => p.marketplaceCategory) : products;
+  const visibleProducts =
+    activeFilter === "categorized"
+      ? resultPool.filter((p) => p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized")
+      : activeFilter === "review"
+        ? resultPool.filter((p) =>
+            p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized" &&
+            p.categoryConfidence != null && p.categoryConfidence < REVIEW_CONFIDENCE)
+        : activeFilter === "uncategorized"
+          ? resultPool.filter((p) => p.marketplaceCategory === "Uncategorized")
+          : resultPool;
 
   // Live running timer while categorizing (server persists elapsedMs only on
   // completion, so we tick client-side from when this run started).
@@ -285,31 +308,51 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
         </div>
       </div>
 
-      {/* Progress */}
+      {/* Progress — each tile filters the table below, same as the Verify step. */}
       {(hasResults || hasStreamedResults) && (
-        <div className={`grid grid-cols-1 gap-3 sm:gap-4 mb-6 ${needsReview.length > 0 ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
-          <div className="rounded-2xl p-5 bg-green-50/70 dark:bg-green-950/20">
-            <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categorized.length}</p>
-            <p className="text-sm text-muted-foreground">Categorized</p>
-          </div>
-          {needsReview.length > 0 && (
-            <div className="rounded-2xl p-5 bg-amber-50/70 dark:bg-amber-950/20">
-              <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{needsReview.length}</p>
-              <p className="text-sm text-muted-foreground">Low confidence</p>
-            </div>
-          )}
-          <div className={`rounded-2xl p-5 ${uncategorized.length > 0 ? "bg-orange-50/70 dark:bg-orange-950/20" : "bg-muted/30"}`}>
-            <p className={`text-2xl font-bold ${uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : ""}`}>{uncategorized.length}</p>
-            <p className="text-sm text-muted-foreground">Uncategorized</p>
-          </div>
-          <div className="rounded-2xl p-5 bg-muted/30">
-            <p className="text-2xl font-bold">{total}</p>
-            <p className="text-sm text-muted-foreground">Total products</p>
-          </div>
+        <div className={`grid grid-cols-1 gap-3 sm:gap-4 mb-3 ${needsReview.length > 0 ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
+          {([
+            { key: "categorized" as const, label: "Categorized", count: categorized.length, show: true,
+              bg: "bg-green-50/70 dark:bg-green-950/20", text: "text-green-700 dark:text-green-400", ring: "ring-green-400" },
+            { key: "review" as const, label: "Low confidence", count: needsReview.length, show: needsReview.length > 0,
+              bg: "bg-amber-50/70 dark:bg-amber-950/20", text: "text-amber-600 dark:text-amber-400", ring: "ring-amber-400" },
+            { key: "uncategorized" as const, label: "Uncategorized", count: uncategorized.length, show: true,
+              bg: uncategorized.length > 0 ? "bg-orange-50/70 dark:bg-orange-950/20" : "bg-muted/30",
+              text: uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : "", ring: "ring-orange-400" },
+            { key: null, label: "Total products", count: total, show: true,
+              bg: "bg-muted/30", text: "", ring: "ring-foreground/30" },
+          ]).filter((s) => s.show).map((s) => {
+            const isActive = activeFilter === s.key;
+            return (
+              <button
+                key={s.label}
+                onClick={() => { setActiveFilter(isActive ? null : s.key); setVisibleRows(INITIAL_ROWS); }}
+                className={`rounded-2xl p-5 text-left w-full transition-all ${s.bg} ${
+                  isActive ? `ring-2 ${s.ring} shadow-sm` : "hover:shadow-sm hover:brightness-95"
+                }`}
+              >
+                <p className={`text-2xl font-bold ${s.text}`}>{s.count}</p>
+                <p className="text-sm text-muted-foreground">{s.label}</p>
+              </button>
+            );
+          })}
         </div>
       )}
-      {loading && (hasResults || hasStreamedResults) && (
-        <p className="text-xs text-muted-foreground -mt-4 mb-6">Counts update as products finish categorizing.</p>
+      {(hasResults || hasStreamedResults) && (
+        <p className="text-xs text-muted-foreground mb-6">
+          {loading
+            ? "Counts update as products finish categorizing."
+            : "Select a tile to show only those products."}
+          {activeFilter && (
+            <> &nbsp;·&nbsp; Showing <span className="font-medium">{visibleProducts.length}</span>{" "}
+              {activeFilter === "review" ? "low confidence" : activeFilter} product
+              {visibleProducts.length !== 1 ? "s" : ""}.{" "}
+              <button onClick={() => { setActiveFilter(null); setVisibleRows(INITIAL_ROWS); }} className="underline hover:no-underline">
+                Clear filter
+              </button>
+            </>
+          )}
+        </p>
       )}
 
       {/* Uncategorized warning banner — suppressed while still streaming, since the
@@ -334,12 +377,20 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
               ) : (
                 <>
                   <p className="text-sm font-semibold text-orange-800">
-                    {uncategorized.length} product{uncategorized.length !== 1 ? "s" : ""} could not be matched to a{isMathis ? " Mathis" : ""} category
+                    {uncategorized.length} product{uncategorized.length !== 1 ? "s" : ""} could not be matched to a{closedTaxonomyLabel ? ` ${closedTaxonomyLabel}` : ""} category
                   </p>
                   <p className="text-xs text-orange-700 mt-1">
+                    {/* A closed taxonomy is a fixed sheet: when it holds no category
+                        for a product, re-running cannot invent one. Telling the user
+                        to "try re-categorizing" there sends them round a loop that
+                        can never succeed — Best Buy's 1,450 paths have no leaf for
+                        calipers, abrasives, safety gloves or traffic cones, so those
+                        rows are correct as they stand. */}
                     {isMathis
                       ? "These products don't fit any path in the Mathis category sheet (e.g. everyday apparel, fragrances, electronics, food). They will be excluded from the ZIP export. Review them below or remove them from the vendor file."
-                      : "These products couldn't be confidently assigned a category. They will be excluded from the export. Try re-categorizing or check the product names."}
+                      : closedTaxonomyLabel
+                        ? `These products don't fit any path in the ${closedTaxonomyLabel} category sheet — it simply has no category for them (workshop and industrial supplies such as calipers, abrasives and safety gloves are typical). Re-running won't change that, because the sheet is fixed. They'll be excluded from the export; remove them from the vendor file or list them on another marketplace.`
+                        : "These products couldn't be confidently assigned a category. They will be excluded from the export. Try re-categorizing or check the product names."}
                     {unidentified.length > 0 && (
                       <> {unidentified.length} of them {unidentified.length !== 1 ? "are" : "is"} a bare vendor code with no name or description — nothing can identify {unidentified.length !== 1 ? "those" : "that one"} without a file that carries product names.</>
                     )}
@@ -425,7 +476,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                   verdict — the not-yet-processed remainder would otherwise render as
                   a wall of "—" placeholder rows. Once the run finishes, show
                   everything (matches the Verify step's resultPool pattern). */}
-              {(loading ? products.filter((p) => p.marketplaceCategory) : products).slice(0, visibleRows).map((p) => {
+              {visibleProducts.slice(0, visibleRows).map((p) => {
                 const isUncategorized = p.marketplaceCategory === "Uncategorized";
                 // A bare vendor code nothing could identify — not a taxonomy miss.
                 const isUnidentified = isUncategorized && unidentifiedIds.has(p.id);
