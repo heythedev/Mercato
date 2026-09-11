@@ -355,3 +355,146 @@ No other text.`,
 
   return out;
 }
+
+// ── Free-text mandatory cells ────────────────────────────────────────────────
+// The dropdown fill above can only answer columns that HAVE a dropdown. Most of
+// a Mathis template's pink (REQUIRED) columns are free text — Brand, Short
+// Description, the DIMH/DIMW/DIMD/weight block, Prop-65, Assembly Required — so
+// they were skipped entirely and came out blank on every row, which is what the
+// client sees as "mandatory fields not getting filled".
+//
+// The template tells us what each of those cells wants: its Columns sheet
+// carries a Description and a Value example per field ("Measure from bottom to
+// top", "A brief introduction to the product"). Passing that spec to the model
+// alongside the product is what makes the answer usable rather than a guess.
+
+export type FreeTextFillQuery = {
+  /** Caller's correlation key (e.g. productId + column letter). */
+  key: string;
+  /** Template column header ("Height Dimension (Bottom to Top)"). */
+  column: string;
+  /** The template's own description of the field, from its Columns sheet. */
+  description?: string;
+  /** The template's own value example for the field, if it gives one. */
+  example?: string;
+  /** Product identity: name, brand, description — what a human operator reads. */
+  context: string;
+};
+
+/**
+ * Fill free-text REQUIRED cells from the product's own information.
+ *
+ * This does NOT invent facts. The prompt is explicit that an unknown value must
+ * come back empty, because a wrong value in a mandatory cell is worse than an
+ * empty one: it passes import and then misdescribes the product on the live
+ * listing, where nobody is looking for it. Callers additionally refuse to send
+ * identifier and media columns here at all — see neverInventColumn.
+ */
+export async function fillFreeTextValues(
+  queries: FreeTextFillQuery[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!queries.length || !moonshotConfigured()) return out;
+
+  const batches: FreeTextFillQuery[][] = [];
+  for (let i = 0; i < queries.length; i += BATCH_SIZE) batches.push(queries.slice(i, i + BATCH_SIZE));
+
+  let skipped = 0;
+  const worker = async (batch: FreeTextFillQuery[]): Promise<void> => {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const items = batch.map((q, n) => {
+          const spec = [
+            q.description ? `   what this column wants: ${q.description}` : "",
+            q.example ? `   example value: ${q.example}` : "",
+          ].filter(Boolean).join("\n");
+          return `${n + 1}. column: "${q.column}"\n${spec}\n   product: ${q.context}`;
+        }).join("\n\n");
+
+        const { text } = await generateText({
+          model: moonshot(MODEL),
+          temperature: noThinkingTemperature(MODEL, 0),
+          headers: noThinkingHeaders(MODEL),
+          maxOutputTokens: dropdownOutputBudget(batch.length),
+          prompt: `You complete REQUIRED cells on a marketplace product listing sheet, the way a careful catalogue operator would.
+
+For each item, write the value that belongs in that column for that product.
+
+Rules:
+- Use ONLY what the product information states or unambiguously implies.
+- If the product information does not give you the value, output an empty string after the colon. An empty cell is corrected later; a WRONG value ships to the live listing.
+- Never invent measurements, weights, barcodes, model numbers or URLs.
+- Measurements: digits only, in inches, no unit text (42.5 — not 42.5" or 42.5 in). Give a measurement ONLY if the product information states it; do not estimate from the product type.
+- Brand means the manufacturer or marque, which in a title usually follows "by" ("… Counter Stool by Modway" → Modway). It is NEVER the product's own model, series or collection name ("Dax 50.5 Chenille Bench" is the model Dax, not a brand) — leave it empty rather than repeat the product name.
+- Keep it to the column's own format and length; a short description is one or two plain sentences.
+
+Items:
+
+${items}
+
+Respond with one line per item, in order, formatted exactly as:
+<item number>: <value or empty>
+No other text.`,
+        });
+
+        // Same markdown tolerance as the dropdown calls above.
+        for (const line of text.replace(/[*_`#]/g, "").split(/\r?\n/)) {
+          const m = line.match(/^\s*(\d+)\s*:\s*(.*)$/);
+          if (!m) continue;
+          const q = batch[parseInt(m[1], 10) - 1];
+          const picked = m[2].trim().replace(/^["']|["']$/g, "");
+          // "n/a", "unknown" and friends are the model saying it does not know.
+          if (!q || !picked || /^(n\/?a|none|unknown|not specified|not stated)$/i.test(picked)) continue;
+          out.set(q.key, picked);
+        }
+        return;
+      } catch (err) {
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+          continue;
+        }
+        console.warn(
+          `[match-dropdown] giving up on a free-text batch of ${batch.length} after ` +
+            `${MAX_ATTEMPTS} attempts; those cells go to the compliance report:`, err,
+        );
+      }
+    }
+  };
+
+  // Same worker pool as the two calls above: CONCURRENCY batches in flight.
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+      while (next < batches.length) {
+        // Out of time: the cells these batches would have filled go to the
+        // compliance report, the same route an AI failure already takes.
+        if (deadlinePassed()) {
+          skipped += batches.length - next;
+          next = batches.length;
+          break;
+        }
+        const batch = batches[next++]!;
+        await worker(batch);
+      }
+    }),
+  );
+  if (skipped) {
+    console.warn(`[match-dropdown] free-text fill hit its deadline; ${skipped} batch(es) skipped`);
+  }
+  return out;
+}
+
+/**
+ * Columns whose value must come from real data and must never be produced by a
+ * model. A fabricated barcode attaches the listing to somebody else's product,
+ * and a fabricated URL is a broken image on the storefront — both pass import
+ * and fail in public, which is worse than the blank cell the operator would
+ * otherwise go and fix.
+ */
+export function neverInventColumn(normalizedKey: string): boolean {
+  const k = normalizedKey;
+  if (/(image|photo|video|url|link)/.test(k)) return true;
+  if (/(upc|ean|gtin|barcode|isbn|asin)/.test(k)) return true;
+  if (/(sku|partnumber|mpn|variantgroup|modelnumber|itemnumber)/.test(k)) return true;
+  return false;
+}

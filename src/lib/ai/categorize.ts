@@ -291,7 +291,8 @@ export async function categorizeProducts(
     availableCategories = loadTemuCategoryPaths();
   }
 
-  // Best Buy: own electronics-focused taxonomy from bestbuy_categories.csv
+  // Best Buy: the real Mirakl MARKETPLACE taxonomy from bestbuy_categories.csv
+  // (1,450 leaves across 17 departments — not electronics-only, see the rules below)
   if (isBestBuyTop) {
     availableCategories = loadBestBuyCategoryPaths();
   }
@@ -365,9 +366,16 @@ export async function categorizeProducts(
   //   parallel 45 → 26.0 products/s   (0 failures)
   // 32 keeps a margin under the highest tested value while cutting a 7k run
   // from ~30 minutes to roughly 5. Tunable via CATEGORIZE_PARALLELISM.
+  // Best Buy is the deepest taxonomy we carry — 1,450 leaves, four levels, and
+  // long paths like "Sports, Fitness, and Recreation > Athletics > Sticks, Clubs,
+  // and Bats > …". A 40-item batch has to reason about and then write all forty
+  // of those in one response: measured, it either truncates or takes so long the
+  // request is not worth making, while 20 completes cleanly (63 of 74 resolved,
+  // no finishReason=length). Parallelism, not batch size, is what carries
+  // throughput here — 32 batches run at once either way.
   const BATCH = Number(
     process.env.CATEGORIZE_BATCH_SIZE ??
-      ((isTemuTop || isMathis || isBestBuyTop || isWalmartTop) ? 40 : isConstrained ? 40 : 30),
+      (isBestBuyTop ? 20 : (isTemuTop || isMathis || isWalmartTop) ? 40 : isConstrained ? 40 : 30),
   );
   const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? 32);
 
@@ -741,15 +749,39 @@ ${taxonomy}
 ${closestMatchRule}`;
   } else if (isBestBuy && availableCategories?.length) {
     const taxonomy = formatBestBuyTaxonomyForPrompt();
+    // These rules used to open with "Best Buy sells ONLY electronics…", written
+    // against the old 230-path electronics-only list. The taxonomy above is now
+    // Best Buy's real MARKETPLACE taxonomy pulled from Mirakl: 1,450 leaves, of
+    // which Electronics is 219. Home and Garden alone is 383, and there are 104
+    // Toys and Games, 75 Office Supplies, 66 Musical Instruments, 36 Automotive.
+    // The old wording had the model confidently refuse anything non-electronic —
+    // 66 of 118 products in one file came back "Uncategorized" at 0.85-0.95
+    // confidence, including a stain remover, a class record book, a kayak paddle
+    // and tempera paint, all of which have leaves in the list. The taxonomy IS
+    // the definition of what the marketplace carries, so the rules now defer to
+    // it rather than to an assumption about the retail chain.
     const closestMatchRule = `
 MANDATORY ASSIGNMENT RULES:
-1. Best Buy sells ONLY electronics, computers, home appliances, home theater, gaming, cameras, mobile devices, and health/fitness tech.
-2. If a product belongs on Best Buy, assign it the closest leaf path — do NOT use "Uncategorized".
-3. If a product clearly does NOT belong on Best Buy (e.g. construction tools, masonry supplies, hardware materials, industrial chemicals, plumbing parts, craft brushes, raw materials), you MUST use "Uncategorized".
-4. Focus on the product's primary technology function and use case.
-5. Peripherals (keyboards, mice, webcams) → Computers & Tablets > Computer Accessories.
-6. Wearable tech (smartwatches, fitness bands) → Health & Wellness > Wearables.
-7. If a product spans two categories, pick the one matching its PRIMARY function.`;
+1. This is Best Buy's MARKETPLACE taxonomy, which is far broader than a Best Buy
+   store: it covers Home and Garden, Sports and Recreation, Toys and Games,
+   Office Supplies, Health and Beauty, Musical Instruments, Automotive, Pet
+   Supplies, Clothing and Accessories and more, as well as Electronics.
+2. The list above is the ONLY definition of what belongs. If a leaf fits the
+   product, that product belongs — never reject it for being "not electronics".
+3. Every real, sellable product MUST get a leaf path. Use "Uncategorized" ONLY
+   when nothing in the entire list fits — a bare service, a raw industrial
+   input, or an item whose description identifies no product at all.
+4. Assign by what the ITEM physically IS (its core noun), not by its brand, its
+   audience, or the department you would expect to find it in at a store.
+   - stain and odour remover → the cleaning-products leaf, not Uncategorized
+   - tempera paint, craft brushes → Home and Garden > Arts and Crafts > …
+   - class record book, planners → Office Supplies > …
+   - kayak paddle, hula hoops → the Sports/Recreation or Toys leaf that names it
+   - rock and mineral collections → the educational-toy leaf
+5. Peripherals (keyboards, mice, webcams) → the Computer Accessories leaf.
+6. Wearable tech (smartwatches, fitness bands) → the Wearables leaf.
+7. If a product spans two leaves, pick the one matching its PRIMARY function.
+8. If two leaves are equally good, pick whichever comes first alphabetically.`;
     categorySection = `exactly one leaf path from this Best Buy category taxonomy (copy character-for-character as "Category > Subcategory > Sub-Subcategory"):
 
 ${taxonomy}
@@ -1057,9 +1089,28 @@ ${pathHint}
   // (11 of 12 products on a live run), so the budget is per model family.
   // Generous on purpose: this is a CAP, not a charge — unused budget costs
   // nothing, while too small a cap costs a whole batch plus its retry.
-  const reasoningHeadroom = /^kimi-k2\.6/.test(model) ? 8000 : /^kimi-k[23]/.test(model) ? 1500 : 0;
+  //
+  // The k3 headroom was a FLAT 1500, which is what a small batch needs — but
+  // reasoning grows with the item count, so a full batch overran it and the
+  // whole batch fell back to "Uncategorized". It only stayed hidden while the
+  // Best Buy prompt was telling the model to answer "Uncategorized" anyway:
+  // once real leaf paths came back, every batch of 40 truncated. Reasoning
+  // headroom therefore scales with the batch for every reasoning model.
+  // Measured on real batches: k2.6 spent ~3.5k output tokens on a batch of 8 and
+  // still truncated at 6.3k on a batch of 12 — roughly 500+ reasoning tokens per
+  // item, and it grows with the item count. A FLAT headroom is therefore always
+  // wrong at one end: 1500 is about right for a handful of items and nowhere
+  // near enough for a full batch, which is why every 40-item Best Buy batch came
+  // back finishReason=length and fell back to "Uncategorized" wholesale.
+  const perItemReasoning = /^kimi-k2\.6/.test(model) ? 700 : 600;
+  const reasoningHeadroom = /^kimi-k[23]/.test(model)
+    ? Math.max(1500, products.length * perItemReasoning)
+    : 0;
+  // Raised from 16000 so a full batch is not silently clipped by the cap itself.
+  // This is a CAP, not a charge: unused budget costs nothing, while too small a
+  // cap costs the whole batch plus its retry.
   const maxOutputTokens = Math.min(
-    16000,
+    32000,
     Math.max(1500, products.length * perItemTokens + 500 + reasoningHeadroom),
   );
 

@@ -31,7 +31,7 @@ type Product = Pick<
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode } from "./bestbuy-template";
 import { toDecimalDimension } from "./dimensions";
-import { matchDropdownValues, dropdownKey, fillDropdownValues, type DropdownQuery, type DropdownFillQuery } from "../ai/match-dropdown";
+import { matchDropdownValues, dropdownKey, fillDropdownValues, fillFreeTextValues, neverInventColumn, type DropdownQuery, type DropdownFillQuery, type FreeTextFillQuery } from "../ai/match-dropdown";
 import { exportGroupOf } from "./category-group";
 import { applyWayfairEligibility } from "./wayfair-eligibility";
 import { ASIN_RE, toDisplayBarcode } from "../barcode";
@@ -52,7 +52,17 @@ type RequirementMatrix = {
   byAttr: Map<string, Map<string, ReqStatus>>;
   /** lowercased category paths the matrix has columns for */
   categories: Set<string>;
+  /**
+   * normalizeKey(field code | label) → the template's own description of the
+   * field. The Columns sheet spells out what each cell wants ("Measure from
+   * bottom to top", "SILO (white background) image", "Prop 65 declaration") in
+   * columns C and D, which is the authoritative spec for filling it.
+   */
+  specByAttr: Map<string, AttrSpec>;
 };
+
+/** One field as the template's Columns sheet describes it. */
+type AttrSpec = { label: string; description: string; example: string };
 
 /** One export row whose category demands a value (pink cell) we could not fill. */
 export type ComplianceIssue = {
@@ -1917,6 +1927,7 @@ async function fillTemplateXlsx(
   if (isMathis && reqMatrix) {
     const COLOUR_KEYS = new Set(["color", "colour", "casingfinishcolor", "finishcolor"]);
     const fillQueries: DropdownFillQuery[] = [];
+    const freeTextQueries: FreeTextFillQuery[] = [];
     for (const p of products) {
       const catKey = productCatKey(p);
       if (!catKey) continue;
@@ -1944,12 +1955,30 @@ async function fillTemplateXlsx(
         }
 
         const options = dropdowns.get(letter);
-        if (!options?.length) continue;
-        fillQueries.push({
+        if (options?.length) {
+          fillQueries.push({
+            key: `${p.id}|${letter}`,
+            column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+            context,
+            options,
+          });
+          continue;
+        }
+
+        // No dropdown: a free-text pink cell. These are most of a Mathis
+        // template's mandatory columns (Brand, Short Description, the
+        // DIMH/DIMW/DIMD/weight block) and used to be skipped outright, so they
+        // came out blank on every row. Identifier and media columns are never
+        // sent — a fabricated barcode or image URL passes import and then fails
+        // in public, which is worse than the blank an operator would fix.
+        if (neverInventColumn(nk) || neverInventColumn(nk2)) continue;
+        const spec = reqMatrix.specByAttr.get(nk) ?? reqMatrix.specByAttr.get(nk2);
+        freeTextQueries.push({
           key: `${p.id}|${letter}`,
           column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+          description: spec?.description,
+          example: spec?.example,
           context,
-          options,
         });
       }
     }
@@ -1957,7 +1986,14 @@ async function fillTemplateXlsx(
       const filled = await fillDropdownValues(fillQueries);
       for (const [k, v] of filled) aiFill.set(k, v);
       console.log(
-        `[export] mandatory fill: ${fillQueries.length} empty pink cell(s) → AI filled ${filled.size}`,
+        `[export] mandatory fill: ${fillQueries.length} empty pink dropdown cell(s) → AI filled ${filled.size}`,
+      );
+    }
+    if (freeTextQueries.length) {
+      const filled = await fillFreeTextValues(freeTextQueries);
+      for (const [k, v] of filled) aiFill.set(k, v);
+      console.log(
+        `[export] mandatory fill: ${freeTextQueries.length} empty pink free-text cell(s) → AI filled ${filled.size}`,
       );
     }
   }
@@ -2309,6 +2345,7 @@ async function parseRequirementMatrix(
 
   const catCols = new Map<number, string>(); // column number → lowercased category path
   const byAttr = new Map<string, Map<string, ReqStatus>>();
+  const specByAttr = new Map<string, AttrSpec>();
   const categories = new Set<string>();
 
   for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
@@ -2348,14 +2385,22 @@ async function parseRequirementMatrix(
         v === "OPTIONAL" ? "OPTIONAL" : "NA";
       statuses.set(catKey, st);
     }
+    // Columns C and D are the field's own description and value example.
+    const spec: AttrSpec = {
+      label: label || code,
+      description: cells.get(3) ?? "",
+      example: cells.get(4) ?? "",
+    };
     for (const k of [code, label]) {
       const nk = normalizeKey(k);
-      if (nk && !byAttr.has(nk)) byAttr.set(nk, statuses);
+      if (!nk) continue;
+      if (!byAttr.has(nk)) byAttr.set(nk, statuses);
+      if (!specByAttr.has(nk)) specByAttr.set(nk, spec);
     }
   }
   if (byAttr.size === 0) return null;
   console.log(`[export] requirement matrix parsed: ${byAttr.size / 2 | 0}+ attributes × ${categories.size} categories`);
-  return { byAttr, categories };
+  return { byAttr, categories, specByAttr };
 }
 
 /** Extract plain text from a shared-string <si> element (handles simple + rich text). */
