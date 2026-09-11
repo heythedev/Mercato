@@ -36,6 +36,7 @@ import { exportGroupOf } from "./category-group";
 import { applyWayfairEligibility } from "./wayfair-eligibility";
 import { ASIN_RE, toDisplayBarcode } from "../barcode";
 import { readXlsxGrid } from "../vendor/xlsx-lite";
+import { enrichMandatoryFacts, inferBrandsForPrefixes } from "./mandatory-enrich";
 
 type Column = { key: string; label: string; required?: boolean };
 
@@ -297,6 +298,64 @@ export async function generateCategoryZip(
   defaultTemplateId?: string,
 ): Promise<{ zip: Buffer; missingTemplateCategories: string[] }> {
   console.log(`[export] generateCategoryZip called: ${products.length} products, ${templates.length} templates, marketplace=${marketplace}`);
+
+  // ── Real catalog data for the mandatory cells the sheet cannot supply ──────
+  // Mathis marks UPC and the DIMH/DIMW/DIMD/weight block REQUIRED and a vendor
+  // upload routinely carries none of them. They are the one group of mandatory
+  // cells no model may write — a fabricated barcode attaches the listing to
+  // another company's product — so they are looked up instead, keyed on the part
+  // number inside the vendor SKU. Merged into vendorData (in memory only, never
+  // persisted) so the existing field resolver fills the columns as if the sheet
+  // had carried them, and only where the sheet left a gap.
+  if (marketplace.toLowerCase() === "mathis") {
+    const needing = products.filter(
+      (p) => !String(p.upc ?? "").trim() || !p.brand || !(p.vendorData as Record<string, unknown> | null)?.["Width"],
+    );
+    if (needing.length) {
+      const inputs = needing.map((p) => ({
+        id: p.id, name: p.name, brand: p.brand, vendorSku: p.vendorSku, upc: p.upc,
+      }));
+      try {
+        const hints = await inferBrandsForPrefixes(inputs);
+        const facts = await enrichMandatoryFacts(inputs, hints);
+        let applied = 0;
+        for (const p of needing) {
+          const f = facts.get(p.id);
+          if (!f) continue;
+          const vd = { ...((p.vendorData as Record<string, unknown> | null) ?? {}) };
+          const put = (key: string, val: string | number | undefined) => {
+            if (val === undefined || val === "") return;
+            if (String(vd[key] ?? "").trim()) return; // never overwrite the sheet
+            vd[key] = String(val);
+          };
+          put("UPC", f.upc);
+          put("Brand", f.brand);
+          // Both the plain name and the template's own field code, so the
+          // resolver matches whichever the template keys its column on.
+          put("Height", f.heightIn); put("DIMH", f.heightIn);
+          put("Width", f.widthIn); put("DIMW", f.widthIn);
+          put("Depth", f.depthIn); put("DIMD", f.depthIn);
+          put("Product Weight", f.weightLb); put("DIM_WEIGHT", f.weightLb);
+          // Image columns are required and cannot be invented — but a catalog
+          // image IS the product's real photograph, so it fills them honestly.
+          (f.images ?? []).forEach((url, n) => {
+            if (n === 0) { put("SILO Image", url); put("Image 1", url); }
+            put(`Image URL ${n + 1}`, url);
+            put(`Image ${n + 1}`, url);
+          });
+          (p as { vendorData: unknown }).vendorData = vd;
+          if (!p.brand && f.brand) (p as { brand: string | null }).brand = f.brand;
+          applied++;
+        }
+        console.log(`[export] mandatory enrichment: ${needing.length} row(s) short of UPC/brand/dimensions → ${applied} resolved from catalog data`);
+      } catch (e) {
+        // Enrichment is an improvement, never a precondition — a failure here
+        // must not cost the client their ZIP.
+        console.warn("[export] mandatory enrichment failed:", (e as Error).message);
+      }
+    }
+  }
+
   const zipOut = new JSZip();
   // Fallback priority:
   //   1) explicitly selected template
@@ -1075,6 +1134,8 @@ async function fillTemplateXlsx(
   // first and the label match below is left as the fallback.
   const keySet = new Set(columns.map((c) => normalizeKey(c.key)));
   let codeLetterByKey = new Map<string, string>();
+  /** letter → the template's own field code, verbatim from its code row. */
+  let codeByLetter = new Map<string, string>();
   let bestCodeMatches = 0;
 
   for (const rm of rowMatches) {
@@ -1082,11 +1143,16 @@ async function fillTemplateXlsx(
     if (!labels.size) continue;
     // Same pass: keep whichever row resolves the most attribute CODES.
     const codeMap = new Map<string, string>();
+    const rawMap = new Map<string, string>();
     for (const [letter, text] of labels) {
       const nk = normalizeKey(text);
-      if (keySet.has(nk) && !codeMap.has(nk)) codeMap.set(nk, letter);
+      if (keySet.has(nk) && !codeMap.has(nk)) { codeMap.set(nk, letter); rawMap.set(letter, text); }
     }
-    if (codeMap.size > bestCodeMatches) { bestCodeMatches = codeMap.size; codeLetterByKey = codeMap; }
+    if (codeMap.size > bestCodeMatches) {
+      bestCodeMatches = codeMap.size;
+      codeLetterByKey = codeMap;
+      codeByLetter = rawMap;
+    }
     let matches = 0;
     for (const label of labels.values()) {
       if (wantedKeys.has(normalizeKey(label))) matches++;
@@ -1115,6 +1181,25 @@ async function fillTemplateXlsx(
   }
 
   if (!headerRowXml) return bailToScratch(products, columns, marketplace, "could not identify a header row in the template");
+
+  // The field-code row is the one directly beneath the labels in a Mirakl
+  // template (row 1 "Height Dimension (Bottom to Top)", row 2 "DIMH"). The scan
+  // above only finds it when the stored columns are themselves keyed on codes;
+  // when they are keyed on LABELS — which is what the UI upload stores, since it
+  // reads a single header row — the label row wins its own comparison and the
+  // codes are never indexed. Reading the next row directly covers both cases.
+  // Used only as a fallback lookup, so a template whose next row is sample data
+  // costs nothing: those texts resolve to no product field either.
+  const labelsMatchHeader = [...codeByLetter].every(
+    ([letter, text]) => normalizeKey(text) === normalizeKey(colLetterToHeader.get(letter) ?? ""),
+  );
+  if (!codeByLetter.size || labelsMatchHeader) {
+    for (const rm of rowMatches) {
+      if (parseInt(rm[1], 10) !== headerRowNum + 1) continue;
+      codeByLetter = readRowLabels(rm[0]);
+      break;
+    }
+  }
 
   // ── Map template columns to our column definitions ─────────────────────────
   type ColEntry = { col: Column; letter: string };
@@ -1727,6 +1812,17 @@ async function fillTemplateXlsx(
   // Compute the final value for a column (dropdown-safe)
   const colVal = (p: Product, col: Column, letter: string): string => {
     let raw = String(getProductField(p, col.key) ?? "");
+    // Stored columns are keyed on whatever the upload read as the header row,
+    // which for a Mirakl template is the LABEL ("Height Dimension (Bottom to
+    // Top)"). The row beneath carries the stable field code ("DIMH"), which is
+    // what vendor data and catalog enrichment are keyed on, so a label that
+    // resolves to nothing gets a second look under the code.
+    if (!raw.trim()) {
+      const code = codeByLetter.get(letter);
+      if (code && normalizeKey(code) !== normalizeKey(String(col.key ?? ""))) {
+        raw = String(getProductField(p, code) ?? "");
+      }
+    }
     // Best Buy: retry through the attribute-code translation when the raw code
     // resolved nothing, so category-prefixed and packaging-dimension columns
     // pick up the Length/Width/Height/Weight the vendor file already carries.
