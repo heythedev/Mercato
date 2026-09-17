@@ -1,4 +1,4 @@
-import { bestBuyCategoryScopeOf } from "./bestbuy-template";
+import { bestBuyCategoryScopeOf, bestBuyBareAttribute } from "./bestbuy-template";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/bestbuy/mirakl-client", () => ({
@@ -87,5 +87,26 @@ describe("Best Buy category-scoped attribute codes", () => {
     // featureBullets/productDocuments are lower-case groups, not category codes;
     // reading them as a scope would make every row fail its own scope check.
     expect(bestBuyCategoryScopeOf("productDocuments.2.description")).toBeNull();
+  });
+});
+
+describe("Best Buy bare attribute names", () => {
+  it("strips the category prefix so the core field map can answer", () => {
+    // "Wall_Art.modelNumber" carries no value under its full code, but the core
+    // map knows "modelNumber" (vendor model / mpn). Without this the prefix made
+    // every category-scoped column a miss.
+    expect(bestBuyBareAttribute("Wall_Art.modelNumber")).toBe("modelNumber");
+    expect(bestBuyBareAttribute("Car_Amplifiers.color")).toBe("color");
+  });
+
+  it("returns an unprefixed code unchanged", () => {
+    expect(bestBuyBareAttribute("brand")).toBe("brand");
+  });
+
+  it("refuses a repeating group, so a bullet is never answered by its last segment", () => {
+    // The regression this guards: every feature bullet and product document
+    // ends in ".description" and was filled with the product description.
+    expect(bestBuyBareAttribute("featureBullets.1.description")).toBeNull();
+    expect(bestBuyBareAttribute("Wall_Art.tradeItemHierarchy.each.weight.amount")).toBeNull();
   });
 });

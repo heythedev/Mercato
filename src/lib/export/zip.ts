@@ -29,7 +29,7 @@ type Product = Pick<
   | "liveData"
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
-import { bestBuyFillKeyForCode, bestBuyCategoryScopeOf } from "./bestbuy-template";
+import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
 import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, fillDropdownValues, fillFreeTextValues, neverInventColumn, type DropdownQuery, type DropdownFillQuery, type FreeTextFillQuery } from "../ai/match-dropdown";
@@ -308,10 +308,29 @@ export async function generateCategoryZip(
   // number inside the vendor SKU. Merged into vendorData (in memory only, never
   // persisted) so the existing field resolver fills the columns as if the sheet
   // had carried them, and only where the sheet left a gap.
-  if (marketplace.toLowerCase() === "mathis") {
-    const needing = products.filter(
-      (p) => !String(p.upc ?? "").trim() || !p.brand || !(p.vendorData as Record<string, unknown> | null)?.["Width"],
-    );
+  // Best Buy needs this at least as badly as Mathis: its per-category required
+  // set asks for Colour, Size, Material and the dimension block, and not one of
+  // the 366 Best Buy products in the live project has ever been verified, so
+  // there is no liveData to read them from. Identifier coverage is what makes
+  // the lookup worth making — 354 of those 366 carry a UPC and 303 an ASIN.
+  if (["mathis", "bestbuy"].includes(marketplace.toLowerCase())) {
+    // "0" is not a width. The vendor sheet carries a Width column filled with
+    // zeros on every row, and a truthiness test read that as "already known",
+    // so the lookup was skipped for exactly the products that needed it most.
+    const blank = (v: unknown): boolean => {
+      const s = String(v ?? "").trim();
+      return !s || /^0+(?:\.0+)?$/.test(s);
+    };
+    const needing = products.filter((p) => {
+      const vd = (p.vendorData as Record<string, unknown> | null) ?? {};
+      return (
+        blank(p.upc) || !p.brand ||
+        blank(vd["Width"]) ||
+        // Colour is REQUIRED on most Best Buy categories and blank on most
+        // vendor rows; it comes back in the same lookup as the dimensions.
+        blank(vd["Color"] ?? vd["Colour"] ?? vd["color"])
+      );
+    });
     if (needing.length) {
       const inputs = needing.map((p) => ({
         id: p.id, name: p.name, brand: p.brand, vendorSku: p.vendorSku, upc: p.upc,
@@ -337,6 +356,19 @@ export async function generateCategoryZip(
           put("Width", f.widthIn); put("DIMW", f.widthIn);
           put("Depth", f.depthIn); put("DIMD", f.depthIn);
           put("Product Weight", f.weightLb); put("DIM_WEIGHT", f.weightLb);
+          // Descriptive attributes, under both the plain name and the Mirakl
+          // attribute code, so either template keying picks them up. Written
+          // only where the sheet is silent — `put` never overwrites vendor data.
+          put("Color", f.color); put("color", f.color); put("Colour", f.color);
+          put("Size", f.size); put("size", f.size);
+          put("Description", f.description); put("description", f.description);
+          if (f.features?.length) {
+            put("Features", f.features.join(" • "));
+            // Feature bullets are per-bullet columns; real catalog bullets are
+            // the product's own selling points, which is exactly what the
+            // column wants — unlike the description, which is not.
+            f.features.slice(0, 5).forEach((b, n) => put(`featureBullets.${n + 1}.title`, b));
+          }
           // Image columns are required and cannot be invented — but a catalog
           // image IS the product's real photograph, so it fills them honestly.
           (f.images ?? []).forEach((url, n) => {
@@ -1481,9 +1513,17 @@ async function fillTemplateXlsx(
   const categoryLetter = letterByNormKey("category");
   const shopSkuLetter = letterByNormKey("shopsku");
   // Requirement statuses for one mapped column, keyed by category path.
+  // Attribute CODE first, label only as a last resort. The Columns sheet carries
+  // one row per category-scoped attribute, so on a Best Buy group template the
+  // label "Model Number" appears once per category — 83 rows, all different, and
+  // a label lookup returned whichever came first. A Wall Art row was therefore
+  // judged by Decorative_Trays.modelNumber, whose Wall Art cell is (correctly)
+  // NA, and every value the exporter had resolved for it was blanked. Mathis
+  // templates have one row per attribute, so the label path still serves them.
   const statusesFor = (col: Column, letter: string): Map<string, ReqStatus> | undefined =>
-    reqMatrix?.byAttr.get(normalizeKey(colLetterToHeader.get(letter) ?? ""))
-    ?? reqMatrix?.byAttr.get(normalizeKey(String(col.key ?? "")))
+    reqMatrix?.byAttr.get(normalizeKey(String(col.key ?? "")))
+    ?? reqMatrix?.byAttr.get(normalizeKey(codeByLetter.get(letter) ?? ""))
+    ?? reqMatrix?.byAttr.get(normalizeKey(colLetterToHeader.get(letter) ?? ""))
     ?? reqMatrix?.byAttr.get(normalizeKey(String(col.label ?? "")));
   let blankedNaCells = 0;
   const unknownMatrixCategories = new Set<string>();
@@ -1774,6 +1814,35 @@ async function fillTemplateXlsx(
     if (is("dimw", "widthdimension")) return dimensionFromText(text, "w");
     if (is("dimd", "depthdimension")) return dimensionFromText(text, "d");
     if (is("dimweight", "productweight")) return weightLbFromText(text);
+
+    // Unit-of-measure columns state the unit of a SIBLING value. They are only
+    // answerable once that value exists — a unit on an empty dimension is noise —
+    // so they are filled from the units our own pipeline works in: inches for
+    // dimensions, pounds for weight. The answer still has to clear the column's
+    // own dropdown, so the several spellings Mirakl uses are all offered and the
+    // matcher picks whichever the template actually lists.
+    const code = String(col.key ?? "").toLowerCase();
+    if (code.includes("unitofmeasure")) {
+      const siblingHas = (suffix: string): boolean => {
+        const prefix = code.slice(0, code.lastIndexOf("."));
+        for (const { col: c2, letter: l2 } of exportEntries) {
+          const k2 = String(c2.key ?? "").toLowerCase();
+          if (k2.startsWith(prefix) && k2.endsWith(suffix) && (valueByLetter.get(l2) ?? "").trim()) return true;
+        }
+        return false;
+      };
+      // Mirakl spells these differently per template ("lb", "lbs", "Pound(s)",
+      // "in", "Inch"), and an off-list value is discarded, so the unit is chosen
+      // FROM the column's own options rather than guessed at.
+      const options = dropdowns.get(letter) ?? [];
+      const pick = (re: RegExp, fallback: string): string =>
+        options.find((o) => re.test(o)) ?? (options.length ? "" : fallback);
+      if (code.includes("weight") && siblingHas("amount")) return pick(/^(lbs?|pounds?|pound\(s\))$/i, "lb");
+      if (code.includes("dimension") && (siblingHas("length") || siblingHas("width") || siblingHas("height"))) {
+        return pick(/^(in|inch|inches|inch\(es\))$/i, "in");
+      }
+      return "";
+    }
     return "";
   };
 
@@ -1887,6 +1956,12 @@ async function fillTemplateXlsx(
 
   // Compute the final value for a column (dropdown-safe)
   const colVal = (p: Product, col: Column, letter: string): string => {
+    // A Best Buy group template carries every covered category's columns side by
+    // side, so a generic field lookup can land a value in ANOTHER category's
+    // column — an image URL was reaching Digital_Photo_Frames.boxContents.1 on a
+    // Wall Art row. Those columns belong to a different product type and Best Buy
+    // rejects the row for them, so they stay empty regardless of what resolves.
+    if (isBestBuyTpl && !bestBuyColumnInScope(col.key, p)) return "";
     let raw = String(getProductField(p, col.key) ?? "");
     // Stored columns are keyed on whatever the upload read as the header row,
     // which for a Mirakl template is the LABEL ("Height Dimension (Bottom to
@@ -1903,8 +1978,16 @@ async function fillTemplateXlsx(
     // resolved nothing, so category-prefixed and packaging-dimension columns
     // pick up the Length/Width/Height/Weight the vendor file already carries.
     if (!raw.trim() && isBestBuyTpl && bestBuyColumnInScope(col.key, p)) {
-      const mapped = bestBuyFillKeyForCode(col.key);
-      if (mapped) raw = String(getProductField(p, mapped) ?? "");
+      // Plain attribute name first — "Wall_Art.modelNumber" → "modelNumber",
+      // which the core map answers from the vendor file's model/mpn columns.
+      // Nested codes return null here, so a repeating group can never be
+      // answered by its last segment.
+      const bare = bestBuyBareAttribute(col.key);
+      if (bare) raw = String(getProductField(p, bare) ?? "");
+      if (!raw.trim()) {
+        const mapped = bestBuyFillKeyForCode(col.key);
+        if (mapped) raw = String(getProductField(p, mapped) ?? "");
+      }
     }
 
     // Temu-specific field coercions applied before dropdown matching
@@ -2597,6 +2680,9 @@ async function parseRequirementMatrix(
     const statuses = new Map<string, ReqStatus>();
     for (const [cn, catKey] of catCols) {
       const v = (cells.get(cn) ?? "").toUpperCase().replace(/[^A-Z]/g, "");
+      // A blank cell means grey/NA — Mathis templates mark inapplicable
+      // attributes by leaving the cell empty, and the export must keep those
+      // columns empty (requirement-matrix.test.ts pins this).
       const st: ReqStatus =
         v === "REQUIRED" ? "REQUIRED" :
         v === "RECOMMENDED" ? "RECOMMENDED" :
@@ -2936,6 +3022,18 @@ function getProductField(p: Product, key: string): unknown {
       .replace(/\s+/g, " ")
       .trim();
 
+  // Leaf of the assigned category path, for columns that ask for a Product Type
+  // rather than a full path. Falls back to the whole value when it carries no
+  // separator (already a leaf), and is empty for Uncategorized so no junk ships.
+  const categoryLeaf = (() => {
+    const path = p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized"
+      ? p.marketplaceCategory
+      : "";
+    if (!path) return "";
+    const parts = path.split(">").map((s) => s.trim()).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
+  })();
+
   // ── Description / details — prefer vendor text, fall back to product name ──
   const descriptionRaw =
     p.description ||
@@ -3195,6 +3293,11 @@ function getProductField(p: Product, key: string): unknown {
     item_type_name: p.categoryPath ?? ((p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : ""),
     category_path: p.categoryPath ?? ((p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : ""),
     browse_node: p.categoryPath ?? "",
+    // The LAST level of the assigned path — the taxonomy's leaf IS the product
+    // type ("Home and Garden > … > Decor > Wall Art" → "Wall Art"). Marketplaces
+    // that ask for a Product Type want that word, not the whole path, and
+    // reject a value carrying the " > " separators.
+    category_leaf: categoryLeaf,
     product_type: (p.marketplaceCategory && p.marketplaceCategory !== "Uncategorized") ? p.marketplaceCategory : "",
 
     // Temu listing-type field: "Goods type" / "goods_type" on the Temu template is the

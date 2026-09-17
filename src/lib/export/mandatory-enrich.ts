@@ -26,6 +26,7 @@
  * the row is left alone, which is the safe failure.
  */
 import { generateText } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, noThinkingHeaders, noThinkingTemperature } from "@/lib/ai/moonshot";
 import { searchByPartNumber, synccentricConfigured } from "@/lib/synccentric/client";
 import { getProductsByCode } from "@/lib/keepa/client";
@@ -43,6 +44,19 @@ export type MandatoryFacts = {
   /** Real catalog images, largest first. The SILO (white-background) image is
    *  the template's first required image column. */
   images?: string[];
+  /** Descriptive attributes the marketplace lookup already returns.
+   *
+   *  Best Buy marks Colour, Size, Material and similar REQUIRED per category,
+   *  and vendor sheets routinely leave them blank — 25 of 61 categories in the
+   *  test project were short of Colour alone. The catalog lookup answers them
+   *  for free: the call that fetches dimensions returns these in the same
+   *  response, and they were simply being dropped on the floor. Filling them
+   *  from real catalog data also keeps them out of the AI fill queue, which is
+   *  where the export's token cost comes from. */
+  color?: string;
+  size?: string;
+  description?: string;
+  features?: string[];
 };
 
 export type EnrichInput = {
@@ -119,6 +133,7 @@ export async function enrichMandatoryFacts(
   products: EnrichInput[],
   brandHints?: Map<string, string>,
 ): Promise<Map<string, MandatoryFacts>> {
+  enterAiFeature("export_mandatory");
   const out = new Map<string, MandatoryFacts>();
   if (!products.length) return out;
 
@@ -194,6 +209,12 @@ export async function enrichMandatoryFacts(
           }
           if (!facts.brand && n.brand) facts.brand = n.brand;
           if (!facts.images?.length && n.images?.length) facts.images = n.images.slice(0, 10);
+          // Same response, no extra call: descriptive attributes the per-category
+          // required columns ask for.
+          facts.color ??= n.color ?? undefined;
+          facts.size ??= n.size ?? undefined;
+          facts.description ??= n.description ?? undefined;
+          if (!facts.features?.length && n.features?.length) facts.features = n.features.slice(0, 10);
           out.set(id, facts);
         }
       }
@@ -222,6 +243,7 @@ export async function enrichMandatoryFacts(
 export async function inferBrandsForPrefixes(
   products: EnrichInput[],
 ): Promise<Map<string, string>> {
+  enterAiFeature("export_mandatory");
   const hints = new Map<string, string>();
   const byPrefix = new Map<string, EnrichInput[]>();
   for (const p of products) {

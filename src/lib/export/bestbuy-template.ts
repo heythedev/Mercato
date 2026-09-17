@@ -32,7 +32,7 @@ export type BestBuyColumn = {
 };
 
 export type BestBuyFillKey =
-  | "categoryName" | "name" | "upc" | "brand" | "description"
+  | "categoryName" | "categoryLeaf" | "name" | "upc" | "brand" | "description"
   | "imageUrl" | "vendorSku" | "price"
   | "weight" | "height" | "width" | "depth" | "length" | "color";
 
@@ -42,6 +42,11 @@ export type BestBuyFillKey =
  */
 const FILL_BY_ATTRIBUTE: Record<string, BestBuyFillKey> = {
   categoryname: "categoryName",
+  // Product Type is the LEAF of the assigned path, not the path itself: the
+  // taxonomy's last level IS the product type ("… > Decor > Wall Art" → "Wall
+  // Art"), and Best Buy rejects a value carrying the " > " separators.
+  producttype: "categoryLeaf",
+  productcategory: "categoryLeaf",
   productname: "name",
   producttitle: "name",
   gtin: "upc",
@@ -86,6 +91,27 @@ const FILL_BY_ATTRIBUTE: Record<string, BestBuyFillKey> = {
  * value in a required attribute fails Best Buy's validation and is harder to
  * spot than an empty cell.
  */
+/**
+ * The bare attribute name inside a Best Buy code, or null when the code is a
+ * repeating group.
+ *
+ * "Wall_Art.modelNumber" → "modelNumber", which the core field map already
+ * knows how to answer (vendor `model` / `mpn`). Without this the category
+ * prefix made every such column a miss, and the explicit FILL_BY_ATTRIBUTE
+ * mapping is narrower than the core map by design — it only lists fields we
+ * hold on the Product row itself.
+ *
+ * Nested codes return null: "featureBullets.1.description" must never be
+ * answered by a plain "description" lookup, which is what filled all five
+ * bullets with the same text once before.
+ */
+export function bestBuyBareAttribute(code: string): string | null {
+  const raw = String(code ?? "").trim();
+  if (!raw) return null;
+  const afterPrefix = /^[A-Z][A-Za-z0-9_]*\./.test(raw) ? raw.slice(raw.indexOf(".") + 1) : raw;
+  return afterPrefix.includes(".") ? null : afterPrefix;
+}
+
 export function bestBuyFillKeyForCode(code: string): BestBuyFillKey | null {
   const raw = String(code ?? "").trim();
   if (!raw) return null;
