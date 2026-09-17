@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const format = params.get("format");
 
-  // The table is created by scripts/apply-service-usage-table.ts, not by
+  // The table is created by scripts/apply-pending-tables.ts, not by
   // `prisma migrate deploy` — this database sits behind a transaction pooler the
   // migration engine cannot drive. So a deploy can legitimately land before the
   // table exists, and when it did, this route answered a bare HTTP 500 that told
@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
   const [{ n: tableCount }] = await prisma.$queryRaw<{ n: bigint }[]>`
     select count(*) as n from information_schema.tables where table_name = 'ServiceUsage'`;
   if (Number(tableCount) === 0) {
-    const setupCommand = "pnpm exec tsx scripts/apply-service-usage-table.ts";
+    const setupCommand = "pnpm exec tsx scripts/apply-pending-tables.ts";
     if (format === "csv") {
       return new NextResponse(`# usage recording is not set up yet — run: ${setupCommand}\n`, {
         headers: { "Content-Type": "text/csv; charset=utf-8" },

@@ -124,6 +124,8 @@ model Product {
   updatedAt DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// Values resolved once (catalog lookup or AI) and reused by later exports.
+  attributes ProductAttribute[]
 
   @@index([upc])
   @@index([asin])
@@ -327,4 +329,41 @@ model ExportDefault {
 
   @@unique([marketplace, attribute])
   @@index([marketplace])
+}
+
+// ── Resolved product attributes ───────────────────────────────────────────────
+
+/// One resolved value for one product attribute, kept so it is paid for once.
+///
+/// Required cells that no vendor column answers are filled by a catalog lookup
+/// or by the AI fill layer. Both were recomputed on EVERY export: the same
+/// feature bullet, the same material, re-asked and re-charged each time a file
+/// was regenerated. Worse, a Best Buy export of a real catalog cannot finish
+/// that work inside one request — the template writing alone measured 208s
+/// against a 300s ceiling, so the AI budget expired before a single batch ran
+/// and the cells shipped empty however much credit was available.
+///
+/// Storing each answer turns that into progress: a run fills what it has time
+/// for, the next run reads those back for free and spends its budget on what is
+/// still missing, and the file converges on complete. Re-exporting a finished
+/// catalog costs nothing.
+///
+/// `attribute` is the normalized column key, so one row answers the column
+/// whether the template names it by label or by Mirakl code, and across every
+/// category-prefixed spelling of it.
+model ProductAttribute {
+  id        String   @id @default(cuid())
+  productId String
+  attribute String
+  value     String
+  /// catalog | ai — where the value came from, so a cheaper source can later
+  /// overwrite a more expensive guess but never the reverse.
+  source    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, attribute])
+  @@index([productId])
 }

@@ -99,7 +99,7 @@ export function AdminExportDefaultsClient() {
     }
   }, []);
 
-  const useSuggestion = (s: (typeof SUGGESTIONS)[number]) =>
+  const applySuggestion = (s: (typeof SUGGESTIONS)[number]) =>
     setForm({ marketplace: s.marketplace, attribute: s.attribute, label: s.label, value: "" });
 
   return (
@@ -182,7 +182,7 @@ export function AdminExportDefaultsClient() {
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s.attribute}
-                  onClick={() => useSuggestion(s)}
+                  onClick={() => applySuggestion(s)}
                   title={s.hint}
                   className="rounded-full border px-3 py-1 text-xs hover:bg-muted text-left"
                 >

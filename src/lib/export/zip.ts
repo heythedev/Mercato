@@ -31,6 +31,7 @@ type Product = Pick<
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { loadExportDefaults, defaultFor, type ExportDefaults } from "./defaults";
+import { loadProductAttributes, saveProductAttributes, storedAttribute, type AttributeSource } from "./product-attributes";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
 import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, fillDropdownValues, fillFreeTextValues, neverInventColumn, type DropdownQuery, type DropdownFillQuery, type FreeTextFillQuery } from "../ai/match-dropdown";
@@ -309,6 +310,17 @@ export async function generateCategoryZip(
     console.warn("[export] could not load export defaults:", (e as Error).message);
     return new Map<string, string>() as ExportDefaults;
   });
+  // Values these products already resolved on earlier runs. Read once for the
+  // whole export; every template group shares them.
+  const storedAttrs = await loadProductAttributes(products.map((p) => p.id)).catch((e) => {
+    console.warn("[export] could not load resolved attributes:", (e as Error).message);
+    return new Map<string, Map<string, string>>();
+  });
+  const toPersist: { productId: string; attribute: string; value: string; source: AttributeSource }[] = [];
+  if (storedAttrs.size) {
+    console.log(`[export] ${storedAttrs.size} product(s) carry values resolved by earlier runs`);
+  }
+
   if (exportDefaults.size) {
     console.log(`[export] ${exportDefaults.size} admin default(s) available for ${marketplace}`);
   }
@@ -625,7 +637,7 @@ export async function generateCategoryZip(
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
       const fileIssues: ComplianceIssue[] = [];
-      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults);
+      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults, storedAttrs, toPersist);
       zipOut.file(`${fileName}.xlsx`, buffer);
       for (const issue of fileIssues) complianceRows.push({ ...issue, file: `${fileName}.xlsx` });
     } else {
@@ -665,6 +677,18 @@ export async function generateCategoryZip(
   }
 
   const zipBuffer = await (zipOut.generateAsync({ type: "nodebuffer" }) as unknown as Promise<Buffer>);
+
+  // Keep what this run resolved, so the next export answers those cells for
+  // free and spends its budget on what is still missing. Awaited rather than
+  // fired and forgotten: on a serverless instance the work would otherwise be
+  // frozen with the response, which is the whole problem this solves.
+  if (toPersist.length) {
+    const saved = await saveProductAttributes(toPersist).catch(() => 0);
+    console.log(
+      `[export] stored ${saved} of ${toPersist.length} resolved value(s) for reuse by later exports`,
+    );
+  }
+
   // Returned rather than written into the ZIP: callers (and tests) can still see
   // exactly which cells went unfilled without the client finding a defect report
   // in their download.
@@ -1054,6 +1078,10 @@ async function fillTemplateXlsx(
   compliance?: ComplianceIssue[],
   /** Admin-set values for required columns no data source can answer. */
   exportDefaults: ExportDefaults = new Map(),
+  /** Values these products resolved on earlier runs: productId → (attribute → value). */
+  storedAttrs: Map<string, Map<string, string>> = new Map(),
+  /** Collects newly resolved values, for the caller to persist after the run. */
+  toPersist: { productId: string; attribute: string; value: string; source: AttributeSource }[] = [],
 ): Promise<Buffer> {
   console.log(`[export] fillTemplateXlsx called: ${products.length} products, fileData=${fileData?.length ?? 0} bytes, marketplace=${marketplace}`);
   const tplZip = await JSZip.loadAsync(fileData);
@@ -1876,6 +1904,7 @@ async function fillTemplateXlsx(
   };
 
   let filledRequiredCells = 0;
+  let reusedStoredCells = 0;
 
   const isTemu = marketplace.toLowerCase() === "temu";
   const isWalmart = marketplace.toLowerCase() === "walmart";
@@ -2360,6 +2389,18 @@ async function fillTemplateXlsx(
             // fill still has to clear the dropdown invariant — an off-list
             // value is worse than an empty cell.
             let fill = requiredFallback(p, col, letter, valueByLetter);
+            // A value this product already resolved on an earlier run, before
+            // spending anything on it again. This is what lets a catalog too big
+            // to finish in one request converge across runs.
+            if (!fill) {
+              fill = storedAttribute(
+                storedAttrs.get(p.id),
+                String(col.key ?? ""),
+                codeByLetter.get(letter) ?? "",
+                colLetterToHeader.get(letter) ?? "",
+              );
+              if (fill) reusedStoredCells++;
+            }
             if (!fill) fill = aiFill.get(`${p.id}|${letter}`) ?? "";
             if (fill) {
               const options = dropdowns.get(letter);
@@ -2367,6 +2408,18 @@ async function fillTemplateXlsx(
               if (final) {
                 valueByLetter.set(letter, final);
                 filledRequiredCells++;
+                // Remember it under the column's stable identity (the attribute
+                // code where the template has one, else its header), so the next
+                // export answers this cell for free.
+                const attrName = codeByLetter.get(letter) || colLetterToHeader.get(letter) || String(col.key ?? "");
+                if (attrName) {
+                  toPersist.push({
+                    productId: p.id,
+                    attribute: attrName,
+                    value: final,
+                    source: aiFill.has(`${p.id}|${letter}`) ? "ai" : "catalog",
+                  });
+                }
                 continue;
               }
             }
@@ -2433,7 +2486,8 @@ async function fillTemplateXlsx(
     console.log(
       `[export] requirement matrix (${reqMatrix.categories.size} categories): ` +
       `${blankedNaCells} not-applicable (grey) cells kept empty; ` +
-      `${filledRequiredCells} mandatory (pink) cells filled by fallback/AI; ` +
+      `${filledRequiredCells} mandatory (pink) cells filled by fallback/AI` +
+      `${reusedStoredCells ? ` (${reusedStoredCells} reused from earlier runs)` : ""}; ` +
       `${compliance?.length ?? 0} rows still missing mandatory values`,
     );
     if (unknownMatrixCategories.size) {

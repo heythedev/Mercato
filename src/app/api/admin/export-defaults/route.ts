@@ -30,7 +30,7 @@ async function tableMissing(): Promise<boolean> {
   return Number(n) === 0;
 }
 
-const SETUP_COMMAND = "pnpm exec tsx scripts/apply-export-defaults-table.ts";
+const SETUP_COMMAND = "pnpm exec tsx scripts/apply-pending-tables.ts";
 
 export async function GET() {
   const { response } = await adminGuard();
