@@ -2251,6 +2251,21 @@ async function fillTemplateXlsx(
         const nk2 = normalizeKey(String(col.key ?? ""));
         if (nk === "category") continue;
         if (colVal(p, col, letter).trim()) continue; // vendor data covers it
+        // Already answered on an earlier run. Skipping here is the whole point
+        // of storing them: without this the queue is rebuilt in full every
+        // export and the model is re-asked — and re-charged — for answers we
+        // already hold, even though the row loop would then ignore its reply in
+        // favour of the stored value.
+        if (
+          storedAttribute(
+            storedAttrs.get(p.id),
+            String(col.key ?? ""),
+            codeByLetter.get(letter) ?? "",
+            colLetterToHeader.get(letter) ?? "",
+          )
+        ) {
+          continue;
+        }
 
         const isColour = COLOUR_KEYS.has(nk) || COLOUR_KEYS.has(nk2);
         if (DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(nk2)) {
