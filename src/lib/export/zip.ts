@@ -30,7 +30,7 @@ type Product = Pick<
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
-import { loadExportDefaults, defaultFor, type ExportDefaults } from "./defaults";
+import { loadExportDefaults, defaultFor, settingEnabled, SETTING_KEYS, type ExportDefaults } from "./defaults";
 import { loadProductAttributes, saveProductAttributes, storedAttribute, type AttributeSource } from "./product-attributes";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
 import { toDecimalDimension } from "./dimensions";
@@ -1592,6 +1592,10 @@ async function fillTemplateXlsx(
     ?? reqMatrix?.byAttr.get(normalizeKey(colLetterToHeader.get(letter) ?? ""))
     ?? reqMatrix?.byAttr.get(normalizeKey(String(col.label ?? "")));
   let blankedNaCells = 0;
+  let keptNaCells = 0;
+  // Admin switch, per marketplace: keep resolved values in not-applicable
+  // (grey) cells instead of clearing them. Off unless explicitly turned on.
+  const keepNaValues = settingEnabled(exportDefaults, SETTING_KEYS.fillNaCells);
   const unknownMatrixCategories = new Set<string>();
 
   // ── Dropdown options from dataValidations ──────────────────────────────────
@@ -2455,7 +2459,14 @@ async function fillTemplateXlsx(
           if (!status) continue;
           const val = valueByLetter.get(letter) ?? "";
           if (status === "NA") {
-            if (val !== "") { valueByLetter.set(letter, ""); blankedNaCells++; }
+            // Grey means the marketplace says this attribute does not apply to
+            // this row's category, so a value there can have the row rejected —
+            // hence blanking, and hence the switch being off unless an admin
+            // turns it on for this marketplace. When on, only values we already
+            // resolved are kept; nothing extra is asked of the AI for a column
+            // the category calls irrelevant.
+            if (val !== "" && !keepNaValues) { valueByLetter.set(letter, ""); blankedNaCells++; }
+            else if (val !== "") keptNaCells++;
           } else if (status === "REQUIRED" && val === "") {
             // Fill layers before reporting: deterministic derivation/default,
             // then the AI's pick from the column's own dropdown list. Every
@@ -2574,7 +2585,8 @@ async function fillTemplateXlsx(
   if (reqMatrix) {
     console.log(
       `[export] requirement matrix (${reqMatrix.categories.size} categories): ` +
-      `${blankedNaCells} not-applicable (grey) cells kept empty; ` +
+      `${blankedNaCells} not-applicable (grey) cells kept empty` +
+      `${keptNaCells ? ` (${keptNaCells} kept filled by the admin setting)` : ""}; ` +
       `${filledRequiredCells} mandatory (pink) cells filled by fallback/AI` +
       `${reusedStoredCells ? ` (${reusedStoredCells} reused from earlier runs)` : ""}; ` +
       `${compliance?.length ?? 0} rows still missing mandatory values`,

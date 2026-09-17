@@ -20,6 +20,38 @@ export function defaultKey(s: string): string {
   return String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/**
+ * Reserved keys: settings rather than column values.
+ *
+ * They live in the same table so turning one on needs no migration and no
+ * second admin screen, and the UI hides them from the list of column defaults.
+ */
+export const SETTING_KEYS = {
+  /**
+   * Keep values in cells the template marks NOT APPLICABLE (grey), instead of
+   * blanking them.
+   *
+   * Off by default, and deliberately so: grey means the marketplace says the
+   * attribute does not apply to that category, and a value there can have the
+   * row rejected on import. It exists because a client may want the data
+   * present anyway — a reviewer reading the sheet, or a marketplace that
+   * tolerates extra columns. Only values we actually resolved are kept; nothing
+   * is asked of the AI for a column the category says is irrelevant.
+   */
+  fillNaCells: defaultKey("__fill_na_cells"),
+} as const;
+
+/** Whether a reserved boolean setting is switched on for this marketplace. */
+export function settingEnabled(defaults: ExportDefaults, key: string): boolean {
+  const v = (defaults.get(key) ?? "").trim().toLowerCase();
+  return v === "on" || v === "true" || v === "yes" || v === "1";
+}
+
+/** True for a key that is a setting, not a column default. */
+export function isSettingKey(attribute: string): boolean {
+  return (Object.values(SETTING_KEYS) as string[]).includes(attribute);
+}
+
 export type ExportDefaults = Map<string, string>;
 
 /**
@@ -55,6 +87,8 @@ export async function loadExportDefaults(marketplace: string): Promise<ExportDef
 export function defaultFor(defaults: ExportDefaults, ...names: string[]): string {
   if (!defaults.size) return "";
   for (const raw of names) {
+    // A settings row must never be mistaken for a column value.
+    if (isSettingKey(defaultKey(String(raw ?? "")))) continue;
     const s = String(raw ?? "").trim();
     if (!s) continue;
     const direct = defaults.get(defaultKey(s));

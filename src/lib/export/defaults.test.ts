@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultFor, defaultKey, type ExportDefaults } from "./defaults";
+import { defaultFor, defaultKey, settingEnabled, isSettingKey, SETTING_KEYS, type ExportDefaults } from "./defaults";
 
 const defaults = (pairs: [string, string][]): ExportDefaults =>
   new Map(pairs.map(([k, v]) => [defaultKey(k), v]));
@@ -42,5 +42,36 @@ describe("export defaults", () => {
     const d = defaults([["Contains intentionally added PFAS", "No"]]);
     expect(defaultFor(d, "containsIntentionallyAddedPfas")).toBe("No");
     expect(defaultFor(d, "CONTAINS_INTENTIONALLY_ADDED_PFAS")).toBe("No");
+  });
+});
+
+describe("reserved settings", () => {
+  it("reads the grey-cell switch only when explicitly on", () => {
+    const on = defaults([["__fill_na_cells", "on"]]);
+    const off = defaults([["__fill_na_cells", "off"]]);
+    expect(settingEnabled(on, SETTING_KEYS.fillNaCells)).toBe(true);
+    expect(settingEnabled(off, SETTING_KEYS.fillNaCells)).toBe(false);
+    // Absent means off: the export must clear grey cells unless an admin has
+    // decided otherwise, because a value there can have the row rejected.
+    expect(settingEnabled(new Map(), SETTING_KEYS.fillNaCells)).toBe(false);
+  });
+
+  it("accepts the spellings an admin might store", () => {
+    for (const v of ["on", "true", "YES", "1"]) {
+      expect(settingEnabled(defaults([["__fill_na_cells", v]]), SETTING_KEYS.fillNaCells)).toBe(true);
+    }
+    for (const v of ["off", "false", "no", "0", ""]) {
+      expect(settingEnabled(defaults([["__fill_na_cells", v]]), SETTING_KEYS.fillNaCells)).toBe(false);
+    }
+  });
+
+  it("never lets a settings row answer a column", () => {
+    // Both directions: the setting must not leak into a cell, and a column
+    // named like the setting must not read it either.
+    const d = defaults([["__fill_na_cells", "on"], ["material", "Cotton"]]);
+    expect(defaultFor(d, "__fill_na_cells")).toBe("");
+    expect(defaultFor(d, "material")).toBe("Cotton");
+    expect(isSettingKey(defaultKey("__fill_na_cells"))).toBe(true);
+    expect(isSettingKey(defaultKey("material"))).toBe(false);
   });
 });

@@ -45,6 +45,9 @@ export function AdminExportDefaultsClient() {
   const [reloadKey, setReloadKey] = useState(0);
   /** Set to the fix command when the table has not been created yet. */
   const [setup, setSetup] = useState("");
+  /** Reserved settings rows, keyed "<marketplace>:<key>". */
+  const [settings, setSettings] = useState<Record<string, string>>({});
+  const [settingKeys, setSettingKeys] = useState<Record<string, string>>({});
   const [form, setForm] = useState({ marketplace: "bestbuy", attribute: "", label: "", value: "" });
 
   useEffect(() => {
@@ -57,6 +60,8 @@ export function AdminExportDefaultsClient() {
         if (cancelled) return;
         setRows(json.defaults ?? []);
         setSetup(json.setupRequired ? (json.setupCommand ?? "") : "");
+        setSettings(json.settings ?? {});
+        setSettingKeys(json.settingKeys ?? {});
         setError("");
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Could not load defaults");
@@ -99,6 +104,31 @@ export function AdminExportDefaultsClient() {
     }
   }, []);
 
+  /**
+   * Flip a reserved setting. Turning it OFF writes "off" rather than deleting
+   * the row, so the screen shows an explicit decision instead of an absence —
+   * and either way the export reads the same field.
+   */
+  const toggleSetting = useCallback(async (marketplace: string, key: string, on: boolean) => {
+    setError("");
+    try {
+      const res = await fetch("/api/admin/export-defaults", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketplace,
+          attribute: key,
+          label: "Keep values in not-applicable (grey) cells",
+          value: on ? "on" : "off",
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save the setting");
+    }
+  }, []);
+
   const applySuggestion = (s: (typeof SUGGESTIONS)[number]) =>
     setForm({ marketplace: s.marketplace, attribute: s.attribute, label: s.label, value: "" });
 
@@ -126,6 +156,45 @@ export function AdminExportDefaultsClient() {
 
       {error && (
         <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      )}
+
+      {settingKeys.fillNaCells && (
+        <div className="rounded-lg border overflow-hidden">
+          <div className="border-b bg-muted/40 px-4 py-2 text-sm font-medium">
+            Not-applicable (grey) cells
+          </div>
+          <div className="p-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              A grey cell means the marketplace states that attribute does not apply to that row&apos;s
+              category, so the export clears it. Switching this on keeps values we already resolved
+              in those cells instead. Nothing extra is asked of the AI, and no cost changes.
+            </p>
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded px-3 py-2">
+              A value in a not-applicable column can cause the marketplace to reject the row. Turn
+              this on only if the client has asked for it, and switch it off here to undo — nothing
+              else changes.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {MARKETPLACE_TILES.map((m) => {
+                const key = `${m.id}:${settingKeys.fillNaCells}`;
+                const on = ["on", "true", "yes", "1"].includes((settings[key] ?? "").toLowerCase());
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => void toggleSetting(m.id, settingKeys.fillNaCells!, !on)}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs transition-colors",
+                      on ? "bg-foreground text-background" : "hover:bg-muted",
+                    )}
+                    title={on ? `Keep grey-cell values for ${m.label}` : `Clear grey cells for ${m.label} (default)`}
+                  >
+                    {m.label}: {on ? "keeping values" : "cleared"}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="rounded-lg border overflow-hidden">

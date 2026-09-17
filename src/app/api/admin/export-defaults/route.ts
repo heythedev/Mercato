@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
-import { defaultKey } from "@/lib/export/defaults";
+import { defaultKey, isSettingKey, SETTING_KEYS } from "@/lib/export/defaults";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +44,17 @@ export async function GET() {
     orderBy: [{ marketplace: "asc" }, { attribute: "asc" }],
     select: { id: true, marketplace: true, attribute: true, label: true, value: true, updatedAt: true, updatedBy: true },
   });
-  return NextResponse.json({ defaults });
+  // Settings are returned separately so the UI can render them as switches
+  // rather than listing them among the column values.
+  return NextResponse.json({
+    defaults: defaults.filter((d) => !isSettingKey(d.attribute)),
+    settings: Object.fromEntries(
+      defaults
+        .filter((d) => isSettingKey(d.attribute))
+        .map((d) => [`${d.marketplace}:${d.attribute}`, d.value]),
+    ),
+    settingKeys: SETTING_KEYS,
+  });
 }
 
 export async function PUT(req: NextRequest) {
