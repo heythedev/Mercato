@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const maxDuration = 60;
 import { authGuard } from "@/lib/auth-helpers";
+import { enterAiContext } from "@/lib/ai/usage-context";
 import { prisma } from "@/lib/db";
 import { verifyProducts, applyAiVerificationPasses } from "@/lib/marketplaces/verify";
 
@@ -16,6 +17,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
+  enterAiContext({ feature: "verify_title", projectId: id, userId: (user as { id?: string })?.id });
 
   const { productId } = (await req.json().catch(() => ({}))) as { productId?: string };
   if (!productId) return NextResponse.json({ error: "productId is required" }, { status: 400 });

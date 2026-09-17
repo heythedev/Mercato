@@ -1,4 +1,5 @@
 import type { KeepaCategoryTreeEntry, KeepaProduct } from "@/lib/keepa/types";
+import { recordUsageRow } from "@/lib/ai/usage-log";
 
 /**
  * Synccentric database-search client — fallback product source for Amazon
@@ -65,7 +66,7 @@ export function getLastSynccentricQuota(): SynccentricQuota | null {
   return lastQuota;
 }
 
-function captureQuota(res: Response) {
+function captureQuota(res: Response, durationMs?: number) {
   const num = (h: string): number | null => {
     const v = Number(res.headers.get(h));
     return Number.isFinite(v) && res.headers.get(h) !== null ? v : null;
@@ -74,7 +75,17 @@ function captureQuota(res: Response) {
   const used = num("X-Sync-Search-Used");
   const remaining = num("X-Sync-Search-Remaining");
   if (limit !== null || used !== null || remaining !== null) {
+    // Searches this call consumed, taken from the provider's own running total
+    // rather than assumed — one call does not always cost exactly one search.
+    // The first call of a process has no previous total to subtract, and a
+    // daily quota reset moves `used` backwards; both fall back to 1.
+    const previous = lastQuota?.used;
+    const spent =
+      used !== null && typeof previous === "number" && used >= previous ? used - previous : 1;
     lastQuota = { limit, used, remaining, timestamp: Date.now() };
+    if (spent > 0) {
+      recordUsageRow({ service: "synccentric", feature: "products_search", units: spent, durationMs, ok: res.ok });
+    }
   }
 }
 
@@ -111,13 +122,14 @@ async function call(params: URLSearchParams): Promise<unknown> {
   const token = apiToken();
   if (!token) throw new SynccentricError("SYNCCENTRIC_API_TOKEN not configured", 401);
 
+  const startedAt = Date.now();
   const res = await fetch(`${BASE}/products/search?${params.toString()}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
     signal: AbortSignal.timeout(25000),
   }).catch((e) => {
     throw new SynccentricError(`Could not reach Synccentric: ${(e as Error).message}`, 502);
   });
-  captureQuota(res);
+  captureQuota(res, Date.now() - startedAt);
 
   const json = (await res.json().catch(() => null)) as unknown;
   if (!res.ok) {

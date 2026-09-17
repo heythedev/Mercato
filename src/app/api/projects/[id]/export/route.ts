@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
+import { enterAiContext } from "@/lib/ai/usage-context";
+import { flushUsage } from "@/lib/ai/usage-log";
 import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate, Prisma } from "@prisma/client";
 import { generateBestBuyCategoryZip, generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
@@ -96,6 +98,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
+  // Exports spend on several paths (dropdown fills, mandatory-cell enrichment,
+  // title generation); each narrows the feature itself.
+  enterAiContext({ feature: "export_dropdown", projectId: id, userId: (user as { id?: string })?.id });
+  // Buffered usage rows would otherwise be lost if the instance freezes
+  // the moment it responds — the tail of a long run is its costliest part.
+  after(() => flushUsage());
 
   const body = await req.json().catch(() => ({}));
   const autoMatch: boolean = body.autoMatch ?? false;

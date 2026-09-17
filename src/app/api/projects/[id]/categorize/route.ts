@@ -2,6 +2,8 @@ import { NextRequest, NextResponse, after } from "next/server";
 
 export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
+import { enterAiContext } from "@/lib/ai/usage-context";
+import { flushUsage } from "@/lib/ai/usage-log";
 import { prisma, inChunks } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { categorizeProducts, type ProductInput } from "@/lib/ai/categorize";
@@ -348,6 +350,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
+  // Attribute every AI call this request makes, so a drained balance can later be
+  // traced to the project and the feature that spent it.
+  enterAiContext({ feature: "categorize", projectId: id, userId: (user as { id?: string })?.id });
+  // Buffered usage rows would otherwise be lost if the instance freezes
+  // the moment it responds — the tail of a long run is its costliest part.
+  after(() => flushUsage());
 
   // `force: true` re-categorizes every product from scratch. Default (false) reuses
   // each product's existing category and only (re)processes ones that are still

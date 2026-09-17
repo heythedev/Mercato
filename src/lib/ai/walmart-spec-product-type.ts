@@ -1,4 +1,5 @@
 import { generateText } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import {
   moonshot,
   moonshotConfigured,
@@ -249,6 +250,7 @@ export async function assignSpecProductTypes(
   products: SpecTypeInput[],
   opts?: SpecAssignOptions,
 ): Promise<SpecAssignResult> {
+  enterAiFeature("spec_product_type");
   const assigned = new Map<string, string>();
   const res: SpecAssignResult = { assigned, attempted: 0, deadlineHit: false, levelFallback: 0 };
   if (!products.length || !moonshotConfigured()) return res;

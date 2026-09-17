@@ -1,4 +1,5 @@
 import { generateText } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 
 const GENERIC_SHEET = /^(sheet\d*|template|data|catalog|products?|items?|listing|upload|feed|export|flatfile|flat.?file)$/i;
@@ -9,6 +10,7 @@ export async function detectTemplateCategory(
   sheetName: string | null,
   columns: string[],
 ): Promise<string | null> {
+  enterAiFeature("template_detect");
   // 1. Sheet name heuristic — if not generic it usually IS the category
   const cleanSheet = sheetName?.trim() ?? "";
   if (cleanSheet && !GENERIC_SHEET.test(cleanSheet)) {

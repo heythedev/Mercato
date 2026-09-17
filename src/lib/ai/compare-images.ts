@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { generateText } from "ai";
 import {
   moonshot,
@@ -367,6 +368,7 @@ export async function compareProductImages(
   liveImageUrl: string,
   productName: string,
 ): Promise<ImageCompareResult> {
+  enterAiFeature("verify_image");
   if (!moonshotConfigured()) {
     return { verdict: "unsure", reason: "MOONSHOT_KEY not configured" };
   }
@@ -442,6 +444,7 @@ export async function compareVendorAgainstAllImages(
   // multi-variant confusion and degrade accuracy more than they help.
   maxAngles = 1,
 ): Promise<ImageCompareResult> {
+  enterAiFeature("verify_image");
   const urls = liveImageUrls.filter((u) => u && u.startsWith("http")).slice(0, maxAngles);
   if (!urls.length) return { verdict: "unsure", reason: "No marketplace images available" };
   if (!moonshotConfigured()) {
@@ -503,6 +506,7 @@ export async function compareProductImagesBatch(
   items: Array<{ vendorImageUrl: string; liveImageUrl: string; productName: string }>,
   concurrency = 4,
 ): Promise<ImageCompareResult[]> {
+  enterAiFeature("verify_image");
   const results: ImageCompareResult[] = new Array(items.length);
   for (let i = 0; i < items.length; i += concurrency) {
     const batch = items.slice(i, i + concurrency);
@@ -530,6 +534,7 @@ export async function compareVendorAgainstAllImagesBatch(
   // even with a second project's sweep running at the same time.
   concurrency = 12,
 ): Promise<ImageCompareResult[]> {
+  enterAiFeature("verify_image");
   const results: ImageCompareResult[] = new Array(items.length);
   for (let i = 0; i < items.length; i += concurrency) {
     // Once the provider is known to be down, don't start another wave: every

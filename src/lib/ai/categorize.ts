@@ -1,4 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotTemperature } from "@/lib/ai/moonshot";
 import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
@@ -278,6 +279,7 @@ export async function categorizeProducts(
    */
   onResults?: (results: CategorizeResult[]) => void | Promise<void>,
 ): Promise<CategorizeResult[]> {
+  enterAiFeature("categorize");
   const mpLower = marketplace.toLowerCase();
   const isMathis = mpLower === "mathis";
   const isBestBuyTop = mpLower === "bestbuy";

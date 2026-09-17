@@ -1,4 +1,5 @@
 import { generateText } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, MOONSHOT_TEXT_MODEL } from "@/lib/ai/moonshot";
 import type { Product as PrismaProduct } from "@prisma/client";
 
@@ -81,6 +82,7 @@ export async function generateMarketplaceTitles(
   products: Product[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<Map<string, string>> {
+  enterAiFeature("generate_title");
   const titleMap = new Map<string, string>();
   if (!products.length) return titleMap;
 

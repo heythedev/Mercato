@@ -1,4 +1,5 @@
 import { generateText } from "ai";
+import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, noThinkingHeaders, noThinkingTemperature } from "@/lib/ai/moonshot";
 
 /**
@@ -96,6 +97,7 @@ export type DropdownQuery = {
 export async function matchDropdownValues(
   queries: DropdownQuery[],
 ): Promise<Map<string, string>> {
+  enterAiFeature("export_dropdown");
   const out = new Map<string, string>();
   if (!queries.length) return out;
   if (!moonshotConfigured()) {
@@ -241,6 +243,7 @@ export type DropdownFillQuery = {
 export async function fillDropdownValues(
   queries: DropdownFillQuery[],
 ): Promise<Map<string, string>> {
+  enterAiFeature("export_dropdown");
   const out = new Map<string, string>();
   if (!queries.length) return out;
   if (!moonshotConfigured()) {
@@ -393,6 +396,7 @@ export type FreeTextFillQuery = {
 export async function fillFreeTextValues(
   queries: FreeTextFillQuery[],
 ): Promise<Map<string, string>> {
+  enterAiFeature("export_dropdown");
   const out = new Map<string, string>();
   if (!queries.length || !moonshotConfigured()) return out;
 

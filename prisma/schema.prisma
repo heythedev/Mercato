@@ -242,3 +242,56 @@ model ExportJob {
 
   @@index([updatedAt])
 }
+
+// ── Paid-service usage ────────────────────────────────────────────────────────
+
+/// One row per billable third-party call — Kimi (AI), Keepa and Synccentric.
+///
+/// Exists because none of the three tells you afterwards what a balance was
+/// spent on. Kimi exposes a current balance and no usage history at all (probed:
+/// /users/me/balance answers, every usage path 404s); Keepa and Synccentric
+/// report a running quota in each response but keep no per-project breakdown.
+/// So when credits drain, this table is the only account of where they went.
+///
+/// Each provider is recorded at the single choke point its calls already pass
+/// through, so no call site can forget to report: recordUsage() in
+/// src/lib/ai/moonshot.ts, captureTokens() in src/lib/keepa/client.ts, and
+/// captureQuota() in src/lib/synccentric/client.ts.
+///
+/// Rows are small and never updated. Retention is handled by the same cleanup
+/// cron as the caches.
+model ServiceUsage {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  /// kimi | keepa | synccentric
+  service String
+  /// Model id for kimi (kimi-k2.6, …); null for the metered data providers.
+  model String?
+  /// What the call was FOR: categorize, verify_image, export_dropdown for AI;
+  /// the endpoint (product, search, query) for Keepa and Synccentric.
+  feature String
+
+  /// Null for calls outside a project (template detection, connection tests).
+  projectId String?
+  userId    String?
+
+  /// Kimi only — the provider's own token counts.
+  inputTokens  Int @default(0)
+  outputTokens Int @default(0)
+  /// Metered providers — Keepa tokens consumed, Synccentric searches used.
+  /// Zero for AI rows, whose cost is in the token columns above.
+  units Int @default(0)
+
+  /// Wall-clock duration, for spotting slow paths that also cost.
+  durationMs Int?
+  /// False when the call threw. Failed calls are still billed by every one of
+  /// the three providers, and they were the blind spot in every estimate made
+  /// before this table existed.
+  ok Boolean @default(true)
+
+  @@index([createdAt])
+  @@index([service, createdAt])
+  @@index([feature, createdAt])
+  @@index([projectId])
+}

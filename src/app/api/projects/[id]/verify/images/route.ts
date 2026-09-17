@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const maxDuration = 120;
 
 import { authGuard } from "@/lib/auth-helpers";
+import { enterAiContext } from "@/lib/ai/usage-context";
 import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { applyAiVerificationPasses, rollupStatus, type VerifyResult } from "@/lib/marketplaces/verify";
@@ -88,6 +89,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
+  enterAiContext({ feature: "verify_image", projectId: id, userId: (user as { id?: string })?.id });
 
   const project = await prisma.project.findUnique({
     where: { id },

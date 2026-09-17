@@ -1,5 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel } from "ai";
+import { recordUsageRow } from "./usage-log";
+import { currentAiContext } from "./usage-context";
 
 /**
  * Moonshot AI (Kimi) — the single provider for every AI feature.
@@ -219,11 +221,22 @@ export function getMoonshotUsage(): MoonshotUsage {
   return usage;
 }
 
-function recordUsage(modelId: string, u: unknown): void {
+function recordUsage(modelId: string, u: unknown, durationMs?: number, ok = true): void {
   const raw = (u ?? {}) as Record<string, unknown>;
   // v5+ names first, legacy names as fallback.
   const inp = Number(raw.inputTokens ?? raw.promptTokens ?? 0) || 0;
   const out = Number(raw.outputTokens ?? raw.completionTokens ?? 0) || 0;
+  // The in-memory counters below are per serverless instance and vanish with it;
+  // this row is the durable copy, attributed to whatever feature is running.
+  recordUsageRow({
+    service: "kimi",
+    model: modelId,
+    feature: currentAiContext().feature,
+    inputTokens: inp,
+    outputTokens: out,
+    durationMs,
+    ok,
+  });
   usage.calls++;
   usage.inputTokens += inp;
   usage.outputTokens += out;
@@ -247,9 +260,20 @@ export const moonshot = (modelId: string) =>
     middleware: {
       specificationVersion: "v3",
       wrapGenerate: async ({ doGenerate }) => {
-        const result = await doGenerate();
-        recordUsage(modelId, result.usage);
-        return result;
+        const startedAt = Date.now();
+        try {
+          const result = await doGenerate();
+          recordUsage(modelId, result.usage, Date.now() - startedAt, true);
+          return result;
+        } catch (e) {
+          // A call that throws was still billed if the model produced anything
+          // before failing, and a timed-out batch bills in full. The token
+          // counts are unknowable here, so the row carries zeros — its value is
+          // that the call APPEARS at all. Every estimate made before this table
+          // existed missed exactly these.
+          recordUsage(modelId, undefined, Date.now() - startedAt, false);
+          throw e;
+        }
       },
     },
   });

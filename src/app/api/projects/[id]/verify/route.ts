@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 
 // Vercel's Hobby-plan ceiling (Pro allows 800). A full 10k-product run takes
 // ~10 minutes, so it no longer fits one request — the time budget below stops
@@ -6,6 +6,8 @@ import { NextRequest, NextResponse } from "next/server";
 // per run instead of one.
 export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
+import { enterAiContext } from "@/lib/ai/usage-context";
+import { flushUsage } from "@/lib/ai/usage-log";
 import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import {
@@ -288,6 +290,12 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   const { user, response } = await authGuard();
   if (response) return response;
   const { id } = await params;
+  // Default attribution for this request; the image comparison narrows it to
+  // verify_image itself, since the two cost very different amounts per product.
+  enterAiContext({ feature: "verify_title", projectId: id, userId: (user as { id?: string })?.id });
+  // Buffered usage rows would otherwise be lost if the instance freezes
+  // the moment it responds — the tail of a long run is its costliest part.
+  after(() => flushUsage());
 
   const project = await prisma.project.findUnique({
     where: { id },

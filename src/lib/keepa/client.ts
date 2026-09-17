@@ -1,4 +1,5 @@
 import type { KeepaProduct, KeepaTokenInfo } from "./types";
+import { recordUsageRow } from "@/lib/ai/usage-log";
 
 const BASE = "https://api.keepa.com";
 
@@ -55,10 +56,16 @@ export function tokensSpentMark(): number { return totalConsumed; }
 /** Tokens actually consumed since a {@link tokensSpentMark} snapshot. */
 export function tokensSpentSince(mark: number): number { return totalConsumed - mark; }
 
-function captureTokens(json: Record<string, unknown>) {
+function captureTokens(json: Record<string, unknown>, endpoint?: string, durationMs?: number) {
   if (typeof json?.tokensLeft === "number") {
     const consumed = json.tokensConsumed as number | undefined;
     if (typeof consumed === "number" && consumed > 0) totalConsumed += consumed;
+    // Keepa reports what each call actually cost, so this is measured spend, not
+    // an estimate — and the ambient context attributes it to the project whose
+    // verification run made the call.
+    if (typeof consumed === "number" && consumed > 0) {
+      recordUsageRow({ service: "keepa", feature: endpoint ?? "unknown", units: consumed, durationMs, ok: true });
+    }
     lastToken = {
       tokensLeft: json.tokensLeft as number,
       refillIn: (json.refillIn as number) ?? 0,
@@ -78,6 +85,7 @@ async function call(
   const usp = new URLSearchParams({ key });
   for (const [k, v] of Object.entries(params)) usp.set(k, String(v));
   const url = `${BASE}/${path}?${usp.toString()}`;
+  const startedAt = Date.now();
 
   const res = await fetch(url, {
     ...init,
@@ -86,7 +94,7 @@ async function call(
   }).catch((e) => { throw new KeepaError(`Could not reach Keepa: ${(e as Error).message}`, 502, "NETWORK"); });
 
   const json = await res.json().catch(() => { throw new KeepaError(`Keepa non-JSON response (HTTP ${res.status}).`, res.status); }) as Record<string, unknown>;
-  captureTokens(json);
+  captureTokens(json, path, Date.now() - startedAt);
 
   if (!res.ok || json?.error) {
     const err = json?.error as { message?: string; type?: string } | string | undefined;

@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Users,
   FileText,
+  Activity,
   ChevronsLeft,
   ChevronsRight,
   X,
@@ -31,6 +32,7 @@ const adminNav = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/templates", label: "Templates", icon: FileText },
+  { href: "/admin/usage", label: "Usage & credits", icon: Activity },
 ];
 
 export function Sidebar({ role, showAmazonSources = false }: Props) {
