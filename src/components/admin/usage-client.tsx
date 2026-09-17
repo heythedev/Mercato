@@ -17,6 +17,13 @@ type Report = {
   /** Set when the recording table has not been created yet — see the API route. */
   setupRequired?: boolean;
   setupCommand?: string;
+  /**
+   * Exact spend, from the drop in the provider's own balance. Null until two
+   * readings exist in the window; the token estimate stands in until then.
+   */
+  actualSpendUsd?: number | null;
+  actualByDay?: Record<string, number>;
+  balanceReadings?: number;
   byDay: (Row & { day: string; service: string })[];
   byService: (Row & { service: string })[];
   byFeature: (Row & { service: string; feature: string })[];
@@ -177,11 +184,17 @@ export function AdminUsageClient() {
               <div key={s.service} className="rounded-lg border px-4 py-3">
                 <div className="text-xs text-muted-foreground">{SERVICE_LABELS[s.service] ?? s.service}</div>
                 <div className="text-xl font-semibold mt-0.5">
-                  {s.service === "kimi" ? usd(s.estCostUsd) : `${fmt(s.units)}`}
+                  {s.service === "kimi"
+                    ? data.actualSpendUsd != null
+                      ? usd(data.actualSpendUsd)
+                      : usd(s.estCostUsd)
+                    : `${fmt(s.units)}`}
                 </div>
                 <div className="text-[11px] text-muted-foreground mt-0.5">
                   {s.service === "kimi"
-                    ? `${fmt(s.calls)} calls · ${tok(s.input)} in / ${tok(s.output)} out`
+                    ? `${fmt(s.calls)} calls · ${tok(s.input)} in / ${tok(s.output)} out · ${
+                        data.actualSpendUsd != null ? "measured from balance" : "estimated from tokens"
+                      }`
                     : `${fmt(s.calls)} calls · ${UNIT_LABELS[s.service] ?? "units"}`}
                 </div>
               </div>
@@ -201,7 +214,7 @@ export function AdminUsageClient() {
 
           <Table
             title="By day"
-            head={["Day", "Service", "Calls", "In", "Out", "Units", "Failed", "Est. cost"]}
+            head={["Day", "Service", "Calls", "In", "Out", "Units", "Failed", "Cost"]}
             rows={data.byDay.map((r) => [
               r.day,
               SERVICE_LABELS[r.service] ?? r.service,
@@ -210,7 +223,11 @@ export function AdminUsageClient() {
               tok(r.output),
               unit(r.units),
               r.failed ? fmt(r.failed) : "—",
-              usd(r.estCostUsd),
+              // Measured from the balance where readings cover that day; the
+              // token estimate only as a fallback.
+              r.service === "kimi" && data.actualByDay?.[r.day] != null
+                ? usd(data.actualByDay[r.day])
+                : usd(r.estCostUsd),
             ])}
           />
 
@@ -253,13 +270,25 @@ export function AdminUsageClient() {
           />
 
           <p className="text-xs text-muted-foreground">
-            Counts are measured — tokens come from Kimi&apos;s own responses, Keepa tokens from its
-            <code className="rounded bg-muted px-1 mx-1">tokensConsumed</code> field, and Synccentric
-            searches from its quota headers. Dollar figures apply only to Kimi, which bills per
-            token; set <code className="rounded bg-muted px-1">KIMI_PRICE_INPUT_PER_M</code> and{" "}
-            <code className="rounded bg-muted px-1">KIMI_PRICE_OUTPUT_PER_M</code> from the billing
-            page to make them exact. Keepa and Synccentric are quota plans, so their spend is shown
-            in units rather than invented dollars.
+            Every count here is measured, never inferred: tokens come from Kimi&apos;s own responses,
+            Keepa tokens from its <code className="rounded bg-muted px-1 mx-1">tokensConsumed</code>{" "}
+            field, and Synccentric searches from its quota headers.{" "}
+            {data.actualSpendUsd != null ? (
+              <>
+                Kimi&apos;s cost is the <strong>actual drop in the account balance</strong> across{" "}
+                {data.balanceReadings} readings in this window — the provider&apos;s own arithmetic,
+                so no price list is involved and cached tokens are already accounted for. Top-ups
+                are ignored rather than netted off, so a recharge cannot hide the spend around it.
+              </>
+            ) : (
+              <>
+                Kimi&apos;s cost is <strong>estimated</strong> from tokens until two balance readings
+                exist in this window; it becomes exact on its own once they do, with no configuration
+                needed.
+              </>
+            )}{" "}
+            Keepa and Synccentric are quota plans, so their spend is shown in units rather than
+            invented dollars.
           </p>
         </>
       )}

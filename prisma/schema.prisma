@@ -367,3 +367,30 @@ model ProductAttribute {
   @@unique([productId, attribute])
   @@index([productId])
 }
+
+// ── Balance snapshots ─────────────────────────────────────────────────────────
+
+/// Point-in-time reading of a provider's remaining balance.
+///
+/// Token counts times a configured rate can only ever ESTIMATE spend: the rate
+/// has to be kept in step with the provider's pricing page by hand, and cached
+/// input tokens bill at a different rate from fresh ones, which no token total
+/// distinguishes. The balance is the provider's own arithmetic and needs no
+/// rate at all — the drop between two readings IS the money spent.
+///
+/// Snapshots are taken whenever the balance is fetched (the sidebar widget, the
+/// pre-flight availability check), throttled so a busy screen cannot fill the
+/// table. Spend for a window is the sum of the DECREASES between consecutive
+/// readings; increases are top-ups and are ignored rather than netted off, so a
+/// recharge mid-window cannot hide the spend around it.
+model BalanceSnapshot {
+  id      String @id @default(cuid())
+  /// kimi — the only provider that reports a money balance; Keepa and
+  /// Synccentric report quotas, which the usage table already measures exactly.
+  service String
+  /// Cents, to keep the arithmetic exact. Negative when the account is overdrawn.
+  balanceCents Int
+  capturedAt   DateTime @default(now())
+
+  @@index([service, capturedAt])
+}

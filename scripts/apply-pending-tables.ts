@@ -91,6 +91,20 @@ const TABLES: { name: string; statements: string[] }[] = [
        END $$`,
     ],
   },
+  {
+    name: "BalanceSnapshot",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "BalanceSnapshot" (
+         "id" TEXT NOT NULL,
+         "service" TEXT NOT NULL,
+         "balanceCents" INTEGER NOT NULL,
+         "capturedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "BalanceSnapshot_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "BalanceSnapshot_service_capturedAt_idx"
+         ON "BalanceSnapshot"("service", "capturedAt")`,
+    ],
+  },
 ];
 
 (async () => {

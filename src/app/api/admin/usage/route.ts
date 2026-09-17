@@ -3,6 +3,7 @@ import { adminGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { flushUsage } from "@/lib/ai/usage-log";
 import { estimateCost } from "@/lib/ai/usage-pricing";
+import { spentCents, spentByDay } from "@/lib/ai/balance-history";
 
 export const dynamic = "force-dynamic";
 
@@ -146,6 +147,21 @@ export async function GET(req: NextRequest) {
       group by 1 order by count(*) desc`,
   ]);
 
+  // Spend measured from the provider's own balance: exact, and independent of
+  // any configured rate. Token totals times a price can only estimate, because
+  // cached input tokens bill differently and no total says which were cached.
+  const snapshots = await prisma.balanceSnapshot
+    .findMany({
+      where: { service: "kimi", capturedAt: { gte: since } },
+      select: { balanceCents: true, capturedAt: true },
+      orderBy: { capturedAt: "asc" },
+    })
+    .catch(() => [] as { balanceCents: number; capturedAt: Date }[]);
+  const actualSpendUsd = spentCents(snapshots) / 100;
+  const actualByDay = Object.fromEntries(
+    [...spentByDay(snapshots)].map(([day, cents]) => [day, cents / 100]),
+  );
+
   // BigInt does not survive JSON.stringify.
   const n = (v: bigint | null | undefined) => Number(v ?? 0);
   const cost = (service: string, model: string | null, input: number, output: number) =>
@@ -174,6 +190,10 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     days,
     since: since.toISOString(),
+    /** Exact, from the balance itself. Null when too few readings exist yet. */
+    actualSpendUsd: snapshots.length >= 2 ? actualSpendUsd : null,
+    actualByDay,
+    balanceReadings: snapshots.length,
     byDay: byDay.map(shape),
     byService: byService.map(shape),
     byFeature: byFeature.map(shape),

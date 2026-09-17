@@ -2,6 +2,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { wrapLanguageModel } from "ai";
 import { recordUsageRow } from "./usage-log";
 import { currentAiContext } from "./usage-context";
+import { snapshotBalance } from "./balance-history";
 
 /**
  * Moonshot AI (Kimi) — the single provider for every AI feature.
@@ -221,11 +222,39 @@ export function getMoonshotUsage(): MoonshotUsage {
   return usage;
 }
 
-function recordUsage(modelId: string, u: unknown, durationMs?: number, ok = true): void {
+/**
+ * Token counts out of a provider usage object, whatever shape it arrives in.
+ *
+ * The AI SDK changed this under us: LanguageModelV3Usage reports
+ * `inputTokens: { total, noCache, cacheRead, cacheWrite }` — an OBJECT — where
+ * earlier versions reported a number. Reading it with Number() yields NaN, which
+ * `|| 0` then turned into a clean, plausible zero. Every call in the app
+ * therefore recorded 0 tokens and $0.00, on the admin report and in the
+ * instance counters alike, with no error anywhere to notice.
+ *
+ * All three shapes are accepted now: the nested v3 object, the flat number, and
+ * the provider's own snake_case `raw` (Moonshot returns prompt_tokens /
+ * completion_tokens), so a future change in either direction cannot silently
+ * zero the figures again.
+ */
+export function usageTokens(u: unknown): { input: number; output: number } {
   const raw = (u ?? {}) as Record<string, unknown>;
-  // v5+ names first, legacy names as fallback.
-  const inp = Number(raw.inputTokens ?? raw.promptTokens ?? 0) || 0;
-  const out = Number(raw.outputTokens ?? raw.completionTokens ?? 0) || 0;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+  const total = (v: unknown): number => {
+    if (typeof v === "number") return num(v);
+    if (v && typeof v === "object") return num((v as { total?: unknown }).total);
+    return 0;
+  };
+  const provider = (raw.raw ?? {}) as Record<string, unknown>;
+  const input =
+    total(raw.inputTokens) || total(raw.promptTokens) || num(provider.prompt_tokens);
+  const output =
+    total(raw.outputTokens) || total(raw.completionTokens) || num(provider.completion_tokens);
+  return { input, output };
+}
+
+function recordUsage(modelId: string, u: unknown, durationMs?: number, ok = true): void {
+  const { input: inp, output: out } = usageTokens(u);
   // The in-memory counters below are per serverless instance and vanish with it;
   // this row is the durable copy, attributed to whatever feature is running.
   recordUsageRow({
@@ -316,6 +345,11 @@ export async function fetchMoonshotBalance(): Promise<MoonshotBalance | null> {
       voucherBalance: num(json.data?.voucher_balance),
       timestamp: Date.now(),
     };
+    // Keep the reading. Spend measured as the drop between two readings needs no
+    // price list and is the provider's own arithmetic, so it is exact where
+    // tokens × a configured rate can only approximate — cached input tokens bill
+    // differently and no token total says which were cached.
+    void snapshotBalance(lastBalance.availableBalance);
     return lastBalance;
   } catch {
     return lastBalance;
