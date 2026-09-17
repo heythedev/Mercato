@@ -30,6 +30,7 @@ type Product = Pick<
 >;
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
+import { loadExportDefaults, defaultFor, type ExportDefaults } from "./defaults";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
 import { toDecimalDimension } from "./dimensions";
 import { matchDropdownValues, dropdownKey, fillDropdownValues, fillFreeTextValues, neverInventColumn, type DropdownQuery, type DropdownFillQuery, type FreeTextFillQuery } from "../ai/match-dropdown";
@@ -299,6 +300,18 @@ export async function generateCategoryZip(
   defaultTemplateId?: string,
 ): Promise<{ zip: Buffer; missingTemplateCategories: string[]; complianceIssues: ComplianceIssue[] }> {
   console.log(`[export] generateCategoryZip called: ${products.length} products, ${templates.length} templates, marketplace=${marketplace}`);
+
+  // Admin-set values for required columns nothing else can answer (compliance
+  // declarations and the like). Loaded once per export, never per row, and
+  // applied only where a REQUIRED cell would otherwise ship empty.
+  const exportDefaults = await loadExportDefaults(marketplace).catch((e) => {
+    // A missing table or a database blip must not cost the client their ZIP.
+    console.warn("[export] could not load export defaults:", (e as Error).message);
+    return new Map<string, string>() as ExportDefaults;
+  });
+  if (exportDefaults.size) {
+    console.log(`[export] ${exportDefaults.size} admin default(s) available for ${marketplace}`);
+  }
 
   // ── Real catalog data for the mandatory cells the sheet cannot supply ──────
   // Mathis marks UPC and the DIMH/DIMW/DIMD/weight block REQUIRED and a vendor
@@ -612,7 +625,7 @@ export async function generateCategoryZip(
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
       const fileIssues: ComplianceIssue[] = [];
-      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues);
+      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults);
       zipOut.file(`${fileName}.xlsx`, buffer);
       for (const issue of fileIssues) complianceRows.push({ ...issue, file: `${fileName}.xlsx` });
     } else {
@@ -949,7 +962,7 @@ export async function generateSingleTemplateExport(
     zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns));
   } else if (fileData) {
     // Preserve original template formatting, dropdowns, validations
-    const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace);
+    const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace, undefined, await loadExportDefaults(marketplace).catch(() => new Map()));
     zip.file(`${fileName}.xlsx`, buffer);
   } else {
     const buffer = await createXlsxFromScratch(withCategoryFallback, columns, template.name);
@@ -981,7 +994,7 @@ export async function generateExportZip(
     if (template.fileFormat === "csv") {
       zip.file(`${fileName}.csv`, generateCsv(filtered, columns));
     } else if (fileData) {
-      const buffer = await fillTemplateXlsx(filtered, columns, fileData, marketplace);
+      const buffer = await fillTemplateXlsx(filtered, columns, fileData, marketplace, undefined, await loadExportDefaults(marketplace).catch(() => new Map()));
       zip.file(`${fileName}.xlsx`, buffer);
     } else {
       const buffer = await createXlsxFromScratch(filtered, columns, template.name);
@@ -1039,6 +1052,8 @@ async function fillTemplateXlsx(
   fileData: Buffer,
   marketplace = "",
   compliance?: ComplianceIssue[],
+  /** Admin-set values for required columns no data source can answer. */
+  exportDefaults: ExportDefaults = new Map(),
 ): Promise<Buffer> {
   console.log(`[export] fillTemplateXlsx called: ${products.length} products, fileData=${fileData?.length ?? 0} bytes, marketplace=${marketplace}`);
   const tplZip = await JSZip.loadAsync(fileData);
@@ -1800,6 +1815,20 @@ async function fillTemplateXlsx(
     if (is("color", "colour")) {
       return colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
     }
+    // An admin-set value comes next: below derivations from the product's own
+    // data (which are specific to the row), above the built-in constants (which
+    // are assumptions about the seller that an admin may have overridden).
+    // Compliance declarations live here — the seller states them, no source
+    // holds them, and a model must not invent them.
+    const fromDefaults = defaultFor(
+      exportDefaults,
+      String(col.key ?? ""),
+      codeByLetter.get(letter) ?? "",
+      colLetterToHeader.get(letter) ?? "",
+      String(col.label ?? ""),
+    );
+    if (fromDefaults) return fromDefaults;
+
     if (is("mpmadeinusa", "madeinusa")) return "No";
     if (is("prop65")) return "No";
     if (is("structassembly", "assemblyrequired")) {

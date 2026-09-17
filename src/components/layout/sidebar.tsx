@@ -7,6 +7,7 @@ import {
   Users,
   FileText,
   Activity,
+  SlidersHorizontal,
   ChevronsLeft,
   ChevronsRight,
   X,
@@ -32,6 +33,7 @@ const adminNav = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/templates", label: "Templates", icon: FileText },
+  { href: "/admin/export-defaults", label: "Export defaults", icon: SlidersHorizontal },
   { href: "/admin/usage", label: "Usage & credits", icon: Activity },
 ];
 

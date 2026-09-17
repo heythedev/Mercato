@@ -295,3 +295,36 @@ model ServiceUsage {
   @@index([feature, createdAt])
   @@index([projectId])
 }
+
+// ── Export defaults ───────────────────────────────────────────────────────────
+
+/// Admin-set values for required export columns that no data source can answer.
+///
+/// Some mandatory columns are policy, not product data: California Proposition
+/// 65 warning type and the PFAS declaration are legal statements about how the
+/// seller trades, identical on every row, and neither the vendor file, the
+/// marketplace catalog nor a model may invent them. Measured on the live Best
+/// Buy project they were 64 of 462 empty required cells — the single largest
+/// group after feature bullets.
+///
+/// Held per marketplace and per attribute, keyed on the NORMALIZED column key so
+/// one entry answers a column whether the template names it by label
+/// ("California Proposition 65 Warning: Type") or by Mirakl code
+/// ("californiaProposition65Warning.type").
+///
+/// A default never overwrites real data: it applies only where the column is
+/// REQUIRED for that row's category and nothing else filled it.
+model ExportDefault {
+  id          String   @id @default(cuid())
+  marketplace String
+  /// normalizeKey() of the column's label or attribute code.
+  attribute String
+  /// Human label, for the admin screen only.
+  label String?
+  value String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@unique([marketplace, attribute])
+  @@index([marketplace])
+}
