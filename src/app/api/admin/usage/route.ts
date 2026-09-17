@@ -31,6 +31,30 @@ export async function GET(req: NextRequest) {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const format = params.get("format");
 
+  // The table is created by scripts/apply-service-usage-table.ts, not by
+  // `prisma migrate deploy` — this database sits behind a transaction pooler the
+  // migration engine cannot drive. So a deploy can legitimately land before the
+  // table exists, and when it did, this route answered a bare HTTP 500 that told
+  // the admin nothing. Report the real state instead, with the command that
+  // fixes it, for both the report and the download.
+  const [{ n: tableCount }] = await prisma.$queryRaw<{ n: bigint }[]>`
+    select count(*) as n from information_schema.tables where table_name = 'ServiceUsage'`;
+  if (Number(tableCount) === 0) {
+    const setupCommand = "pnpm exec tsx scripts/apply-service-usage-table.ts";
+    if (format === "csv") {
+      return new NextResponse(`# usage recording is not set up yet — run: ${setupCommand}\n`, {
+        headers: { "Content-Type": "text/csv; charset=utf-8" },
+      });
+    }
+    return NextResponse.json({
+      days,
+      since: since.toISOString(),
+      setupRequired: true,
+      setupCommand,
+      byDay: [], byService: [], byFeature: [], byProject: [], byModel: [],
+    });
+  }
+
   if (format === "csv") {
     const rows = await prisma.serviceUsage.findMany({
       where: { createdAt: { gte: since } },

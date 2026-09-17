@@ -14,6 +14,9 @@ type Row = {
 };
 type Report = {
   days: number;
+  /** Set when the recording table has not been created yet — see the API route. */
+  setupRequired?: boolean;
+  setupCommand?: string;
   byDay: (Row & { day: string; service: string })[];
   byService: (Row & { service: string })[];
   byFeature: (Row & { service: string; feature: string })[];
@@ -146,7 +149,21 @@ export function AdminUsageClient() {
         <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       )}
 
-      {empty && (
+      {data?.setupRequired && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+          <p className="font-medium">Usage recording is not set up yet.</p>
+          <p className="mt-1">
+            The code is deployed, but its table has not been created. This database sits behind a
+            connection pooler that Prisma&apos;s migration engine cannot drive, so the table is
+            created by a script instead. Run this once, from a machine with the project checked out:
+          </p>
+          <code className="mt-2 block rounded bg-amber-100 px-2 py-1 font-mono text-xs">
+            {data.setupCommand}
+          </code>
+        </div>
+      )}
+
+      {empty && !data?.setupRequired && (
         <div className="rounded-lg border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
           No billable calls recorded in this window. Usage is recorded from the moment this feature
           was deployed — spend from before that was never stored and cannot be recovered.
