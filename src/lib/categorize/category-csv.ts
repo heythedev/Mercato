@@ -78,12 +78,30 @@ export function parseCategoryCsv(raw: string): CategoryCsvResult {
     const pt = cell(ptIdx);
     let specProductType: string | null = null;
 
+    const pathCell = cell(pathIdx);
+
     if (hasGroupColumn) {
       const group = cell(groupIdx);
       if (group && !category.includes(" > ")) category = `${category} > ${group}`;
       specProductType = pt || null;
+    } else if (pathCell.includes(" > ") && pt && !pt.includes(" > ")) {
+      // Current format: "Product Type" is the LEAF of the path, and the path
+      // column carries the whole thing. Rebuilding from the path is what keeps
+      // a deep taxonomy lossless — joining Category + Product Type would turn
+      // "Home and Garden > Household Furnishings > Hardware > Floor Tiles" into
+      // "Home and Garden > Floor Tiles" and silently relocate the product.
+      const parts = pathCell.split(" > ").map((s) => s.trim()).filter(Boolean);
+      const leaf = parts[parts.length - 1] ?? "";
+      category =
+        pt === leaf
+          ? pathCell
+          : // The reviewer edited the Product Type cell: keep the path's parent
+            // levels and swap its last one, so the correction applies where they
+            // made it rather than being discarded in favour of the stale path.
+            [...parts.slice(0, -1), pt].join(" > ");
     } else if (pt && !category.includes(" > ")) {
-      // Old format: "Product Type" is the level-2 group.
+      // Older files, where "Product Type" carried everything below level 1
+      // (possibly itself a multi-level path). Joining is still right for those.
       category = `${category} > ${pt}`;
     }
     if (!category) continue;
@@ -92,7 +110,7 @@ export function parseCategoryCsv(raw: string): CategoryCsvResult {
       sku: cell(skuIdx),
       name: cell(nameIdx),
       category,
-      path: cell(pathIdx) || null,
+      path: pathCell || null,
       specProductType,
     });
   }

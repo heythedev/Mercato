@@ -59,3 +59,53 @@ describe("parseCategoryCsv", () => {
     expect(parseCategoryCsv('"SKU","Name"\n"a","b"').error).toBeTruthy();
   });
 });
+
+describe("deep taxonomies: Product Type is the leaf, the path is authoritative", () => {
+  const header = "SKU,Product Name,Brand,Category,Product Type,Category Path,Confidence,Status";
+
+  it("rebuilds the full path rather than joining Category + leaf", () => {
+    // Best Buy's taxonomy is four levels. Joining level 1 to the leaf would file
+    // the product as "Home and Garden > Floor Tiles" — a category that does not
+    // exist — and quietly relocate it.
+    const csv =
+      `${header}\n` +
+      `"ACHI-1","Tiles","Achim","Home and Garden","Floor Tiles",` +
+      `"Home and Garden > Household Furnishings > Hardware > Floor Tiles","High","Done"`;
+    const { rows } = parseCategoryCsv(csv);
+    expect(rows[0]!.category).toBe(
+      "Home and Garden > Household Furnishings > Hardware > Floor Tiles",
+    );
+  });
+
+  it("honours an edited Product Type by swapping the path's last level", () => {
+    // A reviewer correcting the leaf must see their correction applied, not
+    // overwritten by the stale path beside it.
+    const csv =
+      `${header}\n` +
+      `"ACHI-1","Tiles","Achim","Home and Garden","Wall Tiles",` +
+      `"Home and Garden > Household Furnishings > Hardware > Floor Tiles","High","Done"`;
+    const { rows } = parseCategoryCsv(csv);
+    expect(rows[0]!.category).toBe(
+      "Home and Garden > Household Furnishings > Hardware > Wall Tiles",
+    );
+  });
+
+  it("still joins older files whose Product Type held a multi-level path", () => {
+    // Files downloaded before the leaf change carry "Household Furnishings >
+    // Hardware > Floor Tiles" in that column; they must import as they always did.
+    const csv =
+      `${header}\n` +
+      `"ACHI-1","Tiles","Achim","Home and Garden","Household Furnishings > Hardware > Floor Tiles",` +
+      `"","High","Done"`;
+    const { rows } = parseCategoryCsv(csv);
+    expect(rows[0]!.category).toBe(
+      "Home and Garden > Household Furnishings > Hardware > Floor Tiles",
+    );
+  });
+
+  it("leaves a single-level category alone", () => {
+    const csv = `${header}\n"X-1","Thing","B","Uncategorized","","","",""`;
+    const { rows } = parseCategoryCsv(csv);
+    expect(rows[0]!.category).toBe("Uncategorized");
+  });
+});

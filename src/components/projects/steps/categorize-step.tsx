@@ -171,7 +171,15 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
             : cat;
         const sep = full.indexOf(" > ");
         const topCategory = sep === -1 ? full : full.slice(0, sep);
-        const group = sep === -1 ? "" : full.slice(sep + 3);
+        // "Product Type" is the LAST level of the path — the taxonomy's leaf IS
+        // the product type ("… > Decor > Wall Art" → "Wall Art"). It used to
+        // carry everything after level 1, which on Best Buy's four-level
+        // taxonomy meant a reviewer read "Household Furnishings > Hardware >
+        // Floor Tiles" in a column headed Product Type. The full path is still
+        // in its own column, and the importer rebuilds from that, so a reviewer
+        // can correct this cell and the edit still lands on the right level.
+        const levels = full.split(" > ").map((s) => s.trim()).filter(Boolean);
+        const group = levels.length > 1 ? levels[levels.length - 1] : "";
         const conf = p.categoryConfidence;
         const confLabel = conf == null || !cat || cat === "Uncategorized" ? ""
           : conf >= 0.8 ? "High" : conf >= REVIEW_CONFIDENCE ? "Medium" : "Low";
