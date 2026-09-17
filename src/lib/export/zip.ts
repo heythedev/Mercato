@@ -100,6 +100,29 @@ export function colourFromText(text: string): string {
   return "";
 }
 
+/**
+ * The colour inside a vendor's own colour VALUE, which is often a compound with
+ * no separator: "LilacBlack", "EphesusMarble", "PetrolGreen".
+ *
+ * Word-boundary matching cannot see "black" in "LilacBlack", so 23 of 34 rows
+ * on the live Mathis project shipped an empty required Finish Color beside a
+ * filled Color column. Substring matching is safe HERE because the input is
+ * already a colour field — it would not be safe against a product description,
+ * where "tangerine dream lamp" would match "tan". Longest-first, so
+ * "navy blue" still beats "blue".
+ */
+export function colourFromValue(value: string): string {
+  const lo = String(value ?? "").toLowerCase();
+  if (!lo.trim()) return "";
+  const direct = colourFromText(lo);
+  if (direct) return direct;
+  for (const c of FILL_COLOUR_TERMS) {
+    if (c.includes(" ")) continue; // compound terms need real word boundaries
+    if (lo.includes(c)) return c.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+  return "";
+}
+
 /** The colour vocabulary as an option list for AI colour fills — a mandatory
  *  free-text Color cell with no colour word in the title/description is filled
  *  by the model, but constrained to real colour words. */
@@ -1837,8 +1860,20 @@ async function fillTemplateXlsx(
       return (imageLetter ? valueByLetter.get(imageLetter) ?? "" : "") || String(p.imageUrl ?? "");
     }
     if (is("casingfinishcolor", "finishcolor")) {
-      return (colorLetter ? valueByLetter.get(colorLetter) ?? "" : "")
-        || colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
+      const written = colorLetter ? valueByLetter.get(colorLetter) ?? "" : "";
+      const options = dropdowns.get(letter);
+      // Prefer the vendor's own colour, but only if this column will accept it.
+      // A sheet saying "LilacBlack" or "EphesusMarble" carries a usable colour,
+      // yet the raw value is not in the template's list and was dropped — so a
+      // required cell shipped empty right beside a filled Color column. Pulling
+      // the colour word out of that same value fixes it without inventing
+      // anything: the colour came from the vendor either way.
+      if (written && (!options || pickDropdownValue(written, options))) return written;
+      return (
+        colourFromValue(written) ||
+        colourFromValue(String(getProductField(p, "color") ?? "")) ||
+        colourFromText(`${p.name ?? ""} ${p.description ?? ""}`)
+      );
     }
     if (is("color", "colour")) {
       return colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
@@ -2244,7 +2279,22 @@ async function fillTemplateXlsx(
     for (const p of products) {
       const catKey = productCatKey(p);
       if (!catKey) continue;
-      const context = `${p.name ?? ""}${p.brand ? ` (brand: ${p.brand})` : ""}. ${String(p.description ?? "").slice(0, 220)}`.trim();
+      // The vendor's own colour and material belong in the context. Without
+      // them the model was answering a Finish Color column from the product
+      // title alone — "Handmade 3D Canvas Painting … Abstract" produced
+      // "Multicolor", which is not one of that column's 24 finishes, while the
+      // sheet said "LilacBlack" all along and "Black" IS on the list.
+      const vendorColour = String(getProductField(p, "color") ?? "").trim();
+      const vendorMaterial = String(getProductField(p, "material") ?? "").trim();
+      const context = [
+        `${p.name ?? ""}${p.brand ? ` (brand: ${p.brand})` : ""}.`,
+        vendorColour ? `Vendor colour: ${vendorColour}.` : "",
+        vendorMaterial ? `Vendor material: ${vendorMaterial}.` : "",
+        String(p.description ?? "").slice(0, 220),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
       for (const { col, letter } of exportEntries) {
         if (statusesFor(col, letter)?.get(catKey) !== "REQUIRED") continue;
         const nk = fillNormKey(col, letter);
@@ -2270,9 +2320,17 @@ async function fillTemplateXlsx(
         const isColour = COLOUR_KEYS.has(nk) || COLOUR_KEYS.has(nk2);
         if (DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(nk2)) {
           // Deterministic columns reach the AI only when their own rule will
-          // come up empty — a colour column with no colour word in the text.
+          // come up empty — or produce something this column will not accept.
           if (!isColour) continue;
-          if (colourFromText(`${p.name ?? ""} ${p.description ?? ""}`)) continue;
+          const derived = colourFromText(`${p.name ?? ""} ${p.description ?? ""}`);
+          const colOptions = dropdowns.get(letter);
+          // A derived colour that the column rejects is the same as no colour at
+          // all. Skipping the AI on its account left 23 of 34 Mathis rows with an
+          // empty required Finish Color: the vendor said "Multicolor", which is a
+          // colour but not one of this column's wood finishes (Birch, Cherry,
+          // Espresso…), so the deterministic value was dropped and nothing else
+          // was ever asked.
+          if (derived && (!colOptions?.length || pickDropdownValue(derived, colOptions))) continue;
           fillQueries.push({
             key: `${p.id}|${letter}`,
             column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
@@ -2403,24 +2461,40 @@ async function fillTemplateXlsx(
             // then the AI's pick from the column's own dropdown list. Every
             // fill still has to clear the dropdown invariant — an off-list
             // value is worse than an empty cell.
-            let fill = requiredFallback(p, col, letter, valueByLetter);
-            // A value this product already resolved on an earlier run, before
-            // spending anything on it again. This is what lets a catalog too big
-            // to finish in one request converge across runs.
-            if (!fill) {
-              fill = storedAttribute(
-                storedAttrs.get(p.id),
-                String(col.key ?? ""),
-                codeByLetter.get(letter) ?? "",
-                colLetterToHeader.get(letter) ?? "",
-              );
-              if (fill) reusedStoredCells++;
+            // Candidates in order of trust — deterministic derivation, then a
+            // value this product resolved on an earlier run, then the AI's pick.
+            // Each is tested against the column's own dropdown and the first one
+            // that SURVIVES wins. Taking the first non-empty candidate instead
+            // let a rejected value pre-empt an acceptable one: the vendor's
+            // "Multicolor" satisfied the "do we have something?" test, was then
+            // dropped for not being one of this column's wood finishes, and the
+            // AI's valid answer was never consulted — 23 of 34 Mathis rows.
+            const options = dropdowns.get(letter);
+            const stored = storedAttribute(
+              storedAttrs.get(p.id),
+              String(col.key ?? ""),
+              codeByLetter.get(letter) ?? "",
+              colLetterToHeader.get(letter) ?? "",
+            );
+            const candidates: { value: string; kind: "fallback" | "stored" | "ai" }[] = [
+              { value: requiredFallback(p, col, letter, valueByLetter), kind: "fallback" },
+              { value: stored, kind: "stored" },
+              { value: aiFill.get(`${p.id}|${letter}`) ?? "", kind: "ai" },
+            ];
+            let final = "";
+            let usedKind: "fallback" | "stored" | "ai" | null = null;
+            for (const c of candidates) {
+              if (!c.value) continue;
+              const accepted = options ? (pickDropdownValue(c.value, options) ?? "") : c.value;
+              if (accepted) {
+                final = accepted;
+                usedKind = c.kind;
+                break;
+              }
             }
-            if (!fill) fill = aiFill.get(`${p.id}|${letter}`) ?? "";
-            if (fill) {
-              const options = dropdowns.get(letter);
-              const final = options ? (pickDropdownValue(fill, options) ?? "") : fill;
-              if (final) {
+            if (final) {
+              if (usedKind === "stored") reusedStoredCells++;
+              {
                 valueByLetter.set(letter, final);
                 filledRequiredCells++;
                 // Remember it under the column's stable identity (the attribute
@@ -2432,7 +2506,7 @@ async function fillTemplateXlsx(
                     productId: p.id,
                     attribute: attrName,
                     value: final,
-                    source: aiFill.has(`${p.id}|${letter}`) ? "ai" : "catalog",
+                    source: usedKind === "ai" ? "ai" : "catalog",
                   });
                 }
                 continue;
@@ -3301,6 +3375,28 @@ function getProductField(p: Product, key: string): unknown {
     width: fromVendor("width", "item_width") ?? "",
     height: fromVendor("height", "item_height", "depth") ?? "",
     weight: fromVendor("weight", "item_weight", "unit_weight") ?? "",
+
+    // Mirakl dimension CODES. A Mathis template keys these columns by code
+    // (row 2: DIMH, DIMW, DIMD, DIM_WEIGHT) while the vendor sheet spells them
+    // out (Height, Width, Length, Weight), and nothing joined the two — so
+    // "Height Dimension (Bottom to Top)" shipped empty on rows whose vendor
+    // file carried the height all along. Measured on the live Mathis project:
+    // 79 of 129 remaining required cells were these three columns.
+    //
+    // DEPTH falls back to the vendor's LENGTH: a furniture sheet quotes a box
+    // as width x height x length, and front-to-back depth is that length.
+    dimh: fromVendor("height", "item_height", "dimh") ?? "",
+    dimw: fromVendor("width", "item_width", "dimw") ?? "",
+    dimd: fromVendor("depth", "item_depth", "length", "item_length", "dimd") ?? "",
+    dim_weight: fromVendor("weight", "item_weight", "shipping_weight", "dim_weight") ?? "",
+    // Multi-piece sets: the sheet numbers the extra pieces ("Width 2",
+    // "Height 3") and the template matches with _2 / _3 suffixes.
+    dimh_2: fromVendor("height 2", "height2") ?? "",
+    dimw_2: fromVendor("width 2", "width2") ?? "",
+    dimd_2: fromVendor("depth 2", "depth2", "length 2", "length2") ?? "",
+    dimh_3: fromVendor("height 3", "height3") ?? "",
+    dimw_3: fromVendor("width 3", "width3") ?? "",
+    dimd_3: fromVendor("depth 3", "depth3", "length 3", "length3") ?? "",
 
     // Product-page URL — Walmart "product link"/URL columns must be the listing
     // page (https://www.walmart.com/ip/...), NOT the image URL.

@@ -315,8 +315,24 @@ No other text.`,
           const ask = batch[idx];
           if (!ask || !picked) continue;
           // Only accept a verbatim option (case-insensitive compare, canonical casing stored).
-          const exact = ask.q.options.find((o) => o.toLowerCase() === picked.toLowerCase());
-          if (exact) for (const key of ask.keys) out.set(key, exact);
+          const lo = picked.toLowerCase();
+          const exact = ask.q.options.find((o) => o.toLowerCase() === lo);
+          // A near miss is still the model's own choice expressed loosely —
+          // "Dark Brown" where the list offers "Brown", "Espresso Finish" for
+          // "Espresso". Accept it only when exactly ONE option is contained in
+          // the answer (or contains it), so an ambiguous reply is still refused
+          // and a value that matches nothing — "Multicolor" against a list of
+          // wood finishes — stays empty rather than being forced.
+          const near =
+            exact ??
+            (() => {
+              const hits = ask.q.options.filter((o) => {
+                const ol = o.toLowerCase();
+                return ol.length > 2 && (lo.includes(ol) || ol.includes(lo));
+              });
+              return hits.length === 1 ? hits[0] : undefined;
+            })();
+          if (near) for (const key of ask.keys) out.set(key, near);
         }
         return;
       } catch (err) {
