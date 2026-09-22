@@ -67,7 +67,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
               <div
                 className={cn(
                   "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                  state.variant === "default" ? "bg-muted text-foreground" : "bg-red-100 text-red-600"
+                  state.variant === "default" ? "bg-muted text-foreground" : "bg-red-100 text-red-600 dark:bg-red-950/50 dark:text-red-400"
                 )}
               >
                 <AlertTriangle className="h-4.5 w-4.5" />

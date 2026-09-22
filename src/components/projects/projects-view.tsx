@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { formatDateTime, formatDayMonth } from "@/lib/format-date";
 import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
 import { toTileId } from "@/lib/marketplaces/catalog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
@@ -40,15 +41,46 @@ type FilterOption = {
   logoDomain?: string;
 };
 
+/**
+ * Colour says WHAT STATE the project is in; the label says which step it is on.
+ *
+ * It used to say which step — blue upload, yellow verify, purple categorize,
+ * orange export — which meant the palette carried information the label already
+ * gave, and none of the information a glance actually wants. Worse, running and
+ * finished shared a colour ("Categorizing" and "Categorized" were both purple),
+ * so a board of cards could not be scanned for "what is still moving?", and
+ * "Verified" green and "Done" emerald were two greens for two different things.
+ *
+ * Four states, four meanings, applied everywhere:
+ *   waiting   — idle, needs a human to start the next step
+ *   running   — work in flight (always paired with the spinner)
+ *   staged    — a step finished, more remain
+ *   done      — the whole pipeline finished
+ */
+const STATUS_STATE = {
+  waiting: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  running: "bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300",
+  staged:  "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300",
+  done:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300",
+} as const;
+
+/** The pipeline step each status belongs to, for the progress bar's label. */
+const STATUS_STEP: Record<string, { step: number; name: string }> = {
+  uploading: { step: 1, name: "Upload" },    uploaded:    { step: 1, name: "Upload" },
+  verifying: { step: 2, name: "Verify" },    verified:    { step: 2, name: "Verify" },
+  categorizing: { step: 3, name: "Categorize" }, categorized: { step: 3, name: "Categorize" },
+  exporting: { step: 4, name: "Export" },    done:        { step: 4, name: "Export" },
+};
+
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: React.ElementType }> = {
-  uploading:   { label: "Uploading",   color: "bg-blue-100 text-blue-700",    icon: Loader2 },
-  uploaded:    { label: "Uploaded",    color: "bg-blue-100 text-blue-700",    icon: Clock },
-  verifying:   { label: "Verifying",   color: "bg-yellow-100 text-yellow-700", icon: Loader2 },
-  verified:    { label: "Verified",    color: "bg-green-100 text-green-700",   icon: CheckCircle2 },
-  categorizing:{ label: "Categorizing",color: "bg-purple-100 text-purple-700", icon: Loader2 },
-  categorized: { label: "Categorized", color: "bg-purple-100 text-purple-700", icon: CheckCircle2 },
-  exporting:   { label: "Exporting",   color: "bg-orange-100 text-orange-700", icon: Loader2 },
-  done:        { label: "Done",        color: "bg-emerald-100 text-emerald-700",icon: CheckCircle2 },
+  uploading:   { label: "Uploading",   color: STATUS_STATE.running, icon: Loader2 },
+  uploaded:    { label: "Uploaded",    color: STATUS_STATE.waiting, icon: Clock },
+  verifying:   { label: "Verifying",   color: STATUS_STATE.running, icon: Loader2 },
+  verified:    { label: "Verified",    color: STATUS_STATE.staged,  icon: CheckCircle2 },
+  categorizing:{ label: "Categorizing",color: STATUS_STATE.running, icon: Loader2 },
+  categorized: { label: "Categorized", color: STATUS_STATE.staged,  icon: CheckCircle2 },
+  exporting:   { label: "Exporting",   color: STATUS_STATE.running, icon: Loader2 },
+  done:        { label: "Done",        color: STATUS_STATE.done,    icon: CheckCircle2 },
 };
 
 const STATUS_OPTIONS: FilterOption[] = Object.entries(STATUS_CONFIG).map(([value, { label }]) => ({ value, label }));
@@ -227,8 +259,10 @@ function presetRange(days: number): { from: string; to: string } {
 }
 
 function formatDateLabel(from: string, to: string): string {
-  const fmt = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return from === to ? fmt(from) : `${fmt(from)} – ${fmt(to)}`;
+  // formatDayMonth reads the YYYY-MM-DD digits directly: an undefined locale
+  // rendered differently on the server than in the browser, and parsing the
+  // string through Date shifted the day in any timezone west of UTC.
+  return from === to ? formatDayMonth(from) : `${formatDayMonth(from)} – ${formatDayMonth(to)}`;
 }
 
 function DateRangeFilter({
@@ -813,7 +847,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
                         className={cn(
                           "shrink-0 flex items-center justify-center overflow-hidden rounded-lg text-gray-500",
                           "border border-gray-200 bg-white shadow-sm",
-                          "hover:border-red-300 hover:bg-red-50 hover:text-red-600 hover:shadow-none",
+                          "hover:border-red-300 hover:bg-red-50 dark:bg-red-950/30 hover:text-red-600 dark:hover:text-red-400 hover:shadow-none",
                           "transition-[width,opacity,margin] duration-200 ease-out",
                           // Collapsed by default; expands on card hover. -ml-2
                           // cancels the flex gap so there's truly zero footprint
@@ -837,24 +871,39 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
                     </span>
                     <span className="flex items-center gap-1">
                       <Clock className="w-3.5 h-3.5" />
-                      {new Date(p.updatedAt).toLocaleString("en-IN", {
-                        year: "numeric",
-                        month: "numeric",
-                        day: "numeric",
-                        hour: "numeric",
-                        minute: "2-digit",
-                        hour12: true,
-                        timeZone: "Asia/Kolkata",
-                      })}
+                      {formatDateTime(p.updatedAt)}
                     </span>
                   </div>
 
-                  <div className="w-full bg-muted rounded-full h-1">
-                    <div
-                      className="bg-primary h-1 rounded-full transition-all"
-                      style={{ width: `${PROGRESS[displayStatus] ?? 0}%` }}
-                    />
-                  </div>
+                  {/* A bare bar told you a proportion of nothing nameable.
+                      The step it belongs to is the thing worth reading. */}
+                  {(() => {
+                    const step = STATUS_STEP[displayStatus];
+                    const pct = PROGRESS[displayStatus] ?? 0;
+                    return (
+                      <div className="w-full">
+                        <div className="mb-1 flex items-baseline justify-between gap-2 text-[10px] text-muted-foreground">
+                          <span className="truncate">{step ? step.name : "Not started"}</span>
+                          <span className="shrink-0 tabular-nums">
+                            {step ? `Step ${step.step} of 4` : ""}
+                          </span>
+                        </div>
+                        <div
+                          className="w-full bg-muted rounded-full h-1"
+                          role="progressbar"
+                          aria-valuenow={pct}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-label={step ? `${step.name}, step ${step.step} of 4` : "Not started"}
+                        >
+                          <div
+                            className="bg-primary h-1 rounded-full transition-all"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </Link>
               </div>
             );

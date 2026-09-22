@@ -830,7 +830,7 @@ export function ProjectDetail({ project: initial, productCount }: {
             <button
               onClick={handleDelete}
               title="Delete project"
-              className="ml-2 w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-red-50 hover:text-red-600 hover:border hover:border-red-200 transition-all"
+              className="ml-2 w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-red-50 dark:bg-red-950/30 hover:text-red-600 dark:hover:text-red-400 hover:border hover:border-red-200 dark:hover:border-red-900 transition-all"
             >
               <Trash2 className="w-4 h-4" />
             </button>

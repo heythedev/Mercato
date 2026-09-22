@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAnyAdmin } from "@/lib/auth-helpers";
 import { AdminUsageClient } from "@/components/admin/usage-client";
 
 /**
@@ -12,14 +12,15 @@ import { AdminUsageClient } from "@/components/admin/usage-client";
  * the raw call list as a CSV download.
  */
 export default async function AdminUsagePage() {
-  await requireAdmin();
+  await requireAnyAdmin();
 
   return (
     <div className="mx-auto max-w-6xl px-8 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Usage &amp; credits</h1>
         <p className="text-muted-foreground text-sm mt-1">
-          What Kimi, Keepa and Synccentric credits were spent on — by day, service, feature and project
+          Where the money goes. Mercato pays three outside services to do its work — this is what
+          each one cost, what triggered it, and whether it can still run.
         </p>
       </div>
       <AdminUsageClient />

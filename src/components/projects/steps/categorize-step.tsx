@@ -491,7 +491,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                 const lowConfidence = !isUncategorized && !!p.marketplaceCategory &&
                   p.categoryConfidence != null && p.categoryConfidence < REVIEW_CONFIDENCE;
                 return (
-                  <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50" : lowConfidence ? "bg-amber-50/60 hover:bg-amber-50" : "hover:bg-muted/30"}`}>
+                  <tr key={p.id} className={`transition-colors ${isUncategorized ? "bg-orange-50/60 hover:bg-orange-50 dark:bg-orange-950/20 dark:hover:bg-orange-950/30" : lowConfidence ? "bg-amber-50/60 hover:bg-amber-50 dark:bg-amber-950/20 dark:hover:bg-amber-950/30" : "hover:bg-muted/30"}`}>
                     <td className="px-4 py-3">
                       <p className="font-medium line-clamp-1">{p.name}</p>
                       {p.brand && <p className="text-xs text-muted-foreground">{p.brand}</p>}
@@ -522,7 +522,7 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                     <td className="px-4 py-3 text-center">
                       {isUncategorized ? (
                         <span
-                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700"
+                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-950/50 dark:text-orange-300"
                           title={isUnidentified
                             ? "The file gives only a vendor code for this product — no name, description or barcode — and nothing could identify it. Needs a file with product names."
                             : undefined}
@@ -532,14 +532,14 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
                         </span>
                       ) : lowConfidence ? (
                         <span
-                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700"
+                          className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"
                           title={`AI confidence ${Math.round((p.categoryConfidence ?? 0) * 100)}% — the model was unsure between plausible categories; verify this one before exporting`}
                         >
                           <AlertTriangle className="w-3 h-3" />
                           Review
                         </span>
                       ) : p.marketplaceCategory ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700">
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300">
                           <CheckCircle2 className="w-3 h-3" />
                           Done
                         </span>

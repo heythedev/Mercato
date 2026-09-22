@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Search, ShieldCheck, Tag, Loader2, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { verdictStyle } from "@/components/projects/verdict";
 
 type Product = {
   id: string;
@@ -12,14 +13,6 @@ type Product = {
   asin: string | null;
   brand: string | null;
   verifyStatus: string | null;
-};
-
-const STATUS_BADGE: Record<string, string> = {
-  ok: "bg-green-100 text-green-700",
-  warning: "bg-yellow-100 text-yellow-700",
-  mismatch: "bg-red-100 text-red-700",
-  not_found: "bg-gray-100 text-gray-600",
-  discontinued: "bg-purple-100 text-purple-700",
 };
 
 // Rendered-row cap: searching/filtering still runs over the whole catalog,
@@ -112,8 +105,15 @@ export function ProductsTable({ products, onNext, onRunVerify, loading, projectS
                 <td className="px-4 py-3 text-muted-foreground">{p.brand ?? "—"}</td>
                 <td className="px-4 py-3 text-center">
                   {p.verifyStatus ? (
-                    <span className={cn("text-xs font-medium px-2 py-0.5 rounded-full", STATUS_BADGE[p.verifyStatus] ?? "bg-muted text-muted-foreground")}>
-                      {p.verifyStatus}
+                    <span
+                      className={cn(
+                        "text-xs font-medium px-2 py-0.5 rounded-full",
+                        verdictStyle(p.verifyStatus).badge,
+                      )}
+                    >
+                      {/* The stored value is a slug — "not_found" is not a word
+                          anyone wants to read in a product table. */}
+                      {verdictStyle(p.verifyStatus).label}
                     </span>
                   ) : (
                     // Not a verdict about the product — this row simply hasn't

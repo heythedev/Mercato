@@ -110,7 +110,7 @@ export function NewProjectForm({ allowedTiles }: { allowedTiles: string[] }) {
           className={cn(
             "relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed p-10 cursor-pointer transition-colors",
             dragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-accent/50",
-            file && "border-green-500 bg-green-50"
+            file && "border-green-500 bg-green-50 dark:bg-green-950/20"
           )}
         >
           <input

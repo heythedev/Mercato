@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminGuard } from "@/lib/auth-helpers";
+import { anyAdminGuard } from "@/lib/auth-helpers";
+import { actorOf, isAdmin } from "@/lib/authz";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { flushUsage } from "@/lib/ai/usage-log";
 import { estimateCost } from "@/lib/ai/usage-pricing";
@@ -20,8 +22,20 @@ export const dynamic = "force-dynamic";
  * zero, which is exactly when it is needed.
  */
 export async function GET(req: NextRequest) {
-  const { response } = await adminGuard();
+  const { user, response } = await anyAdminGuard();
   if (response) return response;
+  const actor = actorOf(user);
+
+  // ServiceUsage records the project a call was made for, not the team, so a
+  // team's spend is "every call against a project this team owns". Rows with no
+  // project — a balance probe, a one-off script — cannot be attributed to a
+  // team and are therefore left out of a team admin's figures rather than
+  // guessed at.
+  const teamOnly = !isAdmin(actor);
+  const scope = (alias: string) =>
+    teamOnly
+      ? Prisma.sql` and ${Prisma.raw(alias)}"projectId" in (select id from "Project" where "teamId" = ${actor.teamId})`
+      : Prisma.empty;
 
   // Rows buffered by this instance would otherwise be missing from a report run
   // moments after a job finished.
@@ -57,8 +71,19 @@ export async function GET(req: NextRequest) {
   }
 
   if (format === "csv") {
+    const projectIds = teamOnly
+      ? (
+          await prisma.project.findMany({
+            where: { teamId: actor.teamId },
+            select: { id: true },
+          })
+        ).map((p) => p.id)
+      : null;
     const rows = await prisma.serviceUsage.findMany({
-      where: { createdAt: { gte: since } },
+      where: {
+        createdAt: { gte: since },
+        ...(projectIds ? { projectId: { in: projectIds } } : {}),
+      },
       orderBy: { createdAt: "desc" },
       // A full sweep can be tens of thousands of calls a day; cap the download so
       // an admin cannot accidentally ask the server to materialise a year.
@@ -117,21 +142,21 @@ export async function GET(req: NextRequest) {
       select to_char("createdAt" at time zone 'Asia/Kolkata', 'YYYY-MM-DD') as day, service,
              count(*) as calls, sum("inputTokens") as input, sum("outputTokens") as output,
              sum(units) as units, count(*) filter (where not ok) as failed
-      from "ServiceUsage" where "createdAt" >= ${since}
+      from "ServiceUsage" where "createdAt" >= ${since}${scope("")}
       group by 1, 2 order by 1 desc, 2`,
     prisma.$queryRaw<
       { service: string; calls: bigint; input: bigint; output: bigint; units: bigint; failed: bigint }[]
     >`
       select service, count(*) as calls, sum("inputTokens") as input, sum("outputTokens") as output,
              sum(units) as units, count(*) filter (where not ok) as failed
-      from "ServiceUsage" where "createdAt" >= ${since}
+      from "ServiceUsage" where "createdAt" >= ${since}${scope("")}
       group by 1 order by count(*) desc`,
     prisma.$queryRaw<
       { service: string; feature: string; calls: bigint; input: bigint; output: bigint; units: bigint }[]
     >`
       select service, feature, count(*) as calls, sum("inputTokens") as input,
              sum("outputTokens") as output, sum(units) as units
-      from "ServiceUsage" where "createdAt" >= ${since}
+      from "ServiceUsage" where "createdAt" >= ${since}${scope("")}
       group by 1, 2 order by count(*) desc limit 40`,
     prisma.$queryRaw<
       { projectId: string | null; name: string | null; calls: bigint; input: bigint; output: bigint; units: bigint }[]
@@ -139,11 +164,11 @@ export async function GET(req: NextRequest) {
       select u."projectId", p.name, count(*) as calls, sum(u."inputTokens") as input,
              sum(u."outputTokens") as output, sum(u.units) as units
       from "ServiceUsage" u left join "Project" p on p.id = u."projectId"
-      where u."createdAt" >= ${since}
+      where u."createdAt" >= ${since}${scope("u.")}
       group by 1, 2 order by count(*) desc limit 25`,
     prisma.$queryRaw<{ model: string; calls: bigint; input: bigint; output: bigint }[]>`
       select model, count(*) as calls, sum("inputTokens") as input, sum("outputTokens") as output
-      from "ServiceUsage" where "createdAt" >= ${since} and model is not null
+      from "ServiceUsage" where "createdAt" >= ${since} and model is not null${scope("")}
       group by 1 order by count(*) desc`,
   ]);
 
@@ -157,10 +182,14 @@ export async function GET(req: NextRequest) {
       orderBy: { capturedAt: "asc" },
     })
     .catch(() => [] as { balanceCents: number; capturedAt: Date }[]);
-  const actualSpendUsd = spentCents(snapshots) / 100;
-  const actualByDay = Object.fromEntries(
-    [...spentByDay(snapshots)].map(([day, cents]) => [day, cents / 100]),
-  );
+  // The Kimi balance is ONE account funding every team, so its drop measures
+  // the whole organisation's spend, not this team's. Showing it to a team admin
+  // would attribute everyone's usage to them. They get the token estimate,
+  // which is scoped to their rows and honestly labelled as an estimate.
+  const actualSpendUsd = teamOnly ? 0 : spentCents(snapshots) / 100;
+  const actualByDay = teamOnly
+    ? {}
+    : Object.fromEntries([...spentByDay(snapshots)].map(([day, cents]) => [day, cents / 100]));
 
   // BigInt does not survive JSON.stringify.
   const n = (v: bigint | null | undefined) => Number(v ?? 0);
@@ -191,9 +220,11 @@ export async function GET(req: NextRequest) {
     days,
     since: since.toISOString(),
     /** Exact, from the balance itself. Null when too few readings exist yet. */
-    actualSpendUsd: snapshots.length >= 2 ? actualSpendUsd : null,
+    actualSpendUsd: !teamOnly && snapshots.length >= 2 ? actualSpendUsd : null,
     actualByDay,
-    balanceReadings: snapshots.length,
+    balanceReadings: teamOnly ? 0 : snapshots.length,
+    /** True when these figures cover one team rather than the whole account. */
+    teamScoped: teamOnly,
     byDay: byDay.map(shape),
     byService: byService.map(shape),
     byFeature: byFeature.map(shape),

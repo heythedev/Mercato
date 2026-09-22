@@ -93,7 +93,7 @@ export function KeepaBalance({ showAmazonSources = false }: { showAmazonSources?
       rows.push({
         label: "Kimi (AI) balance",
         value: loading && bal == null ? "…" : bal != null ? `$${bal.toFixed(2)}` : "—",
-        detail: empty ? "top up — AI features failing" : null,
+        detail: empty ? "Top up — AI features are failing" : null,
         alert: empty,
       });
     }
@@ -107,14 +107,22 @@ export function KeepaBalance({ showAmazonSources = false }: { showAmazonSources?
           {rows.map((r) => (
             <div key={r.label}>
               <p className="text-[11px] leading-tight text-muted-foreground">{r.label}</p>
+              {/* The value truncates; the detail gets its own line and wraps.
+                  Sharing one truncated line cut the only actionable message in
+                  the sidebar down to "top up — AI fea…". */}
               <p className={cn("truncate text-sm font-semibold tabular-nums", r.alert && "text-red-600")}>
                 {r.value}
-                {r.detail ? (
-                  <span className={cn("ml-1 text-[11px] font-normal", r.alert ? "text-red-600" : "text-muted-foreground")}>
-                    {r.detail}
-                  </span>
-                ) : null}
               </p>
+              {r.detail ? (
+                <p
+                  className={cn(
+                    "text-[11px] leading-tight",
+                    r.alert ? "text-red-600" : "text-muted-foreground",
+                  )}
+                >
+                  {r.detail}
+                </p>
+              ) : null}
             </div>
           ))}
         </div>

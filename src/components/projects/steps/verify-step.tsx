@@ -7,6 +7,7 @@ import {
   CheckCircle2, AlertTriangle, XCircle, HelpCircle, Download, ThumbsUp, Ban, Sparkles, RefreshCw,
 } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
+import { verdictStyle } from "@/components/projects/verdict";
 import { LottieLoader } from "@/components/ui/lottie-loader";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
@@ -35,25 +36,8 @@ type Product = {
   verifiedAt: Date | null;
 };
 
-const STATUS_CONFIG = {
-  ok:           { label: "Match",        color: "bg-green-100 text-green-700",   icon: CheckCircle2 },
-  warning:      { label: "Warning",      color: "bg-yellow-100 text-yellow-700", icon: AlertTriangle },
-  mismatch:     { label: "Mismatch",     color: "bg-red-100 text-red-700",       icon: XCircle },
-  not_found:    { label: "Not found",    color: "bg-gray-100 text-gray-600",     icon: HelpCircle },
-  discontinued: { label: "Discontinued", color: "bg-purple-100 text-purple-700", icon: Ban },
-};
-
-const AI_NOTE_STYLE = {
-  ok:       { wrap: "bg-green-50/70 dark:bg-green-950/20", badge: "bg-green-500", pill: "bg-green-100 text-green-700", text: "text-green-900" },
-  warning:  { wrap: "bg-yellow-50/70 dark:bg-yellow-950/20", badge: "bg-yellow-500", pill: "bg-yellow-100 text-yellow-700", text: "text-yellow-900" },
-  mismatch: { wrap: "bg-red-50/70 dark:bg-red-950/20", badge: "bg-red-500", pill: "bg-red-100 text-red-700", text: "text-red-900" },
-};
-
-const FIELD_SEVERITY = {
-  ok:      "text-green-600",
-  warning: "text-yellow-600",
-  mismatch: "text-red-600",
-};
+// Verdict styling lives in ./verdict — see the note there on why these five
+// verdicts are deliberately not on the same palette as a project's status.
 
 export function VerifyStep({ projectId, projectName, marketplace, products, verifiedCount, warningCount, mismatchCount, notFoundCount, discontinuedCount, loading, projectStatus, elapsedMs, completedAt, verifyTotal, verifyDone, onRunVerify, onApproveProduct, onMarkDiscontinued, onReverifyProduct, onProductsUpdated, onNext }: {
   projectId: string;
@@ -843,7 +827,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
           {visibleProducts.slice(0, visibleRows).map((p) => {
             const effectiveStatus = getEffectiveStatus(p);
-            const cfg = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.not_found;
+            const cfg = verdictStyle(effectiveStatus);
             const Icon = cfg.icon;
             const fields = (p.verifyFields ?? []) as FieldResult[];
             const isOpen = expanded === p.id;
@@ -862,7 +846,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                     }
                   }}
                 >
-                  <span className={cn("inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full shrink-0", cfg.color)}>
+                  <span className={cn("inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full shrink-0", cfg.badge)}>
                     <Icon className="w-3 h-3" />
                     {cfg.label}
                   </span>
@@ -876,7 +860,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                       }}
                       disabled={approving === p.id}
                       title="Approve as Match"
-                      className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 hover:bg-green-200 transition shrink-0 disabled:opacity-50"
+                      className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300 hover:bg-green-200 dark:bg-green-950/50 dark:text-green-300 dark:hover:bg-green-900/60 transition shrink-0 disabled:opacity-50"
                     >
                       {approving === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
                       Approve
@@ -891,7 +875,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                       }}
                       disabled={discontinuing === p.id}
                       title="Mark as Discontinued"
-                      className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 hover:bg-purple-200 transition shrink-0 disabled:opacity-50"
+                      className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 hover:bg-purple-200 dark:bg-purple-950/50 dark:text-purple-300 dark:hover:bg-purple-900/60 transition shrink-0 disabled:opacity-50"
                     >
                       {discontinuing === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ban className="w-3 h-3" />}
                       Discontinued
@@ -967,7 +951,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                         <div className="flex items-center gap-2">
                           <p className="font-medium font-mono">{p.asin ?? "—"}</p>
                           {p.asin && p.verifiedAt && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">auto-detected</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 font-medium">auto-detected</span>
                           )}
                         </div>
                         <div />
@@ -985,7 +969,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                             // annotations about minor differences, not real blocking issues.
                             getEffectiveStatus(p) === "ok" && f.severity === "warning"
                               ? "text-muted-foreground"
-                              : FIELD_SEVERITY[f.severity]
+                              : verdictStyle(f.severity).field
                           )}>{f.label}</span>
                           <div>
                             <p className="text-muted-foreground mb-0.5">Catalog</p>
@@ -1077,24 +1061,24 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
                               : "Running AI image check…";
 
                             if (!displayNote && !browserState?.loading) return null;
-                            const style = AI_NOTE_STYLE[displaySeverity] ?? AI_NOTE_STYLE.warning;
+                            const style = verdictStyle(displaySeverity);
                             const isAiNote = /^\s*(ai (visual|title) check|needs manual review)/i.test(displayNote ?? "");
                             const noteText = (displayNote ?? "").replace(/^\s*ai (visual|title) check:?\s*/i, "");
                             return (
-                              <div className={cn("col-span-3 flex items-start gap-2 rounded-lg px-3 py-2", style.wrap)}>
-                                <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-sm", style.badge)}>
+                              <div className={cn("col-span-3 flex items-start gap-2 rounded-lg px-3 py-2", style.note)}>
+                                <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-sm", style.dot)}>
                                   {browserState?.loading ? (
                                     <Loader2 className="h-3 w-3 text-white animate-spin" />
                                   ) : (
                                     <Sparkles className="h-3 w-3 text-white" />
                                   )}
                                 </span>
-                                <div className={cn("flex flex-col gap-1.5 text-[11px] leading-relaxed", style.text)}>
+                                <div className={cn("flex flex-col gap-1.5 text-[11px] leading-relaxed", style.noteText)}>
                                   {browserState?.loading ? (
                                     <p className="opacity-75">{browserState.note ?? loadingMsg}</p>
                                   ) : displayNote ? (
                                     <p>
-                                      <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.pill)}>
+                                      <span className={cn("mr-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide", style.badge)}>
                                         {isAiNote ? "AI Visual Check" : "Review"}
                                       </span>
                                       {noteText}
@@ -1177,7 +1161,7 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
               type="button"
               onClick={() => setPreviewImage(null)}
               aria-label="Close preview"
-              className="absolute -right-3 -top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-gray-700 shadow hover:bg-gray-100"
+              className="absolute -right-3 -top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-gray-700 shadow hover:bg-gray-100 dark:bg-gray-800"
             >
               <XCircle className="h-5 w-5" />
             </button>

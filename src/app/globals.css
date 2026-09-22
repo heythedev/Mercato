@@ -28,6 +28,20 @@
   /* Dotted auth backdrop */
   --dots-bg: #ffffff;
   --dots-fg: #000000;
+
+  /* Chart series — one fixed hue per paid service, assigned by identity and
+     never cycled. Validated as a set against this surface (CVD ΔE 9.2, normal
+     vision ΔE 24.0, all pairs); the dark steps below are chosen for the dark
+     surface rather than flipped from these. Aqua sits under 3:1 on white, so
+     every chart using it also ships direct labels and a table view. */
+  --series-kimi: #2a78d6;
+  --series-keepa: #eb6834;
+  --series-synccentric: #1baf7a;
+  --viz-grid: #e1e0d9;
+  --viz-axis: #c3c2b7;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
 }
 
 .dark {
@@ -54,6 +68,16 @@
   /* Auth backdrop — plain charcoal, matches --background */
   --dots-bg: hsl(240 6% 12%);
   --dots-fg: #ffffff;
+
+  /* Chart series, stepped for the dark surface (all three clear 3:1 here). */
+  --series-kimi: #3987e5;
+  --series-keepa: #d95926;
+  --series-synccentric: #199e70;
+  --viz-grid: #2c2c2a;
+  --viz-axis: #383835;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
 }
 
 @theme inline {

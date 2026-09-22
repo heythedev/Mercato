@@ -312,7 +312,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
                 className={cn(
                   "border-2 border-dashed rounded-xl px-6 py-8 text-center cursor-pointer transition",
                   dragOver ? "border-primary bg-primary/5" : "border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/30",
-                  uploadFile && "border-green-500/50 bg-green-50"
+                  uploadFile && "border-green-500/50 bg-green-50 dark:bg-green-950/20"
                 )}
               >
                 <input
@@ -514,7 +514,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
                           <div className="flex items-center gap-2">
                             <span className="font-medium text-sm">{tpl.name}</span>
                             {isAdminTemplate && (
-                              <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-purple-100 text-purple-700">Admin</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300">Admin</span>
                             )}
                           </div>
                           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -522,7 +522,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
                               <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{tpl.category}</span>
                             )}
                             <span className={cn("text-xs px-1.5 py-0.5 rounded font-medium",
-                              tpl.fileFormat === "xlsx" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                              tpl.fileFormat === "xlsx" ? "bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300" : "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300"
                             )}>{tpl.fileFormat.toUpperCase()}</span>
                             <span className="text-xs text-muted-foreground">{cols.length} columns</span>
                           </div>
