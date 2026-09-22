@@ -42,7 +42,7 @@ verification; the rest pass through as `ok`.
 | UI | Custom components + `lucide-react`, `sonner` toasts, `class-variance-authority`, `tailwind-merge` |
 | DB | PostgreSQL via **Prisma 7.8** with the `@prisma/adapter-pg` driver adapter (`pg` pool) |
 | Auth | **NextAuth v5 beta** (`5.0.0-beta.31`), JWT sessions, Credentials + Google |
-| AI | Vercel AI SDK v6 (`ai`, `@ai-sdk/anthropic`, `@ai-sdk/openai`) — Claude for all live paths |
+| AI | Vercel AI SDK v6 (`ai`) over Moonshot (Kimi) via the OpenAI-compatible provider — one balance funds every AI path |
 | Spreadsheets | `exceljs` + `jszip` + hand-rolled OOXML readers/writers |
 | Validation | `zod` v4 |
 | Package manager | **pnpm** (workspace file present, `pnpm-lock.yaml` committed) |
@@ -273,7 +273,7 @@ newline-joined) using `WALMART_AFFILIATE_PRIVATE_KEY`.
    than vendor titles, so borderline `warning` titles get a SAME/DIFFERENT judgement
    from Claude, concurrency 5.
 
-Both degrade silently to no-ops without `ANTHROPIC_API_KEY`.
+Both degrade silently to no-ops without `MOONSHOT_KEY`.
 
 **Walmart Spec Product Type enrichment** (`enrichWalmartProductTypes` in
 verify.ts, added for item 1 of the 2026-09 cost/accuracy work) — a THIRD pass,
@@ -323,7 +323,7 @@ These are read from disk at runtime, which is why `next.config.ts` declares
 bundled into the serverless function.
 
 **Prompt construction** ([categorize.ts](src/lib/ai/categorize.ts)):
-- Model: `claude-sonnet-5` for constrained taxonomies, `claude-haiku-4-5` otherwise.
+- Model: `CATEGORIZE_MODEL` (default `kimi-k2.7-code-highspeed`); `MOONSHOT_MODEL` (default `kimi-k2.6`) elsewhere.
 - Batch 5 (Temu/Mathis/BestBuy) / 8 (other constrained) / 20 (free-form), parallelism 2–3.
 - Chain-of-thought: the model must state what the product *is* before assigning.
 - The route mines `vendorData` for a category hint (`VENDOR_CATEGORY_KEYS`) and up
@@ -502,7 +502,7 @@ fixes in this area.
 **Dropdown (dataValidation) columns** are two-tier: `pickDropdownValue` does
 deterministic matching (exact → whole-word overlap, word-boundary aware so
 "used - like new" hits "Used" not "New" → collapsed substring). Anything
-unresolved is batched to Claude by
+unresolved is batched to the model by
 [match-dropdown.ts](src/lib/ai/match-dropdown.ts) (`Charcoal → Grey`,
 `Boucle → Fabric`), which may only return a verbatim option or `""`. Failures are
 non-fatal — an export never breaks on an AI error.
@@ -689,74 +689,84 @@ one already-manual run be in flight at once.
 
 ## 9. Environment variables
 
-```bash
-# Database
-DATABASE_URL=postgresql://...
+The authoritative list is `.env` in the repo root (gitignored, never committed —
+see §11). Every AI and marketplace feature degrades to a no-op when its key is
+absent, so a partial file still boots.
 
-# Auth
-AUTH_SECRET=            # required
-AUTH_GOOGLE_ID=         # optional — Google provider only registers if both are set
+```bash
+# Required
+DATABASE_URL=                   # Postgres; falls back to localhost:5432/mercato
+AUTH_SECRET=                    # NextAuth v5 signing key
+
+# Optional sign-in
+AUTH_GOOGLE_ID=                 # Google registers only when BOTH are set
 AUTH_GOOGLE_SECRET=
-APP_BASE_URL=
 
 # Admin seed (prisma/seed.ts)
 ADMIN_EMAIL= ADMIN_NAME= ADMIN_PASSWORD=
 
-# AI
-ANTHROPIC_API_KEY=              # image compare, title check, categorize, dropdown match
-OPENAI_API_KEY=                 # SDK installed; not on any live path
-DEFAULT_ANTHROPIC_MODEL=        # default claude-haiku-4-5-20251001
-CATEGORIZE_ANTHROPIC_MODEL=     # default claude-sonnet-5
-TITLE_ANTHROPIC_MODEL=          # default claude-haiku-4-5-20251001
-DROPDOWN_ANTHROPIC_MODEL=       # default claude-haiku-4-5-20251001
-CATEGORIZE_MIN_CONFIDENCE=      # default 0.6
+# AI — Moonshot (Kimi). ONE balance funds every AI feature.
+MOONSHOT_KEY=                   # KIMI_API_KEY accepted as a legacy alias
+MOONSHOT_BASE_URL=              # default https://api.moonshot.ai/v1
+MOONSHOT_MODEL=                 # default kimi-k2.6 — handles text AND vision
+MOONSHOT_VISION_MODEL=          # default kimi-k2.6
+CATEGORIZE_MODEL=               # default kimi-k2.7-code-highspeed
+TITLE_MODEL=                    # defaults to MOONSHOT_MODEL
+KIMI_PRICE_INPUT_PER_M=         # only a fallback; spend is measured from balance
+KIMI_PRICE_OUTPUT_PER_M=
+KIMI_PRICE_VISION_INPUT_PER_M=
 
-# Marketplaces
-KEEPA_API_KEY=                  # Amazon verification
-SERPAPI_KEY=                    # optional — web-search rescue for Uncategorized
+# Marketplace data
+KEEPA_API_KEY=                  # Amazon catalogue; token quota
+SYNCCENTRIC_API_TOKEN=          # UPC/ASIN lookup; daily search quota
+SYNCCENTRIC_PRIMARY=            # 0/false makes Keepa lead instead
 WALMART_AFFILIATE_CONSUMER_ID=
 WALMART_AFFILIATE_PRIVATE_KEY=  # PEM, \n-escaped
-WALMART_AFFILIATE_KEY_VERSION=
-WALMART_CLIENT_ID= WALMART_CLIENT_SECRET= WALMART_SELLER_ID=
-BESTBUY_API_KEY=                # referenced in the env template; no live code path
+WALMART_AFFILIATE_KEY_VERSION=  # default 1
+WALMART_CLIENT_ID= WALMART_CLIENT_SECRET= WALMART_CHANNEL_TYPE_ID=
+BESTBUY_MIRAKL_URL=             # PM11 attribute config — powers template generation
+BESTBUY_MIRAKL_KEY=
+BESTBUY_API_KEY=                # public product API, used during verification
+BESTBUY_TEMPLATE_DIR=           # default "Best buy templates"
+
+# Optional
+SERPAPI_KEY=                    # web-search rescue for Uncategorized rows
+CRON_SECRET=                    # guards /api/cron/cleanup-caches
+
+# Tuning (defaults shown)
+CATEGORIZE_PARALLELISM=32  CATEGORIZE_MIN_CONFIDENCE=0.6  CATEGORIZE_BATCH_SIZE=
+CATEGORIZE_CONSTRAINED_MIN_CONFIDENCE=
+TITLE_BATCH_SIZE=15  TITLE_CONCURRENCY=30  SKU_ENRICH_PARALLELISM=10
+CACHE_DISABLED=                 # "true" bypasses the Keepa/Walmart caches
 ```
 
-Every AI feature is written to degrade to a no-op when its key is missing.
-
-⚠️ **`.env` is currently committed to the repository with live secrets in it.**
-It should be removed from version control and every key in it rotated.
+> **Anthropic is no longer used.** Earlier revisions of this section listed
+> `ANTHROPIC_API_KEY`, `DEFAULT_ANTHROPIC_MODEL`, `CATEGORIZE_ANTHROPIC_MODEL`,
+> `TITLE_ANTHROPIC_MODEL` and `DROPDOWN_ANTHROPIC_MODEL`. The app moved to
+> Moonshot/Kimi as its single AI provider and none of those are read anywhere.
+> `APP_BASE_URL` and `WALMART_SELLER_ID` are likewise unreferenced.
 
 ---
 
 ## 10. Current state of the working tree
 
-Three files are modified but uncommitted, all part of one change — **making
-verification finish in a single user action**:
-
-- [verify/route.ts](src/app/api/projects/[id]/verify/route.ts) — wraps the batch
-  loop in `withImageCache()` so one image-download cache spans the whole run.
-- [compare-images.ts](src/lib/ai/compare-images.ts) (+147/-19) — adds the per-run
-  cache and `compareVendorAgainstAllImages`, collapsing the old per-angle loop
-  (1 call on match, 3 on mismatch) into a flat 1 vision call per product.
-- [project-detail.tsx](src/components/projects/project-detail.tsx) — the client now
-  drives the resume loop, re-POSTing while the server reports `remaining > 0` and
-  showing cumulative `{ done, total }` progress. Only the first request carries
-  `force` (otherwise it would loop forever re-checking finished products).
-
-Recent history is dominated by Temu category-mapping accuracy (`407fea6`, `5b782b0`),
-a reverted Wayfair integration (`d677cf7` → `ca755ad`), Mathis export fixes, and
-template formatting preservation.
+Deliberately not recorded here. This section used to describe three specific
+uncommitted files, which was true on the day it was written and misleading every
+day after. `git status` and `git log` answer it accurately and for free.
 
 ---
 
 ## 11. Known constraints & technical debt
 
-1. **In-memory export job store** — no persistence, no multi-instance support.
-   The single biggest blocker to horizontal scaling.
-2. **`.env` committed with live credentials** (see §9). Rotate and gitignore.
-3. **No tests.** `vitest` is installed; zero test files exist. `verify.ts`'s
-   candidate scoring and `parse.ts`'s column detection are the highest-value
-   targets — both are pure, heuristic, and currently unverified.
+1. ~~**In-memory export job store**~~ — RESOLVED. Jobs persist in the
+   `ExportJob` table (`src/lib/export/job-store.ts`), including the finished
+   payload, so a poll can land on any instance.
+2. ~~**`.env` committed with live credentials**~~ — NOT TRUE. `.gitignore`
+   covers `.env*` and `git log --all -- .env` is empty: no env file has ever
+   been tracked. Nothing needs rotating on this account.
+3. ~~**No tests**~~ — OUT OF DATE. 41 test files, 412 tests. `verify.ts`'s
+   candidate scoring and the export's requirement matrix are both covered.
+   `pnpm exec vitest run`.
 4. **`migrate deploy` runs inside `build`**, so a build failure can leave schema and
    code out of step.
 5. **Two files carry most of the risk**: `verify.ts` (1484 LOC) and `zip.ts` (1536
@@ -769,6 +779,14 @@ template formatting preservation.
    is installed but unused; the `Session` table is unused under the JWT strategy.
 8. **README is the unmodified `create-next-app` boilerplate** and documents nothing
    about this application.
+9. **Authorization is centralised but not scoped.** `src/lib/authz.ts` owns every
+   "who may see what" rule, and its tests pin the deliberate asymmetries (an
+   admin may read any project but neither delete one nor start a paid run on
+   it). There is still no team/tenant concept: projects belong to one user.
+10. **Schema changes bypass `prisma migrate`.** `DATABASE_URL` is a PgBouncer
+   transaction pool with no `directUrl`, so the migration engine hangs against
+   it. New tables and columns go in `scripts/apply-pending-tables.ts`, which is
+   idempotent and verifies each one afterwards.
 
 ---
 

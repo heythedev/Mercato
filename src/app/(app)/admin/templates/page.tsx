@@ -1,10 +1,10 @@
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAnyAdmin } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { AdminTemplatesClient } from "@/components/admin/templates-client";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 
 export default async function AdminTemplatesPage() {
-  await requireAdmin();
+  await requireAnyAdmin();
 
   // Exclude fileData (BYTEA blob) — the raw workbook can't be serialized into
   // the page payload and the client only needs the column definitions.
