@@ -10,7 +10,11 @@ vi.mock("@/lib/ai/bestbuy-taxonomy", () => ({
 }));
 
 import { getCategoryAttributes } from "@/lib/bestbuy/mirakl-client";
-import { getBestBuyColumnsForCategory, clearBestBuyTemplateCache } from "./bestbuy-template";
+import {
+  getBestBuyColumnsForCategory,
+  clearBestBuyTemplateCache,
+  bestBuyTemplateColumns,
+} from "./bestbuy-template";
 
 const attr = (code: string, label: string, required = false) => ({ code, label, required });
 
@@ -108,5 +112,46 @@ describe("Best Buy bare attribute names", () => {
     // ends in ".description" and was filled with the product description.
     expect(bestBuyBareAttribute("featureBullets.1.description")).toBeNull();
     expect(bestBuyBareAttribute("Wall_Art.tradeItemHierarchy.each.weight.amount")).toBeNull();
+  });
+});
+
+describe("Best Buy template columns, as stored", () => {
+  // A saved Best Buy template is filled by the generic template writer in
+  // zip.ts, which resolves each column by its KEY through bestBuyFillKeyForCode
+  // and bestBuyBareAttribute — both of which parse a Mirakl attribute code.
+  // Keying by the human label yields a template that lists the right headers
+  // and fills none of them, which is the failure this pins.
+  it("keys every column by the Mirakl code, not the label", () => {
+    const stored = bestBuyTemplateColumns([
+      { code: "Car_Amplifiers.productWeight", label: "Product Weight", required: true },
+      { code: "Car_Amplifiers.brand", label: "Brand", required: true },
+      { code: "Car_Amplifiers.warranty", label: "Warranty", required: false },
+    ]);
+
+    expect(stored.map((c) => c.key)).toEqual([
+      "Car_Amplifiers.productWeight",
+      "Car_Amplifiers.brand",
+      "Car_Amplifiers.warranty",
+    ]);
+    expect(stored.map((c) => c.label)).toEqual(["Product Weight", "Brand", "Warranty"]);
+  });
+
+  it("carries the required flag through, so required cells stay marked", () => {
+    const stored = bestBuyTemplateColumns([
+      { code: "Wall_Art.gtin", label: "GTIN", required: true },
+      { code: "Wall_Art.style", label: "Style", required: false },
+    ]);
+    expect(stored.map((c) => c.required)).toEqual([true, false]);
+  });
+
+  it("preserves Mirakl's ordering rather than sorting", () => {
+    // Mirakl already emits required attributes first, which is the order Best
+    // Buy's own downloadable templates use. Re-sorting here would silently
+    // produce a sheet whose columns no longer line up with the portal's.
+    const stored = bestBuyTemplateColumns([
+      { code: "A.zeta", label: "Zeta", required: true },
+      { code: "A.alpha", label: "Alpha", required: false },
+    ]);
+    expect(stored.map((c) => c.label)).toEqual(["Zeta", "Alpha"]);
   });
 });

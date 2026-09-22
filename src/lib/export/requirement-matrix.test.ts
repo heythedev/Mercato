@@ -1,6 +1,12 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import JSZip from "jszip";
-import { dimensionFromText, generateCategoryZip, weightLbFromText, type TemplateRow } from "./zip";
+import {
+  dimensionFromText,
+  generateCategoryZip,
+  unfilledByColumn,
+  weightLbFromText,
+  type TemplateRow,
+} from "./zip";
 
 // The Mirakl (Mathis) "Columns" sheet is a requirement matrix: one row per
 // attribute, one column per category path, each cell REQUIRED / RECOMMENDED /
@@ -258,5 +264,40 @@ describe("Mathis requirement-matrix enforcement (pink/grey columns)", () => {
   // defect report sitting next to their data.
   it("never puts Missing_Mandatory_Fields.csv in the download", () => {
     expect(zipEntries).not.toContain("Missing_Mandatory_Fields.csv");
+  });
+});
+
+describe("rolling compliance gaps up per column", () => {
+  // The per-row list answers "which products are short". An admin can only act
+  // on "which COLUMN is short" — one default fixes a whole column at once — so
+  // this rollup is what the export screen is given.
+  const issues = [
+    { sku: "A-1", name: "Chair", category: "Seating", missingRequired: ["Prop 65 Type", "PFAS"] },
+    { sku: "A-2", name: "Table", category: "Tables", missingRequired: ["Prop 65 Type"] },
+    { sku: "A-3", name: "Lamp", category: "Lighting", missingRequired: ["Prop 65 Type"] },
+  ];
+
+  it("counts the rows each column was missing from", () => {
+    expect(unfilledByColumn(issues)).toEqual([
+      { label: "Prop 65 Type", rows: 3 },
+      { label: "PFAS", rows: 1 },
+    ]);
+  });
+
+  it("orders by impact, so the column worth answering first is first", () => {
+    const [top] = unfilledByColumn(issues);
+    expect(top.label).toBe("Prop 65 Type");
+  });
+
+  it("returns nothing when the export filled everything", () => {
+    expect(unfilledByColumn([])).toEqual([]);
+    expect(unfilledByColumn([{ sku: "B-1", name: "x", category: "y", missingRequired: [] }])).toEqual([]);
+  });
+
+  it("counts a column once per row, not once per occurrence", () => {
+    // A row listing the same column twice would otherwise inflate the count and
+    // tell an admin more rows are affected than there are.
+    const dupe = [{ sku: "C-1", name: "x", category: "y", missingRequired: ["PFAS", "PFAS"] }];
+    expect(unfilledByColumn(dupe)).toEqual([{ label: "PFAS", rows: 1 }]);
   });
 });

@@ -23,8 +23,48 @@ export type ExportJobStatus = {
   extension: string | null;
   contentType: string | null;
   missingTemplateCategories: string[];
+  /** REQUIRED cells that shipped empty, and whether AI was even able to try. */
+  unfilledRequired: UnfilledReport;
   userId: string;
 };
+
+/** One required column an export could not fill, and how many rows it affected.
+ *  `label` is the template's own header, which is what defaultFor() matches on. */
+export type UnfilledColumn = { label: string; rows: number };
+
+/**
+ * What an export could not fill, and whether that verdict is trustworthy.
+ *
+ * `aiUnavailable` is the difference between "no source on earth can answer this
+ * column" and "the AI was out of credit so nothing even tried". They look
+ * identical in the output — both are empty cells — and conflating them is
+ * dangerous: a per-product attribute like Finish Color or Seat Height would be
+ * offered as a candidate for a fixed default, and accepting that writes one
+ * wrong value into every row of every future export.
+ */
+export type UnfilledReport = {
+  columns: UnfilledColumn[];
+  aiUnavailable: boolean;
+  /**
+   * Whether the AI verdict was actually recorded for this run.
+   *
+   * Rows written before the flag existed stored a bare array, and there is no
+   * way to tell afterwards whether those runs had a working AI. Treating them
+   * as "AI was fine" is wrong in at least one direction, so anything that draws
+   * a CONCLUSION from empty cells — like suggesting a column is unanswerable —
+   * must require this to be true rather than trusting the default.
+   */
+  recorded: boolean;
+};
+
+/** Older rows stored a bare array, before the AI-availability flag existed. */
+export function toUnfilledReport(raw: unknown): UnfilledReport {
+  if (Array.isArray(raw)) {
+    return { columns: raw as UnfilledColumn[], aiUnavailable: false, recorded: false };
+  }
+  const o = (raw ?? {}) as Partial<UnfilledReport>;
+  return { columns: o.columns ?? [], aiUnavailable: !!o.aiUnavailable, recorded: Array.isArray(o.columns) };
+}
 
 const RETENTION_MS = 48 * 60 * 60 * 1000;
 
@@ -63,7 +103,12 @@ export async function setJobPhase(id: string, phase: string): Promise<void> {
 export async function resolveJob(
   id: string,
   zip: Buffer,
-  meta?: { extension?: string; contentType?: string; missingTemplateCategories?: string[] },
+  meta?: {
+    extension?: string;
+    contentType?: string;
+    missingTemplateCategories?: string[];
+    unfilledRequired?: UnfilledReport;
+  },
 ): Promise<void> {
   await prisma.exportJob.update({
     where: { id },
@@ -75,6 +120,7 @@ export async function resolveJob(
       extension: meta?.extension ?? "zip",
       contentType: meta?.contentType ?? "application/zip",
       missingTemplateCategories: meta?.missingTemplateCategories ?? [],
+      unfilledRequired: meta?.unfilledRequired ?? { columns: [], aiUnavailable: false },
       updatedAt: new Date(),
     },
   });
@@ -103,6 +149,7 @@ export async function getJobStatus(id: string): Promise<ExportJobStatus | null> 
       extension: true,
       contentType: true,
       missingTemplateCategories: true,
+      unfilledRequired: true,
       userId: true,
     },
   });
@@ -115,6 +162,7 @@ export async function getJobStatus(id: string): Promise<ExportJobStatus | null> 
     extension: j.extension,
     contentType: j.contentType,
     missingTemplateCategories: (j.missingTemplateCategories as string[] | null) ?? [],
+    unfilledRequired: toUnfilledReport(j.unfilledRequired),
     userId: j.userId,
   };
 }

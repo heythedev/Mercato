@@ -202,6 +202,24 @@ export async function getBestBuyColumnsForCategories(
   return out;
 }
 
+/**
+ * The stored-template column shape for a Best Buy category.
+ *
+ * The key is the VERBATIM Mirakl attribute code, never the human label. That is
+ * what the real-template filler in zip.ts resolves against
+ * (bestBuyFillKeyForCode / bestBuyBareAttribute / bestBuyCategoryScopeOf), so a
+ * template keyed by label looks correct in the Templates list, exports a sheet
+ * with the right headers, and fills nothing into any of them.
+ *
+ * Required attributes keep Mirakl's own ordering, which puts them first — the
+ * same order the portal's downloadable templates use.
+ */
+export function bestBuyTemplateColumns(
+  columns: BestBuyColumn[],
+): Array<{ key: string; label: string; required: boolean }> {
+  return columns.map((c) => ({ key: c.code, label: c.label, required: c.required }));
+}
+
 export function clearBestBuyTemplateCache(): void {
   cache.clear();
 }

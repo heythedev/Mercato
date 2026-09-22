@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, adminUserIds, canOperateProject, canReadJob, templateVisibilityOr } from "@/lib/authz";
 import { after } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { enterAiContext } from "@/lib/ai/usage-context";
 import { flushUsage } from "@/lib/ai/usage-log";
 import { prisma, inChunks } from "@/lib/db";
 import type { ExportTemplate, Prisma } from "@prisma/client";
-import { generateBestBuyCategoryZip, generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
+import { generateBestBuyCategoryZip, generateCategoryZip, generateExportZip, generateFlatCategoryZip, generateFlatExport, generateSingleTemplateExport, mergeZips, splitBestBuyByTemplate, unfilledByColumn, unwrapSingleFileZip, type TemplateRow } from "@/lib/export/zip";
 import { getBestBuyColumnsForCategories } from "@/lib/export/bestbuy-template";
 import { miraklConfigured } from "@/lib/bestbuy/mirakl-client";
+import { checkAiAvailable } from "@/lib/ai/moonshot";
 import { setDropdownDeadline } from "@/lib/ai/match-dropdown";
 import { createJob, resolveJob, rejectJob, getJobStatus, getJobZip, setJobPhase, touchJob } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
@@ -39,7 +41,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const job = await getJobStatus(jobId);
   // A job belonging to someone else reads as absent rather than Forbidden —
   // jobIds encode the project id, no need to confirm they exist to outsiders.
-  if (!job || job.userId !== user!.id) {
+  if (!job || !canReadJob(actorOf(user), job)) {
     return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
   }
 
@@ -87,7 +89,18 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       // Temu categories that had no matching template — client reads this to show
       // an "upload a template for these categories" warning after download.
       "X-Missing-Template-Categories": missing.map(encodeURIComponent).join(","),
-      "Access-Control-Expose-Headers": "X-Missing-Template-Categories",
+      // Required columns that shipped empty, as "label:rows" pairs. The client
+      // turns each into a one-click "set a default" so the gap is fixed where it
+      // is discovered, rather than on a separate admin screen.
+      "X-Unfilled-Required": job.unfilledRequired.columns
+        .map((c) => `${encodeURIComponent(c.label)}:${c.rows}`)
+        .join(","),
+      // "1" when the AI could not be reached during the run, so the client
+      // reports a provider outage instead of inviting a fixed default for a
+      // column the AI would normally fill per product.
+      "X-Unfilled-Ai-Down": job.unfilledRequired.aiUnavailable ? "1" : "0",
+      "Access-Control-Expose-Headers":
+        "X-Missing-Template-Categories, X-Unfilled-Required, X-Unfilled-Ai-Down",
     },
   });
 }
@@ -117,10 +130,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Lightweight check — just ownership, no heavy data loaded
   const projectMeta = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, userId: true, marketplace: true },
+    select: { id: true, userId: true, marketplace: true, teamId: true },
   });
   if (!projectMeta) return NextResponse.json({ error: "Project not found" }, { status: 404 });
-  if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), projectMeta)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const jobId = `${id}_${Date.now()}`;
   await createJob(jobId, id, user!.id);
@@ -158,11 +171,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const mpLower = mp.toLowerCase();
       const mpFamily = mpLower === "amazon_us" || mpLower === "amazon" ? ["amazon_us", "amazon"] : [mpLower];
 
-      // Include templates owned by admin users (some may have userId=adminId instead of null).
-      const adminUserIds = (await prisma.user.findMany({ where: { role: "admin" }, select: { id: true } }))
-        .map((u) => u.id);
-      const adminOr = adminUserIds.length > 0 ? [{ userId: { in: adminUserIds } }] : [];
-      const templateOwnerOr = [{ userId: user!.id }, { userId: null }, ...adminOr];
+      // Own templates, the global ones, and anything an admin uploaded before
+      // the userId=null convention — the same rule the Templates screen uses.
+      const templateOwnerOr = templateVisibilityOr(actorOf(user), await adminUserIds());
 
       // Include fileData so category-zip exports can use fillTemplateXlsx and preserve
       // original template formatting, column widths, styles, and dropdown validations.
@@ -418,6 +429,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       let zipBuffer: Buffer;
       let missingTemplateCategories: string[] = [];
+      // Required columns this run shipped empty. Measured during the fill and
+      // kept, so the export screen can offer to set a default for each instead
+      // of the gap living only in a server log.
+      let unfilledColumns: { label: string; rows: number }[] = [];
+      // Whether the AI could be reached at all. An empty required cell means
+      // two very different things depending on this: "nothing can answer this
+      // column" (offer a default) or "the AI had no credit so nothing tried"
+      // (fix the balance, do NOT invent a fixed value for a per-product field).
+      // Probed once per export; the balance snapshot is cached and free.
+      const aiUnavailable = !(await checkAiAvailable()).ok;
+      if (aiUnavailable) {
+        console.warn("[export] AI is unavailable — AI-fillable cells will ship empty for this run");
+      }
       if (useTemplateIds && allTemplates.length) {
         // User explicitly selected a template → all products in one file using that template.
         // This takes priority over category-split so any marketplace can use
@@ -425,44 +449,72 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
         zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
-      } else if (isBestBuy && miraklConfigured() && !allTemplates.length) {
-        // Best Buy FALLBACK ONLY — no templates uploaded. Builds each category's
-        // sheet from Mirakl's attribute set (PM11) so an export is still
-        // possible, but the result is our own workbook, not Best Buy's.
+      } else if (isBestBuy) {
+        // ── Best Buy: uploaded templates win per CATEGORY, Mirakl fills the rest ──
         //
-        // Best Buy's REAL templates are preferred whenever they are present and
-        // are handled by the generic category branch below, which fills the
-        // uploaded workbook in place — two header rows (labels, then attribute
-        // codes), data from row 3, ReferenceData/Columns/dropdowns/styling all
-        // untouched. That is what Best Buy's importer expects.
+        // Best Buy publishes no template file to download in bulk — a seller
+        // fetches one category's workbook at a time from the portal. So a
+        // project is normally PART covered, and stays that way for a while:
+        // export, see which categories came out, fetch and upload those
+        // templates, re-run, repeat.
         //
-        // This used to be unreachable-by-necessity: filling those workbooks cost
-        // 2.6 GB of heap for a SINGLE category because the dropdown resolver
-        // re-decompressed and re-scanned the 12.7 MB ReferenceData sheet for
-        // every one of the template's 1,615 dataValidations. Indexing each
-        // referenced sheet once (see sheetColumnCache in zip.ts) brought the
-        // same work to 177 MB, so the real templates are now the shipping path.
-        await setJobPhase(jobId, "Fetching Best Buy category templates…");
-        const categories = [
-          ...new Set(
-            products
-              .map((p) => p.marketplaceCategory)
-              .filter((c): c is string => !!c && c !== "Uncategorized"),
-          ),
-        ];
-        const columnsByCategory = await getBestBuyColumnsForCategories(categories);
-        await setJobPhase(jobId, "Building spreadsheet files…");
-        const result = await generateBestBuyCategoryZip(products, columnsByCategory);
-        zipBuffer = result.zip;
-        // Categories Mirakl had no attribute set for fell back to flat columns —
-        // surface them the same way a missing template is surfaced.
-        missingTemplateCategories = result.categoriesWithoutSchema;
+        // Serving that needs both paths in one run. Sending everything through
+        // the template path name-matches the uncovered categories onto whatever
+        // workbook scores highest, filling the wrong columns silently; sending
+        // everything through the generated path throws away the real templates
+        // that were just uploaded. So the catalogue is split and both run.
+        const split = splitBestBuyByTemplate(products, allTemplates);
+        console.log(
+          `[export] Best Buy: ${split.coveredCategories.length} categor(y/ies) have an uploaded ` +
+            `template (${split.covered.length} products), ${split.uncoveredCategories.length} do not ` +
+            `(${split.uncovered.length} products)`,
+        );
+
+        const parts: Buffer[] = [];
+
+        if (split.covered.length) {
+          await setJobPhase(jobId, "Filling uploaded Best Buy templates…");
+          const result = await generateCategoryZip(
+            split.covered,
+            allTemplates,
+            projectMeta.marketplace,
+            templateId,
+            projectMeta.teamId,
+          );
+          parts.push(result.zip);
+          missingTemplateCategories = result.missingTemplateCategories;
+          unfilledColumns = unfilledByColumn(result.complianceIssues);
+        }
+
+        if (split.uncovered.length) {
+          if (miraklConfigured()) {
+            // Rebuilt from Mirakl's own attribute set, so a category with no
+            // uploaded template still ships a correctly shaped sheet rather
+            // than being dropped from the export.
+            await setJobPhase(jobId, "Building sheets for categories with no template…");
+            const columnsByCategory = await getBestBuyColumnsForCategories(split.uncoveredCategories);
+            const result = await generateBestBuyCategoryZip(split.uncovered, columnsByCategory);
+            parts.push(result.zip);
+            // Categories Mirakl had no attribute set for fell back to flat
+            // columns — surfaced the same way a missing template is.
+            missingTemplateCategories = [
+              ...missingTemplateCategories,
+              ...result.categoriesWithoutSchema,
+            ];
+          } else {
+            await setJobPhase(jobId, "Building spreadsheet files…");
+            parts.push((await generateFlatCategoryZip(split.uncovered, projectMeta.marketplace)) as Buffer);
+          }
+        }
+
+        zipBuffer = parts.length ? await mergeZips(parts) : Buffer.alloc(0);
       } else if (usesCategoryExport && allTemplates.length) {
         // With uploaded templates: match each category to the closest template
         // and export in that template's column format — one file per matched category
-        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId);
+        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId, projectMeta.teamId);
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
+        unfilledColumns = unfilledByColumn(result.complianceIssues);
       } else if (usesCategoryExport) {
         // Without templates: split by AI-assigned category using flat columns
         zipBuffer = await generateFlatCategoryZip(products, projectMeta.marketplace) as Buffer;
@@ -476,9 +528,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // No templates → flat export (one file, standard columns)
         zipBuffer = await generateFlatExport(products, projectMeta.marketplace) as Buffer;
       } else if (useAutoMatch) {
-        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId);
+        const result = await generateCategoryZip(products, allTemplates, projectMeta.marketplace, templateId, projectMeta.teamId);
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
+        unfilledColumns = unfilledByColumn(result.complianceIssues);
       } else {
         zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
       }
@@ -495,6 +548,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         extension: payload.extension,
         contentType: payload.contentType,
         missingTemplateCategories,
+        unfilledRequired: { columns: unfilledColumns, aiUnavailable, recorded: true },
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

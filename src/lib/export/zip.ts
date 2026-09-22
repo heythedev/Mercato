@@ -76,6 +76,27 @@ export type ComplianceIssue = {
   missingRequired: string[];
 };
 
+/**
+ * Compliance gaps rolled up per column, biggest first.
+ *
+ * The per-row list answers "which products are short"; this answers "which
+ * COLUMN is short", which is the actionable shape — one admin default fixes a
+ * whole column at once. The same rollup feeds the server log and the job
+ * record, so what an admin is shown and what the log says cannot drift.
+ *
+ * The key is the template's own header, which is one of the names
+ * defaultFor() matches on, so a default saved under it will be found.
+ */
+export function unfilledByColumn(issues: ComplianceIssue[]): { label: string; rows: number }[] {
+  const byField = new Map<string, number>();
+  for (const row of issues) {
+    // Deduplicated per row: the count is ROWS AFFECTED, and a row that listed
+    // the same column twice would otherwise report more rows than exist.
+    for (const f of new Set(row.missingRequired)) byField.set(f, (byField.get(f) ?? 0) + 1);
+  }
+  return [...byField].sort((a, b) => b[1] - a[1]).map(([label, rows]) => ({ label, rows }));
+}
+
 // Colour words for deriving a mandatory Color / Finish Color cell from the
 // product's own title/description when the vendor supplied no colour column.
 // Longest-first so "navy blue" wins over "blue".
@@ -262,6 +283,100 @@ export async function generateFlatCategoryZip(
 // serve the attribute configuration those files are generated from, so each
 // category's sheet is rebuilt here instead of a human downloading them by hand.
 //
+/**
+ * Normalised form of a category path, for comparing a product's category with
+ * the one a template declares. Mirakl writes " > " and some sheets write " / ";
+ * case and stray spacing vary by whoever typed it.
+ */
+export function normCategoryPath(s: string): string {
+  return String(s ?? "")
+    .replace(/ \/ /g, " > ")
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" > ")
+    .toLowerCase();
+}
+
+/**
+ * Split a Best Buy catalogue by whether its category has an uploaded template.
+ *
+ * Best Buy's per-category workflow is: export, see which categories came out,
+ * fetch those categories' real template workbooks from the seller portal,
+ * upload them, re-run. Between runs a project is therefore PART covered — some
+ * categories have a real template and some do not — and the export has to serve
+ * both at once.
+ *
+ * Doing it any other way loses something: sending everything through the
+ * template path name-matches the uncovered categories onto whatever workbook
+ * scores highest (wrong columns, silently), while sending everything through
+ * the generated path throws away the real templates that were just uploaded.
+ */
+export function splitBestBuyByTemplate<T extends { marketplaceCategory: string | null }>(
+  products: T[],
+  templates: { category?: string | null }[],
+): { covered: T[]; uncovered: T[]; coveredCategories: string[]; uncoveredCategories: string[] } {
+  const declared = new Set(
+    templates.map((t) => normCategoryPath(t.category ?? "")).filter(Boolean),
+  );
+  const covered: T[] = [];
+  const uncovered: T[] = [];
+  const coveredCats = new Set<string>();
+  const uncoveredCats = new Set<string>();
+
+  for (const p of products) {
+    const raw = p.marketplaceCategory ?? "";
+    // Uncategorized rows belong to neither path; the generated branch already
+    // sends them to Uncategorized.csv, so they travel with the uncovered half.
+    const key = normCategoryPath(raw);
+    if (key && declared.has(key)) {
+      covered.push(p);
+      coveredCats.add(raw);
+    } else {
+      uncovered.push(p);
+      if (raw && raw !== "Uncategorized") uncoveredCats.add(raw);
+    }
+  }
+  return {
+    covered,
+    uncovered,
+    coveredCategories: [...coveredCats],
+    uncoveredCategories: [...uncoveredCats],
+  };
+}
+
+/**
+ * Combine several ZIPs into one.
+ *
+ * A part-covered Best Buy export is built by two different generators; the
+ * seller should still receive a single download. Later parts do not overwrite
+ * earlier ones — a name collision gets a numeric suffix, because silently
+ * dropping one of two files with the same category name would lose rows.
+ */
+export async function mergeZips(parts: Buffer[]): Promise<Buffer> {
+  if (parts.length === 1) return parts[0];
+  const out = new JSZip();
+  const taken = new Set<string>();
+  for (const part of parts) {
+    const zip = await JSZip.loadAsync(part);
+    for (const [name, entry] of Object.entries(zip.files)) {
+      if (entry.dir) continue;
+      let final = name;
+      if (taken.has(final)) {
+        const dot = name.lastIndexOf(".");
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : "";
+        let n = 2;
+        while (taken.has(`${stem} (${n})${ext}`)) n++;
+        final = `${stem} (${n})${ext}`;
+      }
+      taken.add(final);
+      out.file(final, await entry.async("nodebuffer"));
+    }
+  }
+  return (await out.generateAsync({ type: "nodebuffer" })) as unknown as Buffer;
+}
+
 // Best Buy ONLY. Every other marketplace keeps its existing path untouched:
 // this function is reached solely from the isBestBuy branch in the export route.
 export async function generateBestBuyCategoryZip(
@@ -322,13 +437,15 @@ export async function generateCategoryZip(
   templates: TemplateRow[],
   marketplace = "amazon",
   defaultTemplateId?: string,
+  /** The project's team, so its own export defaults win over the global ones. */
+  teamId?: string | null,
 ): Promise<{ zip: Buffer; missingTemplateCategories: string[]; complianceIssues: ComplianceIssue[] }> {
   console.log(`[export] generateCategoryZip called: ${products.length} products, ${templates.length} templates, marketplace=${marketplace}`);
 
   // Admin-set values for required columns nothing else can answer (compliance
   // declarations and the like). Loaded once per export, never per row, and
   // applied only where a REQUIRED cell would otherwise ship empty.
-  const exportDefaults = await loadExportDefaults(marketplace).catch((e) => {
+  const exportDefaults = await loadExportDefaults(marketplace, teamId).catch((e) => {
     // A missing table or a database blip must not cost the client their ZIP.
     console.warn("[export] could not load export defaults:", (e as Error).message);
     return new Map<string, string>() as ExportDefaults;
@@ -495,7 +612,20 @@ export async function generateCategoryZip(
   // > Mice" and a hundred others.
   if (isBestBuyMp) {
     await Promise.all(templates.map(async (t) => {
+      // A template uploaded FOR ONE CATEGORY states its coverage in `category`.
+      // That is the reliable link for the per-category workflow: the sheet a
+      // seller downloads from Best Buy's portal for "… > Mattresses" carries no
+      // Columns sheet, so coverage could only be guessed from its filename, and
+      // word-overlap on a name like "Mattresses (1).xlsx" is exactly the kind of
+      // fuzzy match that silently fills the wrong workbook.
+      if (t.category && t.category.trim()) {
+        tmplCats.set(t.id, new Set([normSepGlobal(t.category).toLowerCase().trim()]));
+        console.log(`[export] Best Buy template "${t.name}" declares category "${t.category}"`);
+        return;
+      }
       if (!t.fileData) return;
+      // The 22 group templates instead list every category they serve inside
+      // their own Columns sheet — one file covers ~100 categories.
       const cats = await extractBestBuyTemplateCategories(t.fileData as Buffer);
       if (cats.length) {
         tmplCats.set(t.id, new Set(cats.map((c) => c.toLowerCase())));
@@ -685,13 +815,8 @@ export async function generateCategoryZip(
   // unchanged and still never invented; they are reported in the server log,
   // where the team can see them without the client having to.
   if (complianceRows.length > 0) {
-    const byField = new Map<string, number>();
-    for (const row of complianceRows) {
-      for (const f of row.missingRequired) byField.set(f, (byField.get(f) ?? 0) + 1);
-    }
-    const summary = [...byField]
-      .sort((a, b) => b[1] - a[1])
-      .map(([f, n]) => `${f} (${n})`)
+    const summary = unfilledByColumn(complianceRows)
+      .map((c) => `${c.label} (${c.rows})`)
       .join(", ");
     console.log(
       `[export] ${complianceRows.length} row(s) still missing mandatory values — ` +

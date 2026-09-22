@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { AlertTriangle, Download, FileSpreadsheet, Package, Plus, RefreshCw, Shuffle, Upload, X } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { AlertTriangle, CheckCircle2, Download, FileSpreadsheet, Package, Plus, RefreshCw, Shuffle, Sparkles, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
@@ -85,6 +85,107 @@ function matchTemplate(category: string, templates: Template[]): { template: Tem
   return { template: best, score: bestScore };
 }
 
+/**
+ * Pick a template file for one category and name it.
+ *
+ * Written three times in this file before — once in the amber
+ * missing-categories panel, once in the Best Buy coverage list, once in the
+ * per-category file list — which meant three chances for the accepted file
+ * types or the button states to drift apart. The tone differs because the
+ * surrounding panel does; nothing else about it should.
+ */
+function TemplateUploadPanel({
+  category,
+  tone = "neutral",
+  hint = "Click to pick .xlsx / .csv",
+  file,
+  name,
+  uploading,
+  onPickFile,
+  onNameChange,
+  onCancel,
+  onSubmit,
+}: {
+  category: string;
+  tone?: "neutral" | "amber";
+  hint?: string;
+  file: File | null;
+  name: string;
+  uploading: boolean;
+  onPickFile: (f: File | null) => void;
+  onNameChange: (v: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const amber = tone === "amber";
+  return (
+    <div
+      className={cn(
+        "rounded-xl border bg-background p-3 flex flex-col gap-2",
+        amber ? "border-amber-300 dark:border-amber-700" : "border-border",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium truncate">
+          Template for &ldquo;{category}&rdquo;
+        </span>
+        <button onClick={onCancel} className="text-muted-foreground hover:text-foreground shrink-0">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <label
+        className={cn(
+          "flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed p-4 cursor-pointer transition",
+          amber
+            ? "border-border hover:border-amber-400 hover:bg-amber-50/30 dark:hover:bg-amber-950/10"
+            : "border-border hover:border-primary/60 hover:bg-muted/30",
+          file && (amber ? "border-amber-500 bg-amber-50/20 dark:bg-amber-950/10" : "border-primary/50 bg-primary/5"),
+        )}
+      >
+        <Upload className="w-4 h-4 text-muted-foreground" />
+        <span className="text-xs text-muted-foreground">{file ? file.name : hint}</span>
+        <input
+          type="file"
+          accept=".xlsx,.xlsm,.csv,.tsv"
+          className="sr-only"
+          onChange={(e) => onPickFile(e.target.files?.[0] ?? null)}
+        />
+      </label>
+
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => onNameChange(e.target.value)}
+        placeholder="Template name"
+        className={cn(
+          "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1",
+          amber ? "focus:ring-amber-500" : "focus:ring-primary",
+        )}
+      />
+
+      <div className="flex gap-2 justify-end">
+        <button
+          onClick={onCancel}
+          className="text-xs px-3 py-1.5 rounded-lg border border-border hover:bg-muted/40"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onSubmit}
+          disabled={!file || !name.trim() || uploading}
+          className={cn(
+            "text-xs px-3 py-1.5 rounded-lg font-medium text-white disabled:opacity-50",
+            amber ? "bg-amber-600 hover:bg-amber-700" : "bg-primary text-primary-foreground",
+          )}
+        >
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ExportStep({ projectId, projectName, marketplace, products, projectStatus, isNewListing }: {
   projectId: string;
   projectName: string;
@@ -105,7 +206,26 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
   // New listing (checkbox checked) → per-category ZIP. Existing listing → item match.
   const [walmartMode, setWalmartMode] = useState<"new" | "existing">(isNewListing ? "new" : "existing");
   const [missingTemplateCategories, setMissingTemplateCategories] = useState<string[]>([]);
+  /** Required columns the finished export shipped empty, biggest first. */
+  const [unfilledRequired, setUnfilledRequired] = useState<{ label: string; rows: number }[]>([]);
+  /**
+   * Per-category Best Buy template coverage for THIS project, including
+   * templates uploaded during earlier projects — the seller is only ever asked
+   * for the workbooks that are genuinely still missing.
+   */
+  const [bbCategories, setBbCategories] = useState<
+    { category: string; products: number; hasTemplate: boolean; templateName: string | null }[]
+  >([]);
+  const [bbCanGenerate, setBbCanGenerate] = useState(false);
+  const [bbLoading, setBbLoading] = useState(false);
+  /** True when the run could not reach the AI, so empty cells prove nothing. */
+  const [unfilledAiDown, setUnfilledAiDown] = useState(false);
   const [uploadForCategory, setUploadForCategory] = useState<string | null>(null);
+  /** Which list opened the upload panel — a category can appear in more than
+   *  one, and keying only on the category opened every copy at once. */
+  const [uploadSource, setUploadSource] = useState<"missing" | "coverage" | "files" | null>(null);
+  /** Category whose Best Buy template is being built from Mirakl right now. */
+  const [generatingCategory, setGeneratingCategory] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -191,14 +311,16 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketplace]);
 
-  function openUploadPanel(category: string) {
+  function openUploadPanel(category: string, source: "missing" | "coverage" | "files") {
     setUploadForCategory(category);
+    setUploadSource(source);
     setUploadFile(null);
     setUploadName(category);
   }
 
   function closeUploadPanel() {
     setUploadForCategory(null);
+    setUploadSource(null);
     setUploadFile(null);
     setUploadName("");
   }
@@ -221,10 +343,84 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       toast.success(`Template "${uploadName.trim()}" added`);
       closeUploadPanel();
       await loadTemplates(true);
+      if (isBestBuy) await loadBestBuyCoverage();
     } catch {
       toast.error("Upload failed — check your connection");
     } finally {
       if (mountedRef.current) setUploading(false);
+    }
+  }
+
+  /**
+   * Which of this project's categories already have a Best Buy template.
+   *
+   * Reloaded after every upload and every generate, so the list reflects what
+   * the next export will actually do rather than what was true on page load.
+   */
+  const loadBestBuyCoverage = useCallback(async () => {
+    setBbLoading(true);
+    try {
+      const res = await fetch(`/api/bestbuy/template?projectId=${encodeURIComponent(projectId)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        categories?: typeof bbCategories;
+        canGenerate?: boolean;
+      };
+      if (!mountedRef.current) return;
+      setBbCategories(data.categories ?? []);
+      setBbCanGenerate(!!data.canGenerate);
+    } catch {
+      /* the panel simply stays as it was */
+    } finally {
+      if (mountedRef.current) setBbLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (isBestBuy) void loadBestBuyCoverage();
+  }, [isBestBuy, loadBestBuyCoverage]);
+
+  /**
+   * Build this Best Buy category's template from Mirakl and save it.
+   *
+   * Best Buy publishes no template FILE to upload — the portal generates one
+   * per category from its attribute set, and there are 1,450 of them. Rather
+   * than asking for a file that cannot be downloaded, rebuild the sheet from
+   * the same attribute configuration the portal uses and store it as an
+   * ordinary template, which the export then treats like any other.
+   */
+  async function generateBestBuyTemplate(category: string) {
+    setGeneratingCategory(category);
+    try {
+      const res = await fetch("/api/bestbuy/template", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        created?: boolean;
+        name?: string;
+        columnCount?: number;
+        requiredCount?: number;
+      };
+      if (!res.ok) {
+        toast.error(data.error ?? "Could not build this category's template");
+        return;
+      }
+      toast.success(
+        data.created
+          ? `${data.name} — ${data.columnCount} columns (${data.requiredCount} required)`
+          : `A template for "${category}" already exists`,
+      );
+      await loadTemplates(true);
+      await loadBestBuyCoverage();
+    } catch {
+      toast.error("Could not build this category's template — check your connection");
+    } finally {
+      if (mountedRef.current) setGeneratingCategory(null);
     }
   }
 
@@ -245,15 +441,27 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
 
   const hasTemplates = templates.length > 0;
 
-  // For Temu: compute which category groups have no specific matching template
-  // (would fall back to the catch-all OTHER template) so we can warn the user
-  // before they export rather than after.
+  // Which category groups will NOT get a usable template — worked out BEFORE
+  // the export runs, so the fix is offered up front instead of after a full job.
+  //
+  //   Temu     — its templates carry a generic catch-all, so landing on that
+  //              one means no specific template exists for this category.
+  //   Best Buy — nothing is ever excluded, so this list stays empty for it.
+  //              The export splits the catalogue: categories with an uploaded
+  //              template are filled from it, the rest are built from Best
+  //              Buy's own required attributes. The Category templates panel
+  //              above reports that coverage instead. (This arm used to flag
+  //              every weakly-matched category as excluded, which was true
+  //              before the split existed and became a false alarm after —
+  //              it reported "0 categories will be exported" for a run that
+  //              exported all ten.)
   const isGenericTemplate = (t: Template) => /\bother(s)?\b|\bgeneral\b|\bdefault\b/i.test(t.name);
-  const preExportMissingCategories: string[] = isTemu && templates.length > 1 && templates.some(isGenericTemplate)
-    ? categories
-        .map(([cat]) => cat)
-        .filter(cat => isGenericTemplate(matchTemplate(cat, templates).template))
-    : [];
+  const preExportMissingCategories: string[] =
+    isTemu && templates.length > 1 && templates.some(isGenericTemplate)
+      ? categories
+          .map(([cat]) => cat)
+          .filter((cat) => isGenericTemplate(matchTemplate(cat, templates).template))
+      : [];
 
   // Category-split (Mathis/Temu/BestBuy): needs categorized products; Mathis also requires templates
   // Other: needs at least 1 product; if templates exist, one must be selected
@@ -362,6 +570,20 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           const missingHeader = pollRes.headers.get("X-Missing-Template-Categories") ?? "";
           const missing = missingHeader.split(",").filter(Boolean).map(decodeURIComponent);
           setMissingTemplateCategories(missing);
+
+          // Required columns that shipped empty, as "label:rows" pairs. Shown
+          // right here so the gap is answered where it was discovered.
+          const unfilledHeader = pollRes.headers.get("X-Unfilled-Required") ?? "";
+          const unfilled = unfilledHeader
+            .split(",")
+            .filter(Boolean)
+            .map((pair) => {
+              const at = pair.lastIndexOf(":");
+              return { label: decodeURIComponent(pair.slice(0, at)), rows: Number(pair.slice(at + 1)) || 0 };
+            })
+            .filter((c) => c.label);
+          setUnfilledRequired(unfilled);
+          setUnfilledAiDown(pollRes.headers.get("X-Unfilled-Ai-Down") === "1");
 
           if (isZip) {
             const fileCount = usesCategoryZip ? categories.length : 1;
@@ -492,14 +714,14 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                     <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
                     <span className="text-sm flex-1 font-medium">{t.name}</span>
                     {t.userId === null && (
-                      <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-medium">Admin</span>
+                      <span className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 px-1.5 py-0.5 rounded font-medium">Admin</span>
                     )}
                     {t.category && (
                       <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">{t.category}</span>
                     )}
                     <span className={cn(
                       "text-xs px-1.5 py-0.5 rounded font-medium",
-                      t.fileFormat === "xlsx" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                      t.fileFormat === "xlsx" ? "bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300" : "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300"
                     )}>
                       {t.fileFormat.toUpperCase()}
                     </span>
@@ -524,7 +746,9 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                   {allMissing.length} categor{allMissing.length === 1 ? "y" : "ies"} will be excluded — no matching template
                 </p>
                 <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 mb-2">
-                  Upload a dedicated template for each category below, then click Refresh to pick it up here (no page reload needed).
+                  {isBestBuy && bestBuyAutoTemplates === true
+                    ? "Build each category's template from Best Buy's own required attributes, or upload your own file. Either way it is saved and reused by every later export."
+                    : "Upload a dedicated template for each category below, then click Refresh to pick it up here (no page reload needed)."}
                 </p>
                 <ul className="flex flex-col gap-1.5 mb-3">
                   {allMissing.map((cat) => (
@@ -532,9 +756,22 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                       <div className="flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
                         <span className="text-xs text-amber-800 dark:text-amber-300 flex-1">{cat}</span>
+                        {/* Best Buy's templates are generated per category from
+                            its own attribute set and cannot be downloaded, so
+                            offer to build one rather than asking for a file. */}
+                        {isBestBuy && bestBuyAutoTemplates === true && (
+                          <button
+                            onClick={() => generateBestBuyTemplate(cat)}
+                            disabled={generatingCategory !== null}
+                            className="flex items-center gap-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:underline shrink-0 disabled:opacity-50 disabled:no-underline"
+                          >
+                            <Sparkles className={cn("w-3 h-3", generatingCategory === cat && "animate-pulse")} />
+                            {generatingCategory === cat ? "Building…" : "Build from Best Buy"}
+                          </button>
+                        )}
                         {uploadForCategory !== cat && (
                           <button
-                            onClick={() => openUploadPanel(cat)}
+                            onClick={() => openUploadPanel(cat, "missing")}
                             className="flex items-center gap-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:underline shrink-0"
                           >
                             <Plus className="w-3 h-3" />
@@ -542,56 +779,18 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                           </button>
                         )}
                       </div>
-                      {uploadForCategory === cat && (
-                        <div className="mt-2 ml-3.5 rounded-xl border border-amber-300 dark:border-amber-700 bg-background p-3 flex flex-col gap-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium">Add template for &ldquo;{cat}&rdquo;</span>
-                            <button onClick={closeUploadPanel} className="text-muted-foreground hover:text-foreground">
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                          <label className={cn(
-                            "flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-border p-4 cursor-pointer transition hover:border-amber-400 hover:bg-amber-50/30 dark:hover:bg-amber-950/10",
-                            uploadFile && "border-amber-500 bg-amber-50/20 dark:bg-amber-950/10"
-                          )}>
-                            <Upload className="w-4 h-4 text-muted-foreground" />
-                            <span className="text-xs text-muted-foreground">
-                              {uploadFile ? uploadFile.name : "Click to pick .xlsx / .csv"}
-                            </span>
-                            <input
-                              type="file"
-                              accept=".xlsx,.xlsm,.csv,.tsv"
-                              className="sr-only"
-                              onChange={(e) => {
-                                const f = e.target.files?.[0] ?? null;
-                                setUploadFile(f);
-                                if (f && uploadName === cat) setUploadName(f.name.replace(/\.[^.]+$/, ""));
-                              }}
-                            />
-                          </label>
-                          <input
-                            type="text"
-                            value={uploadName}
-                            onChange={(e) => setUploadName(e.target.value)}
-                            placeholder="Template name"
-                            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-500"
-                          />
-                          <div className="flex gap-2 justify-end">
-                            <button
-                              onClick={closeUploadPanel}
-                              className="text-xs px-3 py-1.5 rounded-lg border border-border hover:bg-muted/40"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={submitTemplateUpload}
-                              disabled={!uploadFile || !uploadName.trim() || uploading}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white font-medium disabled:opacity-50 hover:bg-amber-700"
-                            >
-                              {uploading ? "Uploading…" : "Upload"}
-                            </button>
-                          </div>
-                        </div>
+                      {uploadForCategory === cat && uploadSource === "missing" && (
+                        <TemplateUploadPanel
+                          category={cat}
+                          tone="amber"
+                          file={uploadFile}
+                          name={uploadName}
+                          uploading={uploading}
+                          onPickFile={(f) => { setUploadFile(f); if (f && uploadName === uploadForCategory) setUploadName(f.name.replace(/\.[^.]+$/, "")); }}
+                          onNameChange={setUploadName}
+                          onCancel={closeUploadPanel}
+                          onSubmit={submitTemplateUpload}
+                        />
                       )}
                     </li>
                   ))}
@@ -604,6 +803,179 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                   <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
                   {refreshing ? "Refreshing…" : "Refresh templates"}
                 </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Required columns the finished export shipped empty ──────────────
+          Found during the run, answered here. These are the cells no catalog
+          lookup can fill and the model is forbidden from filling — compliance
+          declarations the seller makes. Mercato finds the gap and remembers the
+          answer; it never invents one. Saved once, every future export for this
+          marketplace fills the column deterministically at no token cost. */}
+      {unfilledRequired.length > 0 && (
+        <div className="mb-5 rounded-2xl bg-blue-50 dark:bg-blue-950/25 p-4">
+          <div className="flex items-start gap-3">
+            <FileSpreadsheet className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-blue-900 dark:text-blue-200">
+                {unfilledRequired.length} required column
+                {unfilledRequired.length === 1 ? "" : "s"} shipped empty
+              </p>
+              <p className="text-xs text-blue-800/80 dark:text-blue-300/80 mt-0.5 mb-3">
+                {unfilledAiDown
+                  ? "The AI had no credit during this run, so the columns it normally fills were never attempted. Top up and export again."
+                  : "Nothing in this project's data answered these columns, so they shipped empty. They are defined by the category's own template."}
+              </p>
+
+              <ul className="flex flex-col gap-2">
+                {unfilledRequired.map(({ label, rows }) => {
+                  return (
+                    <li
+                      key={label}
+                      className="rounded-xl border border-blue-200 dark:border-blue-900 bg-background px-3 py-2.5"
+                    >
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <span className="text-xs font-medium">{label}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {rows} row{rows === 1 ? "" : "s"} affected
+                        </span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Best Buy: one template per category, built up across projects ──────
+          Best Buy publishes no bulk download — a seller fetches one category's
+          workbook at a time from the portal — so coverage accumulates run by
+          run. Templates are shared across projects, so a category answered once
+          is never asked for again. */}
+      {isBestBuy && bbCategories.length > 0 && (() => {
+        const ready = bbCategories.filter((c) => c.hasTemplate);
+        const missing = bbCategories.filter((c) => !c.hasTemplate);
+        return (
+          <div className="mb-5 rounded-2xl border border-border p-4">
+            <div className="flex items-start gap-3">
+              <FileSpreadsheet className="w-5 h-5 text-muted-foreground shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <p className="text-sm font-semibold">Category templates</p>
+                  <p className="text-xs text-muted-foreground">
+                    {ready.length} of {bbCategories.length} ready
+                  </p>
+                  <button
+                    onClick={() => loadBestBuyCoverage()}
+                    disabled={bbLoading}
+                    className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-3 h-3", bbLoading && "animate-spin")} />
+                    Refresh
+                  </button>
+                </div>
+
+                <p className="text-xs text-muted-foreground mt-1 mb-3">
+                  {missing.length === 0
+                    ? "Every category in this project has a template. Re-run the export to fill them with this project's rows."
+                    : `Upload Best Buy's own spreadsheet for the ${missing.length} categor${missing.length === 1 ? "y" : "ies"} below. The rest already have one from an earlier project and are not asked for again. A category with no template still exports — as a sheet built from Best Buy's required attributes.`}
+                </p>
+
+                <div className="mb-3 h-1 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all"
+                    style={{ width: `${(ready.length / bbCategories.length) * 100}%` }}
+                  />
+                </div>
+
+                <ul className="flex flex-col divide-y divide-border/60">
+                  {[...missing, ...ready].map(({ category, products, hasTemplate, templateName }) => (
+                    <li key={category} className="py-2">
+                      <div className="flex items-center gap-2">
+                        {hasTemplate ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                        ) : (
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate text-xs" title={category}>
+                          {category}
+                        </span>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {products} product{products === 1 ? "" : "s"}
+                        </span>
+                        {hasTemplate ? (
+                          <span
+                            className="hidden sm:inline max-w-[180px] truncate shrink-0 text-[11px] text-emerald-600 dark:text-emerald-400"
+                            title={templateName ?? ""}
+                          >
+                            {templateName}
+                          </span>
+                        ) : (
+                          <span className="flex shrink-0 items-center gap-2">
+                            {bbCanGenerate && (
+                              <button
+                                onClick={() => generateBestBuyTemplate(category)}
+                                disabled={generatingCategory !== null}
+                                className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-muted-foreground hover:text-foreground disabled:opacity-50"
+                                title="Rebuild this category's sheet from Best Buy's own required attributes"
+                              >
+                                <Sparkles
+                                  className={cn("w-3 h-3", generatingCategory === category && "animate-pulse")}
+                                />
+                                {generatingCategory === category ? "Building…" : "Build"}
+                              </button>
+                            )}
+                            {uploadForCategory !== category && (
+                              <button
+                                onClick={() => openUploadPanel(category, "coverage")}
+                                className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-primary hover:underline"
+                              >
+                                <Plus className="w-3 h-3" />
+                                Upload
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </div>
+
+                      {uploadForCategory === category && uploadSource === "coverage" && (
+                        <TemplateUploadPanel
+                          category={category}
+                          tone="neutral"
+                          hint="Click to pick the .xlsx from Best Buy"
+                          file={uploadFile}
+                          name={uploadName}
+                          uploading={uploading}
+                          onPickFile={(f) => { setUploadFile(f); if (f && uploadName === uploadForCategory) setUploadName(f.name.replace(/\.[^.]+$/, "")); }}
+                          onNameChange={setUploadName}
+                          onCancel={closeUploadPanel}
+                          onSubmit={submitTemplateUpload}
+                        />
+                      )}
+                    </li>
+                  ))}
+                </ul>
+
+                {ready.length > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={handleExport}
+                      disabled={!canExport}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-xs font-medium disabled:opacity-50"
+                    >
+                      <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
+                      {loading ? "Running…" : "Re-run export"}
+                    </button>
+                    <span className="text-[11px] text-muted-foreground">
+                      {`Fills the ${ready.length} uploaded template${ready.length === 1 ? "" : "s"} with this project's rows.`}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -720,16 +1092,40 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
             const rows = categories
               .filter(([category]) => !preExportMissingCategories.includes(category))
               .map(([category, count]) => {
+                // Best Buy answers this exactly: a template declares the one
+                // category it serves, so coverage is a lookup rather than a
+                // guess. Everything else still scores a fuzzy name match, where
+                // < 4 means only a generic word overlapped ("office") and is
+                // not a real match.
+                const bbEntry = isBestBuy
+                  ? bbCategories.find((c) => c.category === category)
+                  : undefined;
+
+                // A category with no uploaded template still exports: the run
+                // builds its sheet from Best Buy's own required attributes.
+                const autoGenerated =
+                  isBestBuy && bestBuyAutoTemplates === true && !bbEntry?.hasTemplate;
+
+                if (isBestBuy) {
+                  return {
+                    category,
+                    count,
+                    matched: bbEntry?.hasTemplate
+                      ? ({ name: bbEntry.templateName ?? "Uploaded template", userId: "" } as Template)
+                      : null,
+                    hasGoodMatch: !!bbEntry?.hasTemplate || autoGenerated,
+                    autoGenerated,
+                  };
+                }
+
                 const matchResult = hasTemplates ? matchTemplate(category, templates) : null;
-                const matched = matchResult?.template ?? null;
-                // Score < 4 means only a single generic word overlapped (e.g. "office") —
-                // not a genuine match. Show "No template" so the user knows to upload one.
-                // Best Buy: the export builds this category's sheet from
-                // Mirakl's own required-attribute set, so no uploaded template
-                // is needed and "No template" would be actively misleading.
-                const autoGenerated = isBestBuy && bestBuyAutoTemplates === true;
-                const hasGoodMatch = autoGenerated || (matchResult?.score ?? 0) >= 4;
-                return { category, count, matched, hasGoodMatch, autoGenerated };
+                return {
+                  category,
+                  count,
+                  matched: matchResult?.template ?? null,
+                  hasGoodMatch: (matchResult?.score ?? 0) >= 4,
+                  autoGenerated: false,
+                };
               });
             const noMatchCount = rows.filter(r => !r.autoGenerated && hasTemplates && !r.hasGoodMatch).length;
             return (
@@ -761,7 +1157,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                             <Shuffle className="w-3 h-3" />
                             {matched.name}
                             {matched.userId === null && (
-                              <span className="text-xs bg-purple-100 text-purple-700 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
+                              <span className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 px-1 py-0.5 rounded font-medium ml-1">Admin</span>
                             )}
                           </span>
                         )}
@@ -773,7 +1169,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                         )}
                         {!autoGenerated && hasTemplates && !hasGoodMatch && uploadForCategory !== category && (
                           <button
-                            onClick={() => openUploadPanel(category)}
+                            onClick={() => openUploadPanel(category, "files")}
                             className="flex items-center gap-1 text-xs text-primary font-medium shrink-0 hover:underline"
                           >
                             <Plus className="w-3 h-3" />
@@ -784,56 +1180,18 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                           {count} product{count !== 1 ? "s" : ""}
                         </span>
                       </div>
-                      {uploadForCategory === category && (
-                        <div className="mx-4 mb-3 rounded-xl border border-border bg-background p-3 flex flex-col gap-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-medium">Add template for &ldquo;{category}&rdquo;</span>
-                            <button onClick={closeUploadPanel} className="text-muted-foreground hover:text-foreground">
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                          <label className={cn(
-                            "flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-border p-4 cursor-pointer transition hover:border-primary/60 hover:bg-muted/30",
-                            uploadFile && "border-primary/50 bg-primary/5"
-                          )}>
-                            <Upload className="w-4 h-4 text-muted-foreground" />
-                            <span className="text-xs text-muted-foreground">
-                              {uploadFile ? uploadFile.name : "Click to pick .xlsx / .csv"}
-                            </span>
-                            <input
-                              type="file"
-                              accept=".xlsx,.xlsm,.csv,.tsv"
-                              className="sr-only"
-                              onChange={(e) => {
-                                const f = e.target.files?.[0] ?? null;
-                                setUploadFile(f);
-                                if (f && uploadName === category) setUploadName(f.name.replace(/\.[^.]+$/, ""));
-                              }}
-                            />
-                          </label>
-                          <input
-                            type="text"
-                            value={uploadName}
-                            onChange={(e) => setUploadName(e.target.value)}
-                            placeholder="Template name"
-                            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
-                          />
-                          <div className="flex gap-2 justify-end">
-                            <button
-                              onClick={closeUploadPanel}
-                              className="text-xs px-3 py-1.5 rounded-lg border border-border hover:bg-muted/40"
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              onClick={submitTemplateUpload}
-                              disabled={!uploadFile || !uploadName.trim() || uploading}
-                              className="text-xs px-3 py-1.5 rounded-lg bg-primary text-primary-foreground font-medium disabled:opacity-50 hover:opacity-90"
-                            >
-                              {uploading ? "Uploading…" : "Upload"}
-                            </button>
-                          </div>
-                        </div>
+                      {uploadForCategory === category && uploadSource === "files" && (
+                        <TemplateUploadPanel
+                          category={category}
+                          tone="neutral"
+                          file={uploadFile}
+                          name={uploadName}
+                          uploading={uploading}
+                          onPickFile={(f) => { setUploadFile(f); if (f && uploadName === uploadForCategory) setUploadName(f.name.replace(/\.[^.]+$/, "")); }}
+                          onNameChange={setUploadName}
+                          onCancel={closeUploadPanel}
+                          onSubmit={submitTemplateUpload}
+                        />
                       )}
                     </div>
                   ))}
@@ -887,7 +1245,7 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                     key={t.id}
                     className={cn(
                       "flex items-center gap-3 px-4 py-3 cursor-pointer transition hover:bg-muted/40",
-                      selectedTemplateId === t.id && "bg-blue-50 border-blue-200"
+                      selectedTemplateId === t.id && "bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900"
                     )}
                   >
                     <input
@@ -901,14 +1259,14 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
                     <FileSpreadsheet className="w-4 h-4 text-muted-foreground shrink-0" />
                     <span className="text-sm flex-1 font-medium">{t.name}</span>
                     {t.userId === null && (
-                      <span className="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-medium">Admin</span>
+                      <span className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 px-1.5 py-0.5 rounded font-medium">Admin</span>
                     )}
                     {t.category && (
                       <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">{t.category}</span>
                     )}
                     <span className={cn(
                       "text-xs px-1.5 py-0.5 rounded font-medium",
-                      t.fileFormat === "xlsx" ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
+                      t.fileFormat === "xlsx" ? "bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300" : "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300"
                     )}>
                       {t.fileFormat.toUpperCase()}
                     </span>
