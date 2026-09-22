@@ -8,6 +8,34 @@ datasource db {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
+/// A group of people who share projects, templates and export defaults.
+///
+/// Mercato started single-tenant: every row belonged to one user and an admin
+/// saw everything. A team sits between those — its members share work, and a
+/// team_admin administers only their own team.
+///
+/// Nullable everywhere it is referenced, on purpose. Rows that predate teams,
+/// and genuinely global ones (an admin's template, a compliance default that
+/// applies to every client), carry no team and stay visible to all.
+model Team {
+  id   String @id @default(cuid())
+  name String
+  /// URL-safe handle, unique. Used in admin screens, never in a route yet.
+  slug String @unique
+  /// The ceiling for this team. A team_admin may grant its members any subset
+  /// of this list and never anything outside it.
+  allowedMarketplaces String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  projects  Project[]
+  templates ExportTemplate[]
+  defaults  ExportDefault[]
+
+  @@index([slug])
+}
+
 model User {
   id            String    @id @default(cuid())
   name          String?
@@ -15,7 +43,12 @@ model User {
   emailVerified DateTime?
   image         String?
   password      String?
-  role          String    @default("user") // "user" | "admin"
+  /// "user" | "team_admin" | "admin".
+  /// "admin" is the super admin and predates teams — it is deliberately NOT
+  /// renamed, so no existing row has to be migrated.
+  role          String    @default("user")
+  /// Null for rows that predate teams, and for the super admin.
+  teamId        String?
   // Marketplace ids a non-admin user may create projects for. Empty = none
   // allowed (explicit allow-list). Admins ignore this and see all.
   allowedMarketplaces String[] @default([])
@@ -26,6 +59,9 @@ model User {
   sessions  Session[]
   projects  Project[]
   templates ExportTemplate[]
+  team      Team? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
 }
 
 model Account {
@@ -69,6 +105,8 @@ model VerificationToken {
 model Project {
   id          String   @id @default(cuid())
   userId      String
+  /// Stamped from the creator's team. Null on rows that predate teams.
+  teamId      String?
   name        String
   marketplace String   // amazon | bestbuy | walmart | temu | mathis | sears
   status      String   @default("uploaded") // uploaded | verifying | verified | categorizing | categorized | exporting | done
@@ -89,7 +127,10 @@ model Project {
   updatedAt   DateTime @updatedAt
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team     Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
   products Product[]
+
+  @@index([teamId])
 }
 
 model Product {
@@ -210,6 +251,9 @@ model WalmartItemCache {
 model ExportTemplate {
   id          String   @id @default(cuid())
   userId      String?  // null = global (admin-created); set = user-private
+  /// Set = visible to that team only. Null WITH a null userId means truly
+  /// global; the two fields together answer "who may use this template".
+  teamId      String?
   name        String
   marketplace String
   category    String?
@@ -220,6 +264,9 @@ model ExportTemplate {
   updatedAt   DateTime @updatedAt
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  @@index([teamId])
 }
 
 // ── Export jobs ───────────────────────────────────────────────────────────────
@@ -239,6 +286,12 @@ model ExportJob {
   extension   String?  // zip | xlsx | csv
   contentType String?
   missingTemplateCategories Json? // string[] — Temu categories with no matching template
+  /// { columns: [{ label, rows }], aiUnavailable } — REQUIRED cells this export
+  /// shipped empty, rolled up per column, plus whether the AI was reachable at
+  /// all. Kept so the export screen can offer to set a default for a genuinely
+  /// unanswerable column — and can refuse to offer one when the cells are empty
+  /// merely because the AI had no credit.
+  unfilledRequired Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) // heartbeat — bumped on every phase/touch
 
@@ -318,6 +371,9 @@ model ServiceUsage {
 /// REQUIRED for that row's category and nothing else filled it.
 model ExportDefault {
   id          String   @id @default(cuid())
+  /// Null = applies to every team. A team's own row overrides the global one
+  /// for that marketplace and column.
+  teamId      String?
   marketplace String
   /// normalizeKey() of the column's label or attribute code.
   attribute String
@@ -327,8 +383,15 @@ model ExportDefault {
   updatedAt DateTime @updatedAt
   updatedBy String?
 
-  @@unique([marketplace, attribute])
+  team Team? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  /// Postgres treats NULLs as distinct, so this constraint does NOT stop two
+  /// GLOBAL rows sharing a marketplace+attribute. A partial unique index
+  /// covering the teamId IS NULL case is created alongside it in
+  /// scripts/apply-pending-tables.ts.
+  @@unique([teamId, marketplace, attribute])
   @@index([marketplace])
+  @@index([teamId])
 }
 
 // ── Resolved product attributes ───────────────────────────────────────────────

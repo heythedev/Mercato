@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 
@@ -22,7 +23,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   });
 
   if (!product) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (product.project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), product.project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   await prisma.product.update({
     where: { id },

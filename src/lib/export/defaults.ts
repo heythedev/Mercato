@@ -62,10 +62,21 @@ export type ExportDefaults = Map<string, string>;
  * "californiaProposition65Warning.type" also answers a column whose code is
  * category-prefixed ("Wall_Art.californiaProposition65Warning.type").
  */
-export async function loadExportDefaults(marketplace: string): Promise<ExportDefaults> {
+export async function loadExportDefaults(
+  marketplace: string,
+  teamId?: string | null,
+): Promise<ExportDefaults> {
   const rows = await prisma.exportDefault.findMany({
-    where: { marketplace: marketplace.toLowerCase() },
-    select: { attribute: true, value: true },
+    where: {
+      marketplace: marketplace.toLowerCase(),
+      // Global rows apply to everyone; a team's own row applies to that team.
+      OR: teamId ? [{ teamId: null }, { teamId }] : [{ teamId: null }],
+    },
+    select: { attribute: true, value: true, teamId: true },
+    // Global first, so a team's row overwrites it in the map below. A
+    // compliance declaration one client makes must not leak into another's
+    // export, and must beat the house default where they disagree.
+    orderBy: { teamId: "asc" },
   });
   const map: ExportDefaults = new Map();
   for (const r of rows) {

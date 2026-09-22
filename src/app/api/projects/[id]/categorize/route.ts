@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 
 export const maxDuration = 300;
 import { authGuard } from "@/lib/auth-helpers";
@@ -161,7 +162,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     where: { id },
     select: { userId: true, status: true, marketplace: true, categorizeCompletedAt: true, updatedAt: true },
   });
-  if (!project || project.userId !== user!.id) {
+  if (!project || !canOperateProject(actorOf(user), project)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -220,7 +221,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     select: { id: true, userId: true, marketplace: true, products: { select: { id: true, name: true, vendorSku: true } } },
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   let form: FormData;
   try { form = await req.formData(); } catch {
@@ -378,7 +379,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     select: { id: true, userId: true, marketplace: true, categorizeMs: true },
   });
   if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (projectMeta.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), projectMeta)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   // Preflight: categorization is entirely AI work, so a drained Kimi balance
   // must refuse the run up front. Starting anyway would flip the project to

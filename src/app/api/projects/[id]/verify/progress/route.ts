@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     select: { id: true, userId: true, status: true, verifyMs: true, verifyCompletedAt: true },
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const url = req.nextUrl;
   const limit = Math.min(Number(url.searchParams.get("limit")) || 100, 500);

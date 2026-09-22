@@ -19,7 +19,7 @@
 import "dotenv/config";
 import { prisma } from "../src/lib/db";
 
-const TABLES: { name: string; statements: string[] }[] = [
+const TABLES: { name: string; column?: string; statements: string[] }[] = [
   {
     name: "ServiceUsage",
     statements: [
@@ -105,14 +105,87 @@ const TABLES: { name: string; statements: string[] }[] = [
          ON "BalanceSnapshot"("service", "capturedAt")`,
     ],
   },
+  {
+    // A column, not a table — the export records which required cells it could
+    // not fill so the export screen can offer to set a default for each.
+    name: "ExportJob",
+    column: "unfilledRequired",
+    statements: [`ALTER TABLE "ExportJob" ADD COLUMN IF NOT EXISTS "unfilledRequired" JSONB`],
+  },
+  {
+    name: "Team",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "Team" (
+         "id" TEXT NOT NULL,
+         "name" TEXT NOT NULL,
+         "slug" TEXT NOT NULL,
+         "allowedMarketplaces" TEXT[] DEFAULT ARRAY[]::TEXT[],
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "Team_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "Team_slug_key" ON "Team"("slug")`,
+      `CREATE INDEX IF NOT EXISTS "Team_slug_idx" ON "Team"("slug")`,
+    ],
+  },
+  {
+    // Every teamId is NULLABLE and unindexed data until the backfill runs, so
+    // adding these changes nothing about how the app behaves.
+    name: "User",
+    column: "teamId",
+    statements: [
+      `ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "teamId" TEXT`,
+      `CREATE INDEX IF NOT EXISTS "User_teamId_idx" ON "User"("teamId")`,
+    ],
+  },
+  {
+    name: "Project",
+    column: "teamId",
+    statements: [
+      `ALTER TABLE "Project" ADD COLUMN IF NOT EXISTS "teamId" TEXT`,
+      `CREATE INDEX IF NOT EXISTS "Project_teamId_idx" ON "Project"("teamId")`,
+    ],
+  },
+  {
+    name: "ExportTemplate",
+    column: "teamId",
+    statements: [
+      `ALTER TABLE "ExportTemplate" ADD COLUMN IF NOT EXISTS "teamId" TEXT`,
+      `CREATE INDEX IF NOT EXISTS "ExportTemplate_teamId_idx" ON "ExportTemplate"("teamId")`,
+    ],
+  },
+  {
+    // The one place teams change an EXISTING constraint. The old unique was
+    // (marketplace, attribute); per team it has to include teamId. Postgres
+    // treats NULLs as distinct, so that alone would let two GLOBAL rows share a
+    // marketplace+attribute — hence the partial index covering teamId IS NULL.
+    name: "ExportDefault",
+    column: "teamId",
+    statements: [
+      `ALTER TABLE "ExportDefault" ADD COLUMN IF NOT EXISTS "teamId" TEXT`,
+      `CREATE INDEX IF NOT EXISTS "ExportDefault_teamId_idx" ON "ExportDefault"("teamId")`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "ExportDefault_teamId_marketplace_attribute_key"
+         ON "ExportDefault"("teamId", "marketplace", "attribute")`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "ExportDefault_global_marketplace_attribute_key"
+         ON "ExportDefault"("marketplace", "attribute") WHERE "teamId" IS NULL`,
+      // The old constraint would reject a team's override of a global column.
+      `ALTER TABLE "ExportDefault" DROP CONSTRAINT IF EXISTS "ExportDefault_marketplace_attribute_key"`,
+    ],
+  },
 ];
 
 (async () => {
   for (const t of TABLES) {
     for (const sql of t.statements) await prisma.$executeRawUnsafe(sql);
-    const [{ n }] = await prisma.$queryRaw<{ n: bigint }[]>`
-      select count(*) as n from information_schema.tables where table_name = ${t.name}`;
-    console.log(`  ${Number(n) > 0 ? "ok  " : "FAIL"} ${t.name}`);
+    // Verify what was actually asked for: an added column is not proved present
+    // by its table existing, which is what the table check would have reported.
+    const [{ n }] = t.column
+      ? await prisma.$queryRaw<{ n: bigint }[]>`
+          select count(*) as n from information_schema.columns
+          where table_name = ${t.name} and column_name = ${t.column}`
+      : await prisma.$queryRaw<{ n: bigint }[]>`
+          select count(*) as n from information_schema.tables where table_name = ${t.name}`;
+    console.log(`  ${Number(n) > 0 ? "ok  " : "FAIL"} ${t.name}${t.column ? "." + t.column : ""}`);
   }
   console.log("\nAll pending tables are present.");
   await prisma.$disconnect();

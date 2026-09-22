@@ -3,6 +3,7 @@ import { requireUser } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
 import { ProjectDetail } from "@/components/projects/project-detail";
+import { actorOf, canReadProject } from "@/lib/authz";
 
 export const dynamic = "force-dynamic";
 
@@ -21,9 +22,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   });
 
   if (!project) notFound();
-  if (project.userId !== user.id && (user as { role?: string }).role !== "admin") {
-    redirect("/projects");
-  }
+  if (!canReadProject(actorOf(user), project)) redirect("/projects");
 
   return (
     <ProjectDetail

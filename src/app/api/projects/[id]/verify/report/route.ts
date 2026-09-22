@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { toDisplayBarcode } from "@/lib/barcode";
@@ -29,7 +30,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   });
 
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   // Build CSV
   // `colour` and `pack` each emit a (Catalog) / (Marketplace) / Result triple,

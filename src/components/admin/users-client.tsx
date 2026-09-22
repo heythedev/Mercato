@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Users, Plus, Trash2, UserCheck, UserX, X, Eye, EyeOff, KeyRound, Store, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatDate } from "@/lib/format-date";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MARKETPLACE_TILES } from "@/lib/marketplaces/catalog";
 
@@ -13,6 +14,27 @@ type User = {
   role: string;
   allowedMarketplaces: string[];
   createdAt: Date | string;
+  teamId: string | null;
+};
+
+type Team = { id: string; name: string };
+
+/**
+ * Roles as a person reads them.
+ *
+ * "admin" is the super admin and predates teams — the label says so explicitly,
+ * because "Admin" next to "Team admin" reads like the lesser of the two.
+ */
+const ROLE_LABEL: Record<string, string> = {
+  user: "User",
+  team_admin: "Team admin",
+  admin: "Super admin",
+};
+
+const ROLE_BADGE: Record<string, string> = {
+  user: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  team_admin: "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300",
+  admin: "bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300",
 };
 
 function MarketplaceLogo({ domain, className }: { domain: string; className?: string }) {
@@ -26,7 +48,21 @@ function MarketplaceLogo({ domain, className }: { domain: string; className?: st
   );
 }
 
-export function AdminUsersClient({ users: initial }: { users: User[] }) {
+export function AdminUsersClient({
+  users: initial,
+  teams = [],
+  isSuperAdmin = false,
+}: {
+  users: User[];
+  teams?: Team[];
+  /** Only the super admin may mint another one, or move people between teams. */
+  isSuperAdmin?: boolean;
+}) {
+  const [teamList, setTeamList] = useState<Team[]>(teams);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [creatingTeam, setCreatingTeam] = useState(false);
+  /** The row whose team is being changed, so only it shows a spinner. */
+  const [movingUser, setMovingUser] = useState<string | null>(null);
   const confirm = useConfirm();
   const [users, setUsers] = useState(initial);
   const [showAdd, setShowAdd] = useState(false);
@@ -79,7 +115,13 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
   }
 
   async function handleToggleRole(user: User) {
-    const newRole = user.role === "admin" ? "user" : "admin";
+    // Cycles user → team admin → super admin → user, skipping the super-admin
+    // step for a team admin, who may not create one.
+    const cycle = isSuperAdmin
+      ? ["user", "team_admin", "admin"]
+      : ["user", "team_admin"];
+    const at = cycle.indexOf(user.role);
+    const newRole = cycle[(at + 1) % cycle.length] ?? "user";
     try {
       const res = await fetch("/api/users", {
         method: "PATCH",
@@ -94,6 +136,49 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
     }
   }
 
+  /** Create a team. Super admin only — the API enforces it too. */
+  async function handleCreateTeam() {
+    const name = newTeamName.trim();
+    if (!name) return;
+    setCreatingTeam(true);
+    try {
+      const res = await fetch("/api/teams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { team?: Team; error?: string };
+      if (!res.ok || !data.team) {
+        alert(data.error ?? "Could not create the team");
+        return;
+      }
+      setTeamList((prev) => [...prev, data.team!].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewTeamName("");
+    } finally {
+      setCreatingTeam(false);
+    }
+  }
+
+  /** Move a user into a team, or out of every team when value is "". */
+  async function handleChangeTeam(user: User, value: string) {
+    setMovingUser(user.id);
+    try {
+      const res = await fetch("/api/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: user.id, teamId: value || null }),
+      });
+      const updated = (await res.json().catch(() => ({}))) as User & { error?: string };
+      if (!res.ok) {
+        alert(updated.error ?? "Could not change the team");
+        return;
+      }
+      applyUpdate(updated);
+    } finally {
+      setMovingUser(null);
+    }
+  }
+
   function applyUpdate(updated: User) {
     setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
   }
@@ -105,13 +190,44 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Users className="w-4 h-4" />
           {users.length} user{users.length !== 1 ? "s" : ""}
+          {teamList.length > 0 && (
+            <span className="text-muted-foreground">
+              · {teamList.length} team{teamList.length !== 1 ? "s" : ""}
+            </span>
+          )}
         </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition"
-        >
-          <Plus className="w-3.5 h-3.5" /> Add User
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Creating a team belongs next to the people you put in it; a
+              separate screen for two fields would be a page nobody visits. */}
+          {isSuperAdmin && (
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={newTeamName}
+                onChange={(e) => setNewTeamName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCreateTeam();
+                }}
+                placeholder="New team name"
+                className="h-8 w-36 rounded-lg border bg-background px-2.5 text-sm"
+              />
+              <button
+                onClick={() => handleCreateTeam()}
+                disabled={!newTeamName.trim() || creatingTeam}
+                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border text-sm hover:bg-muted disabled:opacity-50"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                {creatingTeam ? "Adding…" : "Team"}
+              </button>
+            </div>
+          )}
+          <button
+            onClick={() => setShowAdd(true)}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition"
+          >
+            <Plus className="w-3.5 h-3.5" /> Add User
+          </button>
+        </div>
       </div>
 
       {/* Add form */}
@@ -158,7 +274,10 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
               className="h-9 rounded-lg border bg-background px-3 text-sm"
             >
               <option value="user">User</option>
-              <option value="admin">Admin</option>
+              <option value="team_admin">Team admin</option>
+              {/* Only a super admin can mint another; the API refuses it too,
+                  so this is convenience rather than the enforcement. */}
+              {isSuperAdmin && <option value="admin">Super admin</option>}
             </select>
             <div className="sm:col-span-2 flex gap-2 justify-end">
               <button type="button" onClick={() => setShowAdd(false)} className="h-8 px-3 rounded-lg border text-sm">Cancel</button>
@@ -185,20 +304,56 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
           </thead>
           <tbody>
             {users.map((user) => {
-              const isAdmin = user.role === "admin";
+              const isSuper = user.role === "admin";
+              // Only the super admin implicitly holds every marketplace; a team
+              // admin is bounded by the allow-list like anyone else.
+              const holdsAll = isSuper;
               return (
               <tr key={user.id} className="border-b last:border-0 hover:bg-muted/20 transition">
                 <td className="px-4 py-3 font-medium">{user.name ?? <span className="text-muted-foreground">—</span>}</td>
                 <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
                 <td className="px-4 py-3">
-                  <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium",
-                    isAdmin ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
-                  )}>
-                    {user.role}
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium",
+                      ROLE_BADGE[user.role] ?? "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {ROLE_LABEL[user.role] ?? user.role}
                   </span>
+                  {isSuperAdmin ? (
+                    // Which team someone works in is set here, next to the role
+                    // it qualifies: "Team admin" means nothing until you can see
+                    // — and change — the team it administers.
+                    <select
+                      value={user.teamId ?? ""}
+                      disabled={movingUser === user.id}
+                      onChange={(e) => handleChangeTeam(user, e.target.value)}
+                      className="ml-2 h-6 rounded-md border bg-background px-1.5 text-[11px] text-muted-foreground disabled:opacity-50"
+                      title="The team this person works in"
+                    >
+                      <option value="">No team</option>
+                      {teamList.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="ml-2 text-[11px] text-muted-foreground">
+                      {teamList.find((t) => t.id === user.teamId)?.name ?? "No team"}
+                    </span>
+                  )}
+                  {user.role === "team_admin" && !user.teamId && (
+                    // The role is scoped to a team; without one it grants
+                    // nothing at all, which is worth saying out loud.
+                    <span className="ml-2 text-[11px] text-amber-600 dark:text-amber-400">
+                      needs a team
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
-                  {isAdmin ? (
+                  {holdsAll ? (
                     <span className="text-xs text-muted-foreground">All</span>
                   ) : user.allowedMarketplaces.length === 0 ? (
                     <span className="text-xs text-muted-foreground">None</span>
@@ -214,11 +369,11 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
                   )}
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">
-                  {new Date(user.createdAt).toLocaleDateString()}
+                  {formatDate(user.createdAt)}
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1 justify-end">
-                    {!isAdmin && (
+                    {!holdsAll && (
                       <button
                         onClick={() => setMpUser(user)}
                         title="Manage marketplaces"
@@ -236,10 +391,10 @@ export function AdminUsersClient({ users: initial }: { users: User[] }) {
                     </button>
                     <button
                       onClick={() => handleToggleRole(user)}
-                      title={isAdmin ? "Demote to user" : "Promote to admin"}
+                      title={`Change role (now: ${ROLE_LABEL[user.role] ?? user.role})`}
                       className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition"
                     >
-                      {isAdmin ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
+                      {isSuper ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
                     </button>
                     <button
                       onClick={() => handleDelete(user.id)}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
+import { actorOf, canDeleteProject, canReadProject } from "@/lib/authz";
 
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { user, response } = await authGuard();
@@ -10,7 +11,10 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
 
   const project = await prisma.project.findUnique({ where: { id } });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  // Owner only — an admin may READ any project but not delete one.
+  if (!canDeleteProject(actorOf(user), project)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   await prisma.project.delete({ where: { id } });
   return NextResponse.json({ ok: true });
@@ -33,8 +37,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   // Admins can open any project page, so the refresh call must not 403 them.
-  const isAdmin = (user as { role?: string }).role === "admin";
-  if (project.userId !== user!.id && !isAdmin) {
+  if (!canReadProject(actorOf(user), project)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

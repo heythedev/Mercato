@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 
 // Each request adjudicates ONE small chunk and returns; the client loops with
 // a cursor. Worst case per chunk is 6 image-pair downloads plus 6 vision calls,
@@ -96,7 +97,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     select: { id: true, userId: true, marketplace: true },
   });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const body = (await req.json().catch(() => ({}))) as { cursor?: unknown; fresh?: unknown };
   const cursor = typeof body.cursor === "string" ? body.cursor : "";

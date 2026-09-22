@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { parseVendorFile } from "@/lib/vendor/parse";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
 import { canUseMarketplace } from "@/lib/marketplaces/catalog";
+import { actorOf, projectDeleteScope, projectListScope } from "@/lib/authz";
+import { teamIdForNewRow } from "@/lib/authz";
 
 export const maxDuration = 300;
 
@@ -66,7 +68,16 @@ export async function POST(req: NextRequest) {
   // stranded in "uploading", so a kill can't leave a half-imported project
   // masquerading as a complete one.
   const project = await prisma.project.create({
-    data: { userId: user!.id, name, marketplace, status: "uploading", isNewListing },
+    data: {
+      userId: user!.id,
+      // Inherited from the creator, so the project is visible to their team
+      // admin from the moment it exists.
+      teamId: teamIdForNewRow(actorOf(user)),
+      name,
+      marketplace,
+      status: "uploading",
+      isNewListing,
+    },
   });
 
   // Insert sizing, learned the hard way against Render Postgres and revised for
@@ -148,7 +159,7 @@ export async function DELETE(req: NextRequest) {
 
   // Only delete projects owned by the current user
   await prisma.project.deleteMany({
-    where: { id: { in: ids }, userId: user!.id },
+    where: { id: { in: ids }, ...projectDeleteScope(actorOf(user)) },
   });
 
   return NextResponse.json({ ok: true });
@@ -162,7 +173,7 @@ export async function GET() {
     await recoverStaleProjects({ userId: user!.id });
 
     const projects = await prisma.project.findMany({
-      where: { userId: user!.id },
+      where: projectListScope(actorOf(user)),
       include: { _count: { select: { products: true } } },
       orderBy: { updatedAt: "desc" },
     });

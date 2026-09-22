@@ -34,11 +34,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         });
         token.id = dbUser.id;
         token.role = dbUser.role;
+        token.teamId = dbUser.teamId;
         token.email = dbUser.email;
         token.name = dbUser.name ?? null;
       } else if (user) {
         token.id = user.id;
         token.role = (user as { role?: string }).role ?? "user";
+        token.teamId = (user as { teamId?: string | null }).teamId ?? null;
+      }
+
+      // Refresh role and team from the database on every pass, not only at
+      // sign-in. A JWT session lasts days: without this, moving someone
+      // between teams or changing their role would not take effect until they
+      // happened to sign out, and a removed team admin would keep their reach.
+      if (token.id) {
+        const fresh = await prisma.user
+          .findUnique({ where: { id: token.id as string }, select: { role: true, teamId: true } })
+          .catch(() => null);
+        if (fresh) {
+          token.role = fresh.role;
+          token.teamId = fresh.teamId;
+        }
       }
       return token;
     },
@@ -67,7 +83,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!user?.password) return null;
         const ok = await bcrypt.compare(password, user.password);
         if (!ok) return null;
-        return { id: user.id, email: user.email, name: user.name ?? undefined, role: user.role };
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name ?? undefined,
+          role: user.role,
+          teamId: user.teamId,
+        };
       },
     }),
     ...(googleEnabled

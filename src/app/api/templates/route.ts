@@ -4,6 +4,15 @@ import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { readXlsxGrid } from "@/lib/vendor/xlsx-lite";
 import { detectTemplateCategory } from "@/lib/ai/detect-template-category";
+import {
+  actorOf,
+  adminUserIds,
+  canWriteTemplate,
+  isGlobalTemplate,
+  ownerIdForNewTemplate,
+  teamIdForNewRow,
+  templateVisibilityOr,
+} from "@/lib/authz";
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const ALLOWED_EXT = new Set([".xlsx", ".xlsm", ".csv", ".tsv"]);
@@ -23,20 +32,16 @@ export async function GET(req: NextRequest) {
 
   // Also pick up templates owned by admin users — some may have userId=adminId instead of null
   // if they were uploaded before the userId=null convention was enforced.
-  const adminUsers = await prisma.user.findMany({ where: { role: "admin" }, select: { id: true } });
-  const adminIds = adminUsers.map((u) => u.id);
+  const adminIds = await adminUserIds();
   const adminIdSet = new Set(adminIds);
+  const actor = actorOf(user);
 
   // Return user's own templates + global/admin templates.
   // Exclude fileData (BYTEA blob) — only column definitions are needed for listing and export.
   const rawTemplates = await prisma.exportTemplate.findMany({
     where: {
       ...(marketplace ? { marketplace: { in: marketplaceFamily(marketplace), mode: "insensitive" } } : {}),
-      OR: [
-        { userId: user!.id },
-        { userId: null },
-        ...(adminIds.length > 0 ? [{ userId: { in: adminIds } }] : []),
-      ],
+      OR: templateVisibilityOr(actor, adminIds),
     },
     select: {
       id: true, name: true, marketplace: true, category: true,
@@ -48,7 +53,7 @@ export async function GET(req: NextRequest) {
   // Normalize: treat admin-owned templates as userId=null so the Admin badge shows on the client.
   const templates = rawTemplates.map((t) => ({
     ...t,
-    userId: t.userId === null || adminIdSet.has(t.userId ?? "") ? null : t.userId,
+    userId: isGlobalTemplate(t, adminIdSet) ? null : t.userId,
   }));
 
   return NextResponse.json({ templates });
@@ -115,7 +120,8 @@ export async function POST(req: NextRequest) {
 
     const template = await prisma.exportTemplate.create({
       data: {
-        userId: (user as { role?: string }).role === "admin" ? null : user!.id,
+        userId: ownerIdForNewTemplate(actorOf(user)),
+        teamId: teamIdForNewRow(actorOf(user)),
         name,
         marketplace,
         category: resolvedCategory,
@@ -138,7 +144,8 @@ export async function POST(req: NextRequest) {
 
   const template = await prisma.exportTemplate.create({
     data: {
-      userId: (user as { role?: string }).role === "admin" ? null : user!.id,
+      userId: ownerIdForNewTemplate(actorOf(user)),
+      teamId: teamIdForNewRow(actorOf(user)),
       name,
       marketplace,
       category: category ?? null,
@@ -159,7 +166,7 @@ export async function PATCH(req: NextRequest) {
 
   const template = await prisma.exportTemplate.findUnique({ where: { id } });
   if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (template.userId !== user!.id && user!.role !== "admin") {
+  if (!canWriteTemplate(actorOf(user), template)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -187,7 +194,7 @@ export async function DELETE(req: NextRequest) {
   if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   // Users can only delete their own templates; admins can delete any
-  if (template.userId !== user!.id && user!.role !== "admin") {
+  if (!canWriteTemplate(actorOf(user), template)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 
 export const maxDuration = 60;
 import { authGuard } from "@/lib/auth-helpers";
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   });
 
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const product = project.products[0];
   if (!product) return NextResponse.json({ error: "Product not found in project" }, { status: 404 });
 

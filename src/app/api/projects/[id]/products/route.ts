@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
+import { actorOf, canReadProject } from "@/lib/authz";
 
 // One page of a project's product list. The project page used to load the
 // entire catalog inside its server render; at 10k products that single
@@ -17,8 +18,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const project = await prisma.project.findUnique({ where: { id }, select: { userId: true } });
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   // Admins can open any project page, so they must be able to load its rows too.
-  const isAdmin = (user as { role?: string }).role === "admin";
-  if (project.userId !== user!.id && !isAdmin) {
+  if (!canReadProject(actorOf(user), project)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

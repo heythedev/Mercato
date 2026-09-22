@@ -34,6 +34,10 @@ export const authConfig: NextAuthConfig = {
       if (session.user) {
         session.user.id = (token.id as string) ?? session.user.id;
         (session.user as { role?: string }).role = (token.role as string) ?? "user";
+        // Every authorization decision reads this through actorOf(); without it
+        // on the session, a team admin would look team-less and be scoped to
+        // nothing at all.
+        (session.user as { teamId?: string | null }).teamId = (token.teamId as string | null) ?? null;
       }
       return session;
     },

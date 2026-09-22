@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { actorOf, canOperateProject } from "@/lib/authz";
 
 // Vercel's Hobby-plan ceiling (Pro allows 800). A full 10k-product run takes
 // ~10 minutes, so it no longer fits one request — the time budget below stops
@@ -309,7 +310,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   });
 
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (project.userId !== user!.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!canOperateProject(actorOf(user), project)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   // Resume by default: only products that were never verified are processed, so
   // a run cut short by the duration ceiling can be continued by calling again.

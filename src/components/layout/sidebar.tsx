@@ -7,8 +7,7 @@ import {
   Users,
   FileText,
   Activity,
-  SlidersHorizontal,
-  ChevronsLeft,
+    ChevronsLeft,
   ChevronsRight,
   X,
 } from "lucide-react";
@@ -33,13 +32,15 @@ const adminNav = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/templates", label: "Templates", icon: FileText },
-  { href: "/admin/export-defaults", label: "Export defaults", icon: SlidersHorizontal },
   { href: "/admin/usage", label: "Usage & credits", icon: Activity },
 ];
 
 export function Sidebar({ role, showAmazonSources = false }: Props) {
   const path = usePathname();
-  const isAdmin = role === "admin";
+  // A team admin gets the same screens as the super admin; each one scopes
+  // itself to their team. The difference is what the pages show, not which
+  // pages exist.
+  const isAdmin = role === "admin" || role === "team_admin";
   const navItems = isAdmin ? adminNav : userNav;
   const { collapsed, toggleCollapsed, mobileOpen, closeMobile } = useSidebar();
 

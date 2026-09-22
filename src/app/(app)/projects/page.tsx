@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { recoverStaleProjects } from "@/lib/projects/recover-stale";
 import { ProjectsView } from "@/components/projects/projects-view";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
+import { actorOf, allowedMarketplacesFor, projectListScope } from "@/lib/authz";
 
 export const dynamic = "force-dynamic";
 
@@ -29,12 +30,13 @@ export default async function ProjectsPage() {
     where: { id: user.id },
     select: { role: true, allowedMarketplaces: true },
   });
-  const allowedTiles = account?.role === "admin"
-    ? MARKETPLACE_IDS
-    : (account?.allowedMarketplaces ?? []);
+  // Role comes from the row just read, not the session, so a change of role
+  // takes effect on the next page load rather than the next sign-in.
+  const actor = actorOf({ id: user.id, role: account?.role });
+  const allowedTiles = allowedMarketplacesFor(actor, MARKETPLACE_IDS, account?.allowedMarketplaces);
 
   const projects = await prisma.project.findMany({
-    where: { userId: user.id },
+    where: projectListScope(actor),
     include: { _count: { select: { products: true } } },
     orderBy: { updatedAt: "desc" },
   });
