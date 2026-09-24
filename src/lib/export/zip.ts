@@ -2446,6 +2446,15 @@ async function fillTemplateXlsx(
           continue;
         }
 
+        // Before any fill path. This guard used to sit further down, after the
+        // dropdown branch had already pushed its query and moved on — so it
+        // only ever protected free-text cells. Every mandatory column WITH a
+        // dropdown went to the model unguarded, which is how Proposition 65,
+        // PFAS and "contains embedded battery" came to be answered by it: they
+        // are all Yes/No lists. Measured on two Best Buy projects, 99 of 99
+        // stored values on one of them were the model's own.
+        if (neverInventColumn(nk) || neverInventColumn(nk2)) continue;
+
         const isColour = COLOUR_KEYS.has(nk) || COLOUR_KEYS.has(nk2);
         if (DETERMINISTIC_FILL_KEYS.has(nk) || DETERMINISTIC_FILL_KEYS.has(nk2)) {
           // Deterministic columns reach the AI only when their own rule will
@@ -2481,12 +2490,9 @@ async function fillTemplateXlsx(
         }
 
         // No dropdown: a free-text pink cell. These are most of a Mathis
-        // template's mandatory columns (Brand, Short Description, the
-        // DIMH/DIMW/DIMD/weight block) and used to be skipped outright, so they
-        // came out blank on every row. Identifier and media columns are never
-        // sent — a fabricated barcode or image URL passes import and then fails
-        // in public, which is worse than the blank an operator would fix.
-        if (neverInventColumn(nk) || neverInventColumn(nk2)) continue;
+        // template's mandatory columns (Brand, Short Description) and used to
+        // be skipped outright, so they came out blank on every row. What may
+        // not be invented was already filtered out above.
         const spec = reqMatrix.specByAttr.get(nk) ?? reqMatrix.specByAttr.get(nk2);
         freeTextQueries.push({
           key: `${p.id}|${letter}`,

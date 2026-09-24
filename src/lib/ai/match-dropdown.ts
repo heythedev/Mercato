@@ -513,8 +513,27 @@ No other text.`,
  */
 export function neverInventColumn(normalizedKey: string): boolean {
   const k = normalizedKey;
+  // Media and identifiers: a fabricated barcode or image URL passes import and
+  // then fails in public.
   if (/(image|photo|video|url|link)/.test(k)) return true;
   if (/(upc|ean|gtin|barcode|isbn|asin)/.test(k)) return true;
   if (/(sku|partnumber|mpn|variantgroup|modelnumber|itemnumber)/.test(k)) return true;
+
+  // Physical measurements. These are facts about the object, and a guessed one
+  // reaches the customer as a specification and the carrier as a shipping
+  // quote. They come from the catalog lookup (Keepa/Synccentric) or not at all.
+  // The unit of measure goes with them: a unit beside an empty measurement says
+  // nothing, and a unit beside a guessed one lends it false authority.
+  // `length` is unanchored: the column is usually "Product Length", not
+  // "Length". dim[hwd] catches Mathis's DIMH / DIMW / DIMD abbreviations, and
+  // is anchored so it cannot swallow "dimmable".
+  if (/(dimension|length|width|height|depth|weight|^dim[hwd]$)/.test(k)) return true;
+
+  // Declarations the SELLER makes, not facts to be inferred. A wrong
+  // Proposition 65 or PFAS answer is a false legal statement published under
+  // the client's name, and a wrong battery answer is a shipping violation.
+  if (/(proposition65|prop65|pfas)/.test(k)) return true;
+  if (/(battery|hazmat|lithium|flammable|hazardous)/.test(k)) return true;
+
   return false;
 }
