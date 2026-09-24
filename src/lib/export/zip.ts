@@ -2403,6 +2403,19 @@ async function fillTemplateXlsx(
   const aiFill = new Map<string, string>();
   if (reqMatrix) {
     const COLOUR_KEYS = new Set(["color", "colour", "casingfinishcolor", "finishcolor"]);
+    /**
+     * The template's own instruction for a column — its Description and Value
+     * example from the Columns sheet.
+     *
+     * Every fill branch sends this now. It used to be read on the free-text
+     * branch only, so a mandatory column that happened to have a dropdown was
+     * answered from its header alone and the sheet's own instruction for that
+     * cell never reached the model. That is the client's first feedback bullet.
+     */
+    const specFor = (a: string, b: string): { description?: string; example?: string } => {
+      const spec = reqMatrix.specByAttr.get(a) ?? reqMatrix.specByAttr.get(b);
+      return { description: spec?.description || undefined, example: spec?.example || undefined };
+    };
     const fillQueries: DropdownFillQuery[] = [];
     const freeTextQueries: FreeTextFillQuery[] = [];
     for (const p of products) {
@@ -2472,6 +2485,7 @@ async function fillTemplateXlsx(
           fillQueries.push({
             key: `${p.id}|${letter}`,
             column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+            ...specFor(nk, nk2),
             context,
             options: dropdowns.get(letter) ?? COLOUR_FILL_OPTIONS,
           });
@@ -2483,6 +2497,7 @@ async function fillTemplateXlsx(
           fillQueries.push({
             key: `${p.id}|${letter}`,
             column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
+            ...specFor(nk, nk2),
             context,
             options,
           });
@@ -2493,12 +2508,10 @@ async function fillTemplateXlsx(
         // template's mandatory columns (Brand, Short Description) and used to
         // be skipped outright, so they came out blank on every row. What may
         // not be invented was already filtered out above.
-        const spec = reqMatrix.specByAttr.get(nk) ?? reqMatrix.specByAttr.get(nk2);
         freeTextQueries.push({
           key: `${p.id}|${letter}`,
           column: colLetterToHeader.get(letter) ?? col.label ?? col.key,
-          description: spec?.description,
-          example: spec?.example,
+          ...specFor(nk, nk2),
           context,
         });
       }

@@ -260,6 +260,21 @@ export type DropdownFillQuery = {
   key: string;
   /** Template column header ("STYLE", "Assembly Required"). */
   column: string;
+  /**
+   * The template's own description of the field, from its Columns sheet.
+   *
+   * The free-text fill has always passed this; the dropdown fill did not, and
+   * the client's feedback was precisely "the system should follow the
+   * instructions mentioned in each mandatory cell". An option list says what
+   * may be answered, not which reading of the column is meant — Best Buy's
+   * "Assembly Required" wants whether the CUSTOMER assembles it, and its
+   * "Color" column asks for the dominant colour of the item as shipped, not of
+   * the scene in the photo. Both are stated in the sheet and were being thrown
+   * away at the door.
+   */
+  description?: string;
+  /** The template's own value example for the field, if it gives one. */
+  example?: string;
   /** Product identity: name, brand, description — what a human operator would read. */
   context: string;
   /** The column's allowed options, verbatim from the template. */
@@ -300,7 +315,9 @@ export async function fillDropdownValues(
   );
   const byAsk = new Map<string, { q: DropdownFillQuery; keys: string[] }>();
   for (const q of usable) {
-    const askKey = `${q.column} ${q.context} ${q.options.join("")}`;
+    const askKey =
+      `${q.column} ${q.description ?? ""} ${q.example ?? ""}` +
+      ` ${q.context} ${q.options.join("")}`;
     const cur = byAsk.get(askKey);
     if (cur) cur.keys.push(q.key);
     else byAsk.set(askKey, { q, keys: [q.key] });
@@ -317,7 +334,16 @@ export async function fillDropdownValues(
         const items = batch
           .map(({ q }, n) => {
             const opts = q.options.map((o) => `    - ${o}`).join("\n");
-            return `${n + 1}. column: "${q.column}"\n   product: ${q.context}\n   allowed options:\n${opts}`;
+            // Same shape as the free-text path, so one template instruction
+            // reads identically to the model whichever branch a column takes.
+            const spec = [
+              q.description ? `   what this column wants: ${q.description}` : "",
+              q.example ? `   example value: ${q.example}` : "",
+            ].filter(Boolean).join("\n");
+            return (
+              `${n + 1}. column: "${q.column}"\n${spec ? spec + "\n" : ""}` +
+              `   product: ${q.context}\n   allowed options:\n${opts}`
+            );
           })
           .join("\n\n");
 
@@ -333,6 +359,7 @@ For each item choose the single allowed option that best describes the product.
 Rules:
 - Copy the chosen option EXACTLY as written in its list (same spelling, casing, spacing, punctuation).
 - Choose from that item's OWN option list only — never an option from another item.
+- When an item says what the column wants, follow it over your own reading of the column name; it is the template's own instruction for that cell.
 - Commit to the best-fitting option; when several fit, pick the most typical for this kind of product.
 - Output an empty string after the colon ONLY when the product information says nothing usable for the column at all.
 
