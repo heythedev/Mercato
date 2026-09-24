@@ -166,7 +166,36 @@ describe("template visibility", () => {
   it("omits the team clause when the actor has no team", () => {
     // `{ teamId: null }` would match every row written before teams existed and
     // expose the whole library.
-    expect(templateVisibilityOr(admin, [])).toEqual([{ userId: "a1" }, { userId: null }]);
+    expect(templateVisibilityOr({ ...owner, teamId: null }, ["a1"])).toEqual([
+      { userId: "u1" },
+      { userId: null },
+      { userId: { in: ["a1"] } },
+    ]);
+  });
+
+  it("shows the super admin everything, including each team's own", () => {
+    // The admin belongs to no team, so before this they matched no team clause
+    // and were the only account that could not see a team's templates — the
+    // narrowest view in the system belonged to the person administering it.
+    // On live data that was 20 of 22 templates for the admin against 22 of 22
+    // for an ordinary member of a team.
+    // NOT `[{}]` — Prisma strips an empty object out of an OR array and the
+    // resulting `OR: []` matches no rows, which is the opposite of the intent.
+    expect(templateVisibilityOr(admin, ["a1"])).toEqual([{ id: { not: "" } }]);
+  });
+
+  it("keeps a team admin inside their own team", () => {
+    // A team admin publishes to their team, never across teams: no clause here
+    // can match another team's rows, and only the super admin's uploads
+    // (userId null) are visible to everyone.
+    const clauses = templateVisibilityOr(teamAdmin, ["a1"]);
+    expect(clauses).toEqual([
+      { userId: "ta" },
+      { userId: null },
+      { userId: { in: ["a1"] } },
+      { teamId: TEAM },
+    ]);
+    expect(JSON.stringify(clauses)).not.toContain(OTHER);
   });
 
   it("omits the admin clause entirely when there are no admins", () => {

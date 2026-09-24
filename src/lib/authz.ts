@@ -167,9 +167,17 @@ export async function adminUserIds(): Promise<string[]> {
 }
 
 /**
- * The OR clause selecting the templates an actor may use: their own, the
- * explicitly global ones, and anything an admin uploaded before the `userId:
- * null` convention.
+ * The OR clause selecting the templates an actor may use.
+ *
+ * The rule, in the order the clauses below express it:
+ *   super admin  → every template there is, including each team's own
+ *   anyone else  → their own, their team's, and the global ones
+ *
+ * "Global" means uploaded by the super admin: {@link ownerIdForNewTemplate}
+ * stamps `userId: null` for an admin and the actor's own id for everyone else,
+ * and {@link teamIdForNewRow} stamps the uploader's team. So a team admin's
+ * upload stays inside that team and is shared with its members, and only the
+ * super admin can publish to everyone.
  *
  * Pass the ids from {@link adminUserIds}; it is a separate query so a caller
  * that needs the ids for its own display logic does not run it twice.
@@ -178,6 +186,18 @@ export function templateVisibilityOr(
   actor: Actor,
   adminIds: string[],
 ): Prisma.ExportTemplateWhereInput[] {
+  // The super admin sees everything. Without this the account that administers
+  // the system had the NARROWEST view of it: measured on live data the admin
+  // saw 20 of 22 templates while every ordinary member of a team saw all 22 —
+  // because the admin belongs to no team, so no team clause ever matched and
+  // both of the team-owned templates were invisible to them.
+  //
+  // The always-true clause is an explicit predicate, NOT `{}`: Prisma drops an
+  // empty object out of an OR array, leaving `OR: []`, which matches nothing at
+  // all. That was measured too — it took the admin from 20 rows to 0. An id is
+  // a cuid and is never the empty string, so this matches every row.
+  if (isAdmin(actor)) return [{ id: { not: "" } }];
+
   return [
     { userId: actor.id },
     { userId: null },
