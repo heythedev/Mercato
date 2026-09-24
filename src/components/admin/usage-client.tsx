@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import {
   AlertTriangle,
   ChevronDown,
-  Download,
   ExternalLink,
   FileText,
   Info,
@@ -52,14 +51,29 @@ type Balances = {
   synccentric?: { configured: boolean; remaining: number | null; limit: number | null };
 };
 
-const RANGES = [7, 30, 90] as const;
+/**
+ * Windows an admin actually asks for.
+ *
+ * 7/30/90 assumed every question was a trend. Most are not: "what did
+ * yesterday's run cost", "did anything fail overnight", "what have we spent
+ * since the top-up" are all sub-week questions, and there was no way to ask
+ * them — the shortest answer available was seven days of noise around one day
+ * of signal.
+ *
+ * The window is a rolling one (the API takes `now() - N days`), so 1 is the
+ * last 24 hours, not the calendar day. Labelled accordingly: "Last 1 days" is
+ * both wrong and ugly.
+ */
+const RANGES = [1, 2, 3, 7, 30, 90] as const;
+
+const rangeLabel = (r: number): string =>
+  r === 1 ? "24 hours" : r < 7 ? `${r} days` : `Last ${r} days`;
 const SERVICES = ["kimi", "keepa", "synccentric"] as const;
 
 const fmt = (n: number) => n.toLocaleString();
 const usd = (n: number | null) => (n === null || n === 0 ? "—" : `$${n.toFixed(2)}`);
 /** Tokens read better in millions once a sweep has run. */
 const tok = (n: number) => (n === 0 ? "—" : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : fmt(n));
-const unit = (n: number) => (n === 0 ? "—" : fmt(n));
 /** Axis ticks have no room for thousands separators. */
 const compact = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${Math.round(n / 1000)}k` : String(Math.round(n));
@@ -236,7 +250,7 @@ export function AdminUsageClient() {
                 days === r ? "bg-foreground text-background" : "hover:bg-muted",
               )}
             >
-              Last {r} days
+              {rangeLabel(r)}
             </button>
           ))}
         </div>
@@ -249,9 +263,11 @@ export function AdminUsageClient() {
           Refresh
         </button>
 
-        {/* The report is the thing you hand to someone; the CSV is the thing
-            you pivot. Leading with the report because the raw call list was
-            being downloaded by people who wanted a summary. */}
+        {/* The report is the only export here now. The raw per-call CSV sat
+            beside it and was the one people clicked, then pivoted by hand to
+            rebuild the summary this page already shows. The endpoint still
+            serves ?format=csv for anyone who wants the rows; it is just no
+            longer offered as the obvious thing to do. */}
         <a
           href={`/admin/usage/report?days=${days}`}
           target="_blank"
@@ -260,17 +276,6 @@ export function AdminUsageClient() {
         >
           <FileText className="h-4 w-4" />
           Report
-        </a>
-
-        {/* Plain link, not fetch+blob: the CSV is a normal authenticated GET and
-            the browser's own download handling is what an admin expects. */}
-        <a
-          href={`/api/admin/usage?days=${days}&format=csv`}
-          className="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted"
-          title="Every billable call as raw rows, for spreadsheet analysis"
-        >
-          <Download className="h-4 w-4" />
-          Raw CSV
         </a>
 
         <span className="ml-auto text-xs text-muted-foreground">

@@ -33,15 +33,19 @@
      never cycled.
      Periwinkle / terracotta / deep teal: warmer and softer than the primary
      blue-orange-green it replaces, without giving up any of the gates. The
-     obvious version of this palette — muted sage and clay — fails twice: sage
-     reads as grey (chroma 0.077 against a 0.1 floor) and green beside
-     terracotta is the classic red-green confusion, landing at ΔE 7.0 under
-     protanopia. Pushing the third hue bluer and more saturated fixes both.
-     Validated as a set on this surface, all pairs: CVD ΔE 9.3, normal-vision
-     ΔE 23.1, every hue over 3:1. */
-  --series-kimi: #6a5ae0;
-  --series-keepa: #d96f45;
-  --series-synccentric: #00918a;
+     Violet / burnt sienna / persian green. The warmth that the previous
+     periwinkle-terracotta-teal set was reaching for, with the hues actually
+     committed to rather than greyed toward pastel — which is the trap here.
+     Every muted version of this palette fails the same way twice over: sage
+     and dusty rose read as grey (chroma 0.077 against a 0.1 floor), and a
+     soft green beside a soft terracotta is the classic red-green confusion,
+     landing at ΔE 7.0 under protanopia. Saturating the hues and pushing the
+     third one blue-ward is what buys both the look and the legibility.
+     Validated as a set on this surface, all pairs, zero warnings: CVD ΔE 8.8,
+     normal-vision ΔE 25.2, every hue over 3:1. */
+  --series-kimi: #8b5cf6;
+  --series-keepa: #e76f51;
+  --series-synccentric: #2a9d8f;
   --viz-grid: #e1e0d9;
   --viz-axis: #c3c2b7;
   --status-good: #0ca30c;
@@ -74,12 +78,13 @@
   --dots-bg: hsl(240 6% 12%);
   --dots-fg: #ffffff;
 
-  /* Chart series, lifted for the dark surface: the light steps technically
-     pass here too, but read dim against near-black. These sit inside the dark
-     lightness band (L 0.48–0.67) and clear 3:1. */
-  --series-kimi: #7a6be6;
-  --series-keepa: #da7148;
-  --series-synccentric: #04a092;
+  /* The same three hues, stepped for the dark surface rather than flipped
+     from the light ones. The light sienna sits at L 0.71 and blows straight
+     through the top of the dark band, so it is the one that had to move most.
+     All three inside L 0.48–0.67, CVD ΔE 10.5, normal-vision ΔE 24.8. */
+  --series-kimi: #9070ee;
+  --series-keepa: #dd6b4f;
+  --series-synccentric: #22a48f;
   --viz-grid: #2c2c2a;
   --viz-axis: #383835;
   --status-good: #0ca30c;

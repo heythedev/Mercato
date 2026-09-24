@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
  *
  * Deliberately outside the (app) route group, so it inherits the root layout
  * and none of the application chrome — no sidebar, no navbar, no balance
- * widget. What is on screen is what comes out of the printer, which is the
- * whole point: this is the artefact someone takes into a meeting.
+ * widget. The page is a frame around the PDF and nothing else, because the PDF
+ * is the artefact someone takes into a meeting.
  *
  * The figures come from the same endpoint the Usage & credits screen reads, so
  * the report and the screen can never disagree.
