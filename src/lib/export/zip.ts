@@ -3516,6 +3516,19 @@ function getProductField(p: Product, key: string): unknown {
     "";
   const descriptionText = /<[a-z][\s\S]*>/i.test(descriptionRaw) ? stripHtml(descriptionRaw) : descriptionRaw;
 
+  // Best Buy states the limits on these two columns itself: a feature title
+  // "cannot exceed 60 characters", its description "cannot exceed 440". Cut the
+  // title at a word boundary rather than mid-word, and never emit a bare "…"
+  // for an empty source.
+  const bulletTitle = (v: unknown): string => {
+    const t = String(v ?? "").trim();
+    if (!t) return "";
+    if (t.length <= 60) return t;
+    const cut = t.lastIndexOf(" ", 60);
+    return t.slice(0, cut > 20 ? cut : 60).trim();
+  };
+  const bulletBody = (v: unknown): string => String(v ?? "").trim().slice(0, 440);
+
   // Key features / bullet points — vendors store these as HTML <li> lists.
   const featuresRaw = String(
     fromVendor("features", "key_features", "product_features", "bullet_points", "highlights") ?? "",
@@ -3596,6 +3609,27 @@ function getProductField(p: Product, key: string): unknown {
     bullet_point4: fromVendor("bullet_point4", "bullet_point_4", "bullet4", "feature4") ?? "",
     bullet_point5: fromVendor("bullet_point5", "bullet_point_5", "bullet5", "feature5") ?? "",
     bullet_points: fromVendor("bullet_points", "bullet_point1", "bullet1", "feature1") ?? p.name ?? "",
+
+    // Best Buy splits each bullet into Title and Description under its own
+    // names, and nothing mapped them — so featureBullets.1.title, REQUIRED,
+    // came out empty on all 13 rows of the returned export even though
+    // bullet_point1 beside it has had a product-name fallback all along. The
+    // catalogue enrichment writes these same keys into vendorData when Keepa
+    // returns real selling points, and fromVendor reads that first, so a real
+    // bullet always wins and the name is only ever the last resort.
+    //
+    // Bullet 1 is the REQUIRED one and takes the fallback. Bullets 2-5 do not:
+    // repeating the product name into four more cells is padding, not features.
+    "featureBullets.1.title": bulletTitle(
+      fromVendor("featureBullets.1.title", "bullet_point1", "bullet1", "feature1", "key_feature_1") ?? p.name,
+    ),
+    "featureBullets.1.description": bulletBody(
+      fromVendor("featureBullets.1.description", "bullet_point1", "bullet1", "feature1", "key_feature_1") ?? p.name,
+    ),
+    "featureBullets.2.title": bulletTitle(fromVendor("featureBullets.2.title", "bullet_point2", "bullet2", "feature2")),
+    "featureBullets.2.description": bulletBody(fromVendor("featureBullets.2.description", "bullet_point2", "bullet2", "feature2")),
+    "featureBullets.3.title": bulletTitle(fromVendor("featureBullets.3.title", "bullet_point3", "bullet3", "feature3")),
+    "featureBullets.3.description": bulletBody(fromVendor("featureBullets.3.description", "bullet_point3", "bullet3", "feature3")),
 
     // Price
     price,
