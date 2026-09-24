@@ -1,6 +1,13 @@
 import { generateText } from "ai";
 import { enterAiFeature } from "@/lib/ai/usage-context";
-import { moonshot, moonshotConfigured, MOONSHOT_TEXT_MODEL, noThinkingHeaders, noThinkingTemperature } from "@/lib/ai/moonshot";
+import {
+  moonshot,
+  moonshotConfigured,
+  getAiOutage,
+  MOONSHOT_TEXT_MODEL,
+  noThinkingHeaders,
+  noThinkingTemperature,
+} from "@/lib/ai/moonshot";
 
 /**
  * AI fallback for template dropdown (dataValidation) columns.
@@ -72,6 +79,36 @@ function deadlinePassed(): boolean {
 }
 
 /**
+ * Don't queue work for a provider that is known to be down.
+ *
+ * The export probes the provider once before any filling starts, and a drained
+ * balance records an outage that lasts a couple of minutes. Without this check
+ * every question in the batch still gets built, sent, short-circuited by the
+ * outage guard inside the fetch wrapper, and written down as its own failed
+ * call: on one real Best Buy run, 1,422 questions that never left the process,
+ * each one a row on the usage screen saying something had failed.
+ *
+ * Nothing is lost by not asking. The outage guard was going to refuse the
+ * request anyway, so the cells come out empty either way and land in the
+ * compliance report the same — which is the honest answer, since a missing
+ * value is exactly what "the AI could not be reached" should produce. Skipping
+ * the queue changes what it costs to arrive there, not where it arrives.
+ *
+ * Deliberately NOT checked between batches: an outage that begins mid-export is
+ * already handled by the per-call guard, and re-reading it here would abandon
+ * work the caller has half-finished.
+ */
+function aiIsDown(count: number, what: string): boolean {
+  const outage = getAiOutage();
+  if (!outage) return false;
+  console.warn(
+    `[match-dropdown] AI unavailable (${outage.reason}) — skipping ${count} ${what}; ` +
+      `they will ship empty and appear in the compliance report.`,
+  );
+  return true;
+}
+
+/**
  * Cache key for one (column, value) pair. Callers MUST build lookup keys with this
  * function rather than interpolating by hand, so the producer and consumer of the
  * result map can never disagree on the separator.
@@ -109,6 +146,7 @@ export async function matchDropdownValues(
     );
     return out;
   }
+  if (aiIsDown(queries.length, "dropdown match(es)")) return out;
 
   // Deduplicate: the same (column, value, options) repeats across every product row.
   const unique = new Map<string, DropdownQuery>();
@@ -253,6 +291,7 @@ export async function fillDropdownValues(
     );
     return out;
   }
+  if (aiIsDown(queries.length, "mandatory dropdown cell(s)")) return out;
 
   // Deduplicate identical (column, context, options) asks; fan the answer back
   // out to every caller key that asked the same question.
@@ -415,6 +454,7 @@ export async function fillFreeTextValues(
   enterAiFeature("export_dropdown");
   const out = new Map<string, string>();
   if (!queries.length || !moonshotConfigured()) return out;
+  if (aiIsDown(queries.length, "mandatory free-text cell(s)")) return out;
 
   const batches: FreeTextFillQuery[][] = [];
   for (let i = 0; i < queries.length; i += BATCH_SIZE) batches.push(queries.slice(i, i + BATCH_SIZE));
