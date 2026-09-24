@@ -708,10 +708,21 @@ function DataTable({ head, rows }: { head: string[]; rows: Cell[][] }) {
 
 /** Leading cell: a name with the row's share of the table's largest row beneath
  *  it. The bar is what makes a forty-row table scannable. */
-function NameCell({ name, fraction, color }: { name: string; fraction: number; color?: string }) {
+function NameCell({
+  name,
+  fraction,
+  color,
+  mono,
+}: {
+  name: string;
+  fraction: number;
+  color?: string;
+  /** Model ids are identifiers, not prose — they read better monospaced. */
+  mono?: boolean;
+}) {
   return (
     <div className="min-w-[180px]">
-      <span>{name}</span>
+      <span className={mono ? "font-mono text-[12px]" : undefined}>{name}</span>
       <ProportionBar fraction={fraction} color={color} />
     </div>
   );
@@ -726,11 +737,53 @@ function ServiceTag({ service }: { service: string }) {
   );
 }
 
+/**
+ * What a row consumed, in the unit its own service bills in.
+ *
+ * These used to be three columns — Sent, Back, Units — of which any given row
+ * could only ever fill one set: Keepa and Synccentric have no tokens, the AI
+ * has no quota units. Half of every table was em-dashes, which is a lot of
+ * visual noise to say "not applicable".
+ */
+function VolumeCell({ service, input, output, units }: {
+  service: string;
+  input: number;
+  output: number;
+  units: number;
+}) {
+  if (service === "kimi") {
+    if (input === 0 && output === 0) return <span className="text-muted-foreground">—</span>;
+    return (
+      <span className="whitespace-nowrap tabular-nums">
+        {tok(input)}
+        <span className="mx-1 text-muted-foreground">→</span>
+        {tok(output)}
+      </span>
+    );
+  }
+  if (units === 0) return <span className="text-muted-foreground">—</span>;
+  return (
+    <span className="whitespace-nowrap tabular-nums">
+      {fmt(units)} <span className="text-muted-foreground">{UNIT_LABELS[service] ?? "units"}</span>
+    </span>
+  );
+}
+
+/** Failures are only worth ink when there are some. */
+function FailedCell({ n }: { n: number }) {
+  if (!n) return <span className="text-muted-foreground">—</span>;
+  return (
+    <span className="font-medium tabular-nums" style={{ color: "var(--status-critical)" }}>
+      {fmt(n)}
+    </span>
+  );
+}
+
 function FeatureTable({ data }: { data: Report }) {
   const max = Math.max(...data.byFeature.map((r) => r.calls), 1);
   return (
     <DataTable
-      head={["Feature", "Service", "Calls", "Sent", "Back", "Units"]}
+      head={["Feature", "Service", "Calls", "Volume"]}
       rows={data.byFeature.map((r) => [
         {
           node: (
@@ -744,9 +797,7 @@ function FeatureTable({ data }: { data: Report }) {
         },
         { node: <ServiceTag service={r.service} />, align: "left" as const },
         { node: fmt(r.calls) },
-        { node: tok(r.input) },
-        { node: tok(r.output) },
-        { node: unit(r.units) },
+        { node: <VolumeCell service={r.service} input={r.input} output={r.output} units={r.units} /> },
       ])}
     />
   );
@@ -756,7 +807,7 @@ function ProjectTable({ data }: { data: Report }) {
   const max = Math.max(...data.byProject.map((r) => r.calls), 1);
   return (
     <DataTable
-      head={["Project", "Calls", "Sent", "Back", "Units", "Est. cost"]}
+      head={["Project", "Calls", "Tokens", "Quota units", "Est. cost"]}
       rows={data.byProject.map((r) => [
         {
           node: (
@@ -768,9 +819,10 @@ function ProjectTable({ data }: { data: Report }) {
           align: "left" as const,
         },
         { node: fmt(r.calls) },
-        { node: tok(r.input) },
-        { node: tok(r.output) },
-        { node: unit(r.units) },
+        // A project mixes all three services, so it needs both columns — but
+        // each one is a single figure rather than an in/out pair.
+        { node: r.input + r.output > 0 ? tok(r.input + r.output) : <span className="text-muted-foreground">—</span> },
+        { node: r.units > 0 ? fmt(r.units) : <span className="text-muted-foreground">—</span> },
         { node: usd(r.estCostUsd) },
       ])}
     />
@@ -781,46 +833,92 @@ function ModelTable({ data }: { data: Report }) {
   const max = Math.max(...data.byModel.map((r) => r.calls), 1);
   return (
     <DataTable
-      head={["Model", "Calls", "Sent", "Back", "Est. cost"]}
+      head={["Model", "Calls", "Volume", "Est. cost"]}
       rows={data.byModel.map((r) => [
-        { node: <NameCell name={r.model} fraction={r.calls / max} />, align: "left" as const },
+        { node: <NameCell name={r.model} fraction={r.calls / max} mono />, align: "left" as const },
         { node: fmt(r.calls) },
-        { node: tok(r.input) },
-        { node: tok(r.output) },
+        { node: <VolumeCell service="kimi" input={r.input} output={r.output} units={0} /> },
         { node: usd(r.estCostUsd) },
       ])}
     />
   );
 }
 
+/**
+ * One row per DAY, not per day and service.
+ *
+ * The server groups by both, so a single day arrived as three rows carrying the
+ * same date — sixteen rows to describe six days, most cells empty because no
+ * service fills every column. A day is the thing being read here; which
+ * services made up that day is a detail of it, and reads better as one bar than
+ * as three rows to mentally add up.
+ */
 function DayTable({ data }: { data: Report }) {
+  type Day = {
+    day: string;
+    calls: number;
+    failed: number;
+    cost: number | null;
+    byService: Record<string, number>;
+  };
+
+  const byDay = new Map<string, Day>();
+  for (const r of data.byDay) {
+    const d = byDay.get(r.day) ?? { day: r.day, calls: 0, failed: 0, cost: null, byService: {} };
+    d.calls += r.calls;
+    d.failed += r.failed ?? 0;
+    d.byService[r.service] = (d.byService[r.service] ?? 0) + r.calls;
+    if (r.service === "kimi") {
+      // Measured from the balance where readings cover that day; the token
+      // estimate only as a fallback.
+      const measured = data.actualByDay?.[r.day];
+      d.cost = (d.cost ?? 0) + (measured != null ? measured : r.estCostUsd ?? 0);
+    }
+    byDay.set(r.day, d);
+  }
+  const days = [...byDay.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
+  const busiest = Math.max(...days.map((d) => d.calls), 1);
+
   return (
     <DataTable
-      head={["Day", "Service", "Calls", "Sent", "Back", "Units", "Failed", "Cost"]}
-      rows={data.byDay.map((r) => [
-        { node: formatYmd(r.day), align: "left" as const },
-        { node: <ServiceTag service={r.service} />, align: "left" as const },
-        { node: fmt(r.calls) },
-        { node: tok(r.input) },
-        { node: tok(r.output) },
-        { node: unit(r.units) },
+      head={["Day", "Activity", "Calls", "Failed", "Cost"]}
+      rows={days.map((d) => [
         {
-          node: r.failed ? (
-            <span className="font-medium" style={{ color: "var(--status-critical)" }}>
-              {fmt(r.failed)}
-            </span>
-          ) : (
-            "—"
+          node: <span className="whitespace-nowrap font-medium">{formatYmd(d.day)}</span>,
+          align: "left" as const,
+        },
+        {
+          node: (
+            <div className="min-w-[200px]">
+              {/* Width against the busiest day, so the bar carries scale as
+                  well as composition — a quiet day reads as a short bar. */}
+              <span
+                className="flex h-1.5 gap-px overflow-hidden rounded-full bg-muted"
+                style={{ width: `${Math.max(6, (d.calls / busiest) * 100)}%` }}
+              >
+                {SERVICES.filter((sv) => (d.byService[sv] ?? 0) > 0).map((sv) => (
+                  <span
+                    key={sv}
+                    className="block h-full"
+                    style={{
+                      width: `${((d.byService[sv] ?? 0) / d.calls) * 100}%`,
+                      background: SERIES_COLOR[sv],
+                    }}
+                  />
+                ))}
+              </span>
+              <span className="mt-1 block text-[11px] text-muted-foreground">
+                {SERVICES.filter((sv) => (d.byService[sv] ?? 0) > 0)
+                  .map((sv) => `${SERVICE_LABELS[sv]} ${fmt(d.byService[sv] ?? 0)}`)
+                  .join(" · ")}
+              </span>
+            </div>
           ),
+          align: "left" as const,
         },
-        {
-          // Measured from the balance where readings cover that day; the token
-          // estimate only as a fallback.
-          node:
-            r.service === "kimi" && data.actualByDay?.[r.day] != null
-              ? usd(data.actualByDay[r.day])
-              : usd(r.estCostUsd),
-        },
+        { node: fmt(d.calls) },
+        { node: <FailedCell n={d.failed} /> },
+        { node: d.cost != null ? usd(d.cost) : <span className="text-muted-foreground">—</span> },
       ])}
     />
   );
