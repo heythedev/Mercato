@@ -18,7 +18,9 @@ import { cn } from "@/lib/utils";
  * never repaint a series.
  */
 
-/** Fixed hue order. A service always keeps its own colour across every chart. */
+/** Fixed hue order. A service always keeps its own colour across every chart.
+ *  The values live in globals.css so the charts, the tables, the service cards
+ *  and the printed report cannot drift apart. */
 export const SERIES_COLOR: Record<string, string> = {
   kimi: "var(--series-kimi)",
   keepa: "var(--series-keepa)",
@@ -247,10 +249,10 @@ export function ProportionBar({
   color?: string;
 }) {
   return (
-    <span className="mt-1 block h-1 w-full max-w-[160px] overflow-hidden rounded-full bg-muted">
+    <span className="mt-1.5 block h-1.5 w-full max-w-[180px] overflow-hidden rounded-full bg-muted/70">
       <span
-        className="block h-full rounded-full"
-        style={{ width: `${Math.max(2, Math.min(100, fraction * 100))}%`, background: color }}
+        className="block h-full rounded-full transition-all"
+        style={{ width: `${Math.max(3, Math.min(100, fraction * 100))}%`, background: color }}
       />
     </span>
   );

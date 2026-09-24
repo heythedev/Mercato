@@ -55,7 +55,7 @@ const RANGES = [7, 30, 90] as const;
 const SERVICES = ["kimi", "keepa", "synccentric"] as const;
 
 const fmt = (n: number) => n.toLocaleString();
-const usd = (n: number | null) => (n === null ? "—" : `$${n.toFixed(2)}`);
+const usd = (n: number | null) => (n === null || n === 0 ? "—" : `$${n.toFixed(2)}`);
 /** Tokens read better in millions once a sweep has run. */
 const tok = (n: number) => (n === 0 ? "—" : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : fmt(n));
 const unit = (n: number) => (n === 0 ? "—" : fmt(n));
@@ -666,13 +666,13 @@ function DataTable({ head, rows }: { head: string[]; rows: Cell[][] }) {
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b text-xs text-muted-foreground">
+          <tr className="border-b border-border/70 text-[11px] uppercase tracking-wide text-muted-foreground">
             {head.map((h, i) => (
               <th
                 key={h}
                 title={HINTS[h]}
                 className={cn(
-                  "px-4 py-2.5 font-medium",
+                  "px-4 py-3 font-medium",
                   // The header follows its column's cells, not the column index:
                   // the service tag is left-aligned in an otherwise numeric row.
                   align(rows[0]?.[i], i) === "left" ? "text-left" : "text-right",
@@ -686,12 +686,15 @@ function DataTable({ head, rows }: { head: string[]; rows: Cell[][] }) {
         </thead>
         <tbody>
           {rows.map((r, ri) => (
-            <tr key={ri} className="border-b last:border-0 hover:bg-muted/40">
+            <tr
+              key={ri}
+              className="border-b border-border/40 last:border-0 transition-colors hover:bg-muted/40"
+            >
               {r.map((c, ci) => (
                 <td
                   key={ci}
                   className={cn(
-                    "px-4 py-2.5 align-middle",
+                    "px-4 py-3.5 align-middle",
                     align(c, ci) === "left" ? "text-left" : "text-right tabular-nums",
                   )}
                 >

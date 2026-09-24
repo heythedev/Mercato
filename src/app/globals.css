@@ -30,13 +30,18 @@
   --dots-fg: #000000;
 
   /* Chart series — one fixed hue per paid service, assigned by identity and
-     never cycled. Validated as a set against this surface (CVD ΔE 9.2, normal
-     vision ΔE 24.0, all pairs); the dark steps below are chosen for the dark
-     surface rather than flipped from these. Aqua sits under 3:1 on white, so
-     every chart using it also ships direct labels and a table view. */
-  --series-kimi: #2a78d6;
-  --series-keepa: #eb6834;
-  --series-synccentric: #1baf7a;
+     never cycled.
+     Periwinkle / terracotta / deep teal: warmer and softer than the primary
+     blue-orange-green it replaces, without giving up any of the gates. The
+     obvious version of this palette — muted sage and clay — fails twice: sage
+     reads as grey (chroma 0.077 against a 0.1 floor) and green beside
+     terracotta is the classic red-green confusion, landing at ΔE 7.0 under
+     protanopia. Pushing the third hue bluer and more saturated fixes both.
+     Validated as a set on this surface, all pairs: CVD ΔE 9.3, normal-vision
+     ΔE 23.1, every hue over 3:1. */
+  --series-kimi: #6a5ae0;
+  --series-keepa: #d96f45;
+  --series-synccentric: #00918a;
   --viz-grid: #e1e0d9;
   --viz-axis: #c3c2b7;
   --status-good: #0ca30c;
@@ -69,10 +74,12 @@
   --dots-bg: hsl(240 6% 12%);
   --dots-fg: #ffffff;
 
-  /* Chart series, stepped for the dark surface (all three clear 3:1 here). */
-  --series-kimi: #3987e5;
-  --series-keepa: #d95926;
-  --series-synccentric: #199e70;
+  /* Chart series, lifted for the dark surface: the light steps technically
+     pass here too, but read dim against near-black. These sit inside the dark
+     lightness band (L 0.48–0.67) and clear 3:1. */
+  --series-kimi: #7a6be6;
+  --series-keepa: #da7148;
+  --series-synccentric: #04a092;
   --viz-grid: #2c2c2a;
   --viz-axis: #383835;
   --status-good: #0ca30c;
