@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Download,
   ExternalLink,
+  FileText,
   Info,
   RefreshCw,
 } from "lucide-react";
@@ -247,14 +248,28 @@ export function AdminUsageClient() {
           Refresh
         </button>
 
+        {/* The report is the thing you hand to someone; the CSV is the thing
+            you pivot. Leading with the report because the raw call list was
+            being downloaded by people who wanted a summary. */}
+        <a
+          href={`/admin/usage/report?days=${days}`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-2 rounded-lg bg-foreground px-3 py-1.5 text-sm font-medium text-background hover:opacity-90"
+        >
+          <FileText className="h-4 w-4" />
+          Report
+        </a>
+
         {/* Plain link, not fetch+blob: the CSV is a normal authenticated GET and
             the browser's own download handling is what an admin expects. */}
         <a
           href={`/api/admin/usage?days=${days}&format=csv`}
           className="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted"
+          title="Every billable call as raw rows, for spreadsheet analysis"
         >
           <Download className="h-4 w-4" />
-          Download CSV
+          Raw CSV
         </a>
 
         <span className="ml-auto text-xs text-muted-foreground">
