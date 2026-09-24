@@ -532,14 +532,42 @@ export async function generateCategoryZip(
             // Feature bullets are per-bullet columns; real catalog bullets are
             // the product's own selling points, which is exactly what the
             // column wants — unlike the description, which is not.
-            f.features.slice(0, 5).forEach((b, n) => put(`featureBullets.${n + 1}.title`, b));
+            //
+            // Best Buy splits each bullet into a Title and a Description with
+            // its own stated limits ("cannot exceed 60 characters" / "440").
+            // Only the title was ever written, so featureBullets.1.description
+            // — REQUIRED — came out empty on every row of the tested export.
+            // A catalogue bullet is usually one sentence longer than 60, so the
+            // title is that sentence cut at a word boundary rather than the
+            // whole thing pushed into a field that will reject it.
+            f.features.slice(0, 5).forEach((b, n) => {
+              const text = b.trim();
+              const title = text.length <= 60
+                ? text
+                : text.slice(0, text.lastIndexOf(" ", 60) > 20 ? text.lastIndexOf(" ", 60) : 60).trim();
+              put(`featureBullets.${n + 1}.title`, title);
+              put(`featureBullets.${n + 1}.description`, text.slice(0, 440));
+            });
           }
           // Image columns are required and cannot be invented — but a catalog
           // image IS the product's real photograph, so it fills them honestly.
+          //
+          // Best Buy names its image columns by viewing angle (frontZoom,
+          // angleZoom, …) and matches none of the generic spellings below, so
+          // its REQUIRED Front_Zoom column stayed empty even on rows where the
+          // catalogue had returned photographs. The first image is the one the
+          // product page leads with, which is what frontZoom asks for; the rest
+          // fill the alternate views in order.
+          const BESTBUY_IMAGE_CODES = [
+            "frontZoom", "angleZoom", "leftZoom", "backZoom",
+            "altViewZoom1", "altViewZoom2", "altViewZoom3", "altViewZoom4",
+          ];
           (f.images ?? []).forEach((url, n) => {
             if (n === 0) { put("SILO Image", url); put("Image 1", url); }
             put(`Image URL ${n + 1}`, url);
             put(`Image ${n + 1}`, url);
+            const code = BESTBUY_IMAGE_CODES[n];
+            if (code) put(code, url);
           });
           (p as { vendorData: unknown }).vendorData = vd;
           if (!p.brand && f.brand) (p as { brand: string | null }).brand = f.brand;
@@ -1218,6 +1246,57 @@ function bailToScratch(
 // styles, column widths, frozen panes, merged cells, dropdown validations,
 // conditional formatting — nothing in the XML is touched except <sheetData> rows.
 
+/**
+ * Option lists a template states on a ReferenceData sheet, joined BY NAME.
+ *
+ * Mirakl-built workbooks (Best Buy) put each value list in its own column on a
+ * ReferenceData sheet, headed with the attribute's field code — the same string
+ * the Data sheet carries in its row 2. The template says so itself: "Use the
+ * Reference Data sheet on the template to see accepted values."
+ *
+ * The name join is the whole point, and it is not the obvious implementation.
+ * These sheets DO carry dataValidations, written as type="none" with formula1
+ * naming a defined range — but on a real Best Buy workbook those names are
+ * misaligned with the columns they sit on. Following them puts the `lighted`
+ * TRUE/FALSE list on Occasion, a list of length UNITS on the numeric Length
+ * cell, and flame-retardant booleans on Color. The header join resolves all ten
+ * REQUIRED value-list columns on that same workbook correctly.
+ *
+ * Returns only columns it is confident about: a caller's column keeps whatever
+ * dropdown it already had, and a ReferenceData column is a list only if it
+ * offers a real choice.
+ */
+export function referenceDataDropdowns(
+  refColumns: { header: string; values: string[] }[],
+  columns: { letter: string; code?: string; key?: string; label?: string; header?: string }[],
+  opts: { max?: number } = {},
+): Map<string, string[]> {
+  // Best Buy's longest genuine list is brand at 398 and worksWith at 252. Its
+  // shopSku column is 14,290 rows of DATA sharing the same sheet, and must
+  // never be mistaken for a set of choices.
+  const max = opts.max ?? 1000;
+  const byHeader = new Map<string, string[]>();
+  for (const c of refColumns) {
+    const k = normalizeKey(c.header);
+    if (!k || byHeader.has(k)) continue;
+    byHeader.set(k, [...new Set(c.values.map((v) => v.trim()).filter(Boolean))]);
+  }
+
+  const out = new Map<string, string[]>();
+  for (const col of columns) {
+    for (const candidate of [col.code, col.key, col.label, col.header]) {
+      const k = normalizeKey(String(candidate ?? ""));
+      if (!k) continue;
+      const values = byHeader.get(k);
+      if (!values) continue;
+      // One value is the category name repeated down a column, not a choice.
+      if (values.length > 1 && values.length <= max) out.set(col.letter, values);
+      break;
+    }
+  }
+  return out;
+}
+
 async function fillTemplateXlsx(
   products: Product[],
   columns: Column[],
@@ -1799,6 +1878,72 @@ async function fillTemplateXlsx(
     if (opts.length) {
       for (const letter of letters) {
         if (!dropdowns.has(letter)) dropdowns.set(letter, opts);
+      }
+    }
+  }
+
+  // ── ReferenceData fallback: option lists Best Buy states by NAME ──────────
+  //
+  // A Best Buy category workbook carries its allowed values on a ReferenceData
+  // sheet, one column per attribute, headed with that attribute's own field
+  // code — the same string the Data sheet carries in row 2. Its own Columns
+  // sheet says so in as many words: "Use the Reference Data sheet on the
+  // template to see accepted values for any value list attributes."
+  //
+  // None of it reached us. Best Buy writes its validations as type="none" with
+  // formula1 pointing at a defined name, and the loop above only accepts
+  // type="list" — so all 79 dropdowns on the tested workbook were discarded and
+  // every value-list column fell through to free text. Occasion and Indoor or
+  // Outdoor Use, both REQUIRED, came out empty on all 13 rows.
+  //
+  // The obvious repair — accept type="none" and resolve the defined name — is
+  // WRONG, and measuring it is the only reason we know. On
+  // mercato-BestBuy-Project2 those names are misaligned with the columns they
+  // are attached to: Occasion points at the `lighted` list (TRUE/FALSE), Color
+  // at `subjectToStateFlameRetardant` (TRUE/FALSE), the numeric Length cell at
+  // the list of length UNITS, and the Proposition 65 message at the PFAS Yes/No.
+  // Trusting them would write a confident wrong value into every one of those
+  // cells, which is worse than the blank it replaces.
+  //
+  // Matching ReferenceData's header to the column's field code is exact, and on
+  // that workbook every one of the 10 REQUIRED value-list columns resolves to
+  // its own true list. So: ignore the defined names, join by name.
+  if (!isMathis) {
+    const refPath = sheetNameToPath.get("referencedata");
+    if (refPath) {
+      try {
+        // Same cached column index the range resolver uses.
+        const refIndex = await indexSheetColumns(tplZip, refPath, ssArr, fileData);
+        const byHeader = new Map<string, string>(); // normalized header -> column letter
+        for (const [refLetter, cells] of refIndex) {
+          const k = normalizeKey(cells.find((c) => c.row === 1)?.val ?? "");
+          if (k && !byHeader.has(k)) byHeader.set(k, refLetter);
+        }
+        const refColumns = [...refIndex].map(([, cells]) => ({
+          header: cells.find((c) => c.row === 1)?.val ?? "",
+          values: cells.filter((c) => c.row > 1).map((c) => c.val),
+        }));
+        const recovered = referenceDataDropdowns(
+          refColumns,
+          colEntries
+            .filter(({ letter }) => !dropdowns.has(letter))
+            .map(({ col, letter }) => ({
+              letter,
+              // The field code (row 2) first — ReferenceData is keyed on it.
+              code: codeByLetter.get(letter),
+              key: String(col.key ?? ""),
+              label: String(col.label ?? ""),
+              header: colLetterToHeader.get(letter),
+            })),
+        );
+        for (const [letter, opts] of recovered) dropdowns.set(letter, opts);
+        if (recovered.size) {
+          console.log(`[export] ReferenceData: ${recovered.size} option list(s) recovered by column name`);
+        }
+      } catch (e) {
+        // A template without a usable ReferenceData sheet is the normal case
+        // for every marketplace but Best Buy; never fail an export over it.
+        console.warn("[export] ReferenceData lookup skipped:", (e as Error).message);
       }
     }
   }
