@@ -34,6 +34,7 @@ type Report = {
   actualSpendUsd?: number | null;
   actualByDay?: Record<string, number>;
   balanceReadings?: number;
+  failedNotSent?: number;
   /** True when the figures cover one team rather than the whole account. */
   teamScoped?: boolean;
   byDay: (Row & { day: string; service: string })[];
@@ -373,9 +374,20 @@ export function AdminUsageClient() {
 
           {failed > 0 && (
             <Banner tone="warning" icon={AlertTriangle}>
-              <span className="font-medium">{fmt(failed)} calls failed in this window.</span> Failed
-              calls are still billed and their token counts are unknown, so every figure here is a
-              floor, not a ceiling.
+              <span className="font-medium">{fmt(failed)} calls failed in this window.</span>{" "}
+              {(data.failedNotSent ?? 0) > 0 ? (
+                <>
+                  {fmt(data.failedNotSent ?? 0)} of them never reached the provider — the AI balance
+                  was empty, so they were refused here at no cost. The remaining{" "}
+                  {fmt(Math.max(0, failed - (data.failedNotSent ?? 0)))} did reach it, and a call
+                  that errors after it starts is billed without reporting its tokens.
+                </>
+              ) : (
+                <>
+                  A call that errors after it starts is billed without reporting its tokens, so
+                  every figure here is a floor, not a ceiling.
+                </>
+              )}
               {worstFailureDay && worstFailureDay.share > 0.4 && (
                 <>
                   {" "}

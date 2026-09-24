@@ -172,6 +172,17 @@ export async function GET(req: NextRequest) {
       group by 1 order by count(*) desc`,
   ]);
 
+  // Failures that never left the app. When the AI balance empties, the provider
+  // fetch short-circuits on the recorded outage and throws BEFORE any request is
+  // made — so those calls cost nothing. They dominate the failure count (969 of
+  // 993 over one 30-day window), and reporting them as billed overstates the
+  // waste by two orders of magnitude. The split is by duration because that is
+  // what distinguishes them: a local throw takes single-digit milliseconds, a
+  // real round trip does not.
+  const [{ n: notSent }] = await prisma.$queryRaw<{ n: bigint }[]>`
+    select count(*) as n from "ServiceUsage"
+    where "createdAt" >= ${since} and not ok and "durationMs" < 100${scope("")}`;
+
   // Spend measured from the provider's own balance: exact, and independent of
   // any configured rate. Token totals times a price can only estimate, because
   // cached input tokens bill differently and no total says which were cached.
@@ -223,6 +234,8 @@ export async function GET(req: NextRequest) {
     actualSpendUsd: !teamOnly && snapshots.length >= 2 ? actualSpendUsd : null,
     actualByDay,
     balanceReadings: teamOnly ? 0 : snapshots.length,
+    /** Of the failures, how many were refused locally and cost nothing. */
+    failedNotSent: Number(notSent),
     /** True when these figures cover one team rather than the whole account. */
     teamScoped: teamOnly,
     byDay: byDay.map(shape),
