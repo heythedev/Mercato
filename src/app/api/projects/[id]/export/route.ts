@@ -11,8 +11,21 @@ import { getBestBuyColumnsForCategories } from "@/lib/export/bestbuy-template";
 import { miraklConfigured } from "@/lib/bestbuy/mirakl-client";
 import { checkAiAvailable } from "@/lib/ai/moonshot";
 import { setDropdownDeadline } from "@/lib/ai/match-dropdown";
-import { createJob, resolveJob, rejectJob, getJobStatus, getJobZip, setJobPhase, touchJob } from "@/lib/export/job-store";
+import {
+  assembleJobZip,
+  createJob,
+  getJobStatus,
+  getJobZip,
+  markGroupsDone,
+  rejectJob,
+  resolveJob,
+  saveJobFiles,
+  setJobPhase,
+  setJobPlan,
+  touchJob,
+} from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
+import { exportGroupOf } from "@/lib/export/category-group";
 
 export const maxDuration = 300;
 
@@ -28,6 +41,41 @@ const BACKFILL_BUDGET_MS = 120_000;
 // image back-fill, the template writes and storing the ZIP. Cells not filled in
 // time land in Missing_Mandatory_Fields.csv — the same path an AI failure takes.
 const DROPDOWN_BUDGET_MS = 180_000;
+
+// How long ONE slice of a sliced export may run before it stops and hands the
+// rest to the next request. maxDuration is 300s; stopping at 210s leaves room
+// to write the finished files and report back. A job killed at the ceiling
+// still keeps whatever it had written — that is the point of slicing — but
+// stopping deliberately is faster, because a killed invocation loses the
+// in-flight group.
+// Overridable so the slicing can be exercised without a 4,000-product
+// catalogue: set it to 1 and every request does exactly one group.
+const SLICE_BUDGET_MS = Number(process.env.EXPORT_SLICE_BUDGET_MS) || 210_000;
+
+/**
+ * Output groups this project will produce, cheapest way possible.
+ *
+ * Counted in SQL from the distinct categories: the plan has to exist before
+ * any products are loaded, and loading 4,811 rows just to list twelve groups
+ * is the cost this avoids.
+ */
+async function planGroups(projectId: string, marketplace: string): Promise<string[]> {
+  const rows = await prisma.product.groupBy({
+    by: ["marketplaceCategory"],
+    where: { projectId },
+    _count: { _all: true },
+  });
+  const groups = new Set<string>();
+  for (const r of rows) {
+    const cat = r.marketplaceCategory;
+    // Uncategorized rows are written as their own file by every category-split
+    // path, so they are a group like any other and must be sliced like one.
+    groups.add(!cat || cat === "Uncategorized" ? UNCATEGORIZED_GROUP : exportGroupOf(cat, marketplace));
+  }
+  return [...groups];
+}
+
+const UNCATEGORIZED_GROUP = "__uncategorized__";
 
 // Poll job status / download completed ZIP
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -135,8 +183,31 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (!projectMeta) return NextResponse.json({ error: "Project not found" }, { status: 404 });
   if (!canOperateProject(actorOf(user), projectMeta)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const jobId = `${id}_${Date.now()}`;
-  await createJob(jobId, id, user!.id);
+  // Continuing an export that ran out of invocation rather than starting one.
+  const continueId = req.nextUrl.searchParams.get("jobId");
+  const existing = continueId ? await getJobStatus(continueId) : null;
+  if (continueId && (!existing || !canReadJob(actorOf(user), existing))) {
+    return NextResponse.json({ error: "Job not found or expired" }, { status: 404 });
+  }
+  const continuing = !!existing && existing.status === "processing";
+  const existingPending = existing?.pendingGroups ?? [];
+
+  const jobId = continuing ? continueId! : `${id}_${Date.now()}`;
+  if (!continuing) await createJob(jobId, id, user!.id);
+
+  const plan = continuing
+    ? existing!.pendingGroups
+    : await planGroups(id, projectMeta.marketplace);
+  // The job's ORIGINAL group count, so progress counts up rather than the
+  // total shrinking with every pass (1/5, then 1/4, then 1/3 …).
+  const totalGroups = continuing
+    ? existing!.totalGroups || existing!.pendingGroups.length
+    : plan.length;
+
+  // Accumulated across the slices of one job, and reported once at the end.
+  const sliceMissing: string[] = [];
+  const sliceUnfilled: { label: string; rows: number }[] = [];
+  let sliceAiDown = false;
 
   // All heavy work (loading products JSON, loading template fileData BYTEA)
   // runs after the response. `after()` matters on Vercel: a bare fire-and-forget
@@ -144,7 +215,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // be frozen mid-query, which leaked pool connections until the next export
   // died with "timeout exceeded when trying to connect". `after()` keeps the
   // function alive (up to maxDuration) until the job finishes.
-  after(async () => {
+  /**
+   * Run the export for `sliceGroups`, or for everything when it is null.
+   *
+   * Returns the files it produced rather than writing the finished ZIP, so a
+   * sliced job can keep them and continue in the next request.
+   */
+  // An arrow expression, not a declaration: a hoisted function is treated as
+  // callable before the null check above, so TypeScript would stop narrowing
+  // projectMeta inside it.
+  const runJob = async (sliceGroups: string[] | null): Promise<void> => {
     const jobStartedAt = Date.now();
     // Cap the AI dropdown/mandatory-cell fill so it can never consume the whole
     // invocation. It was unbounded — one model round-trip per category per
@@ -259,6 +339,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         ...p,
         liveData: (liveById.get(p.id) ?? null) as Prisma.JsonValue,
       }));
+
+      // Narrow the catalogue to this slice. Everything below — the back-fill,
+      // the AI fill, the template writes — then works on a set that fits inside
+      // one invocation, and the groups it finishes are kept.
+      if (sliceGroups) {
+        const wanted = new Set(sliceGroups);
+        products = products.filter((p) => {
+          const cat = p.marketplaceCategory;
+          const group =
+            !cat || cat === "Uncategorized"
+              ? UNCATEGORIZED_GROUP
+              : exportGroupOf(cat, projectMeta.marketplace);
+          return wanted.has(group);
+        });
+        console.log(
+          `[export] slice of ${sliceGroups.length} group(s) → ${products.length} products`,
+        );
+      }
 
       // ── Catalog back-fill: names + images + attributes ────────────────────────
       // SKU-only vendor sheets carry no titles/images/size/color; those come from the
@@ -536,6 +634,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
       }
 
+      if (sliceGroups) {
+        // Keep what this slice produced and stop. The files are written before
+        // the job is marked anything, so an invocation killed at the ceiling
+        // still leaves finished work for the next request to build on.
+        const JSZip = (await import("jszip")).default;
+        const produced = await JSZip.loadAsync(zipBuffer as Buffer);
+        const files: { name: string; data: Buffer }[] = [];
+        for (const [name, entry] of Object.entries(produced.files)) {
+          if (entry.dir) continue;
+          files.push({ name, data: await entry.async("nodebuffer") });
+        }
+        await saveJobFiles(jobId, files);
+        await markGroupsDone(jobId, sliceGroups);
+        sliceMissing.push(...missingTemplateCategories);
+        sliceUnfilled.push(...unfilledColumns);
+        sliceAiDown = sliceAiDown || aiUnavailable;
+        return;
+      }
+
       // A one-file export (Walmart always produces a single sheet) is delivered
       // as that spreadsheet rather than a ZIP the user has to unpack first.
       const payload = await unwrapSingleFileZip(zipBuffer as Buffer);
@@ -552,15 +669,77 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("[export] background job failed:", msg);
+      console.error("[export] export job failed:", msg);
       await rejectJob(jobId, msg);
       await prisma.project.update({ where: { id }, data: { status: "categorized" } }).catch(() => {});
+      throw err;
     } finally {
       // The heartbeat must stop with the job — touchJob is a no-op once the
       // job leaves "processing", but the interval itself would leak forever.
       clearInterval(heartbeat);
     }
-  });
+  };
 
-  return NextResponse.json({ jobId });
+  // ── One shot, or one slice at a time ─────────────────────────────────────
+  //
+  // A single invocation is capped at maxDuration. A 4,811-product Mathis
+  // catalogue does not fit, and every attempt used to be killed at the ceiling
+  // having thrown away everything it wrote — five identical failures at 4.7
+  // minutes, each starting from nothing. So an export that produces more than
+  // one file is now built group by group: each finished file is stored as it is
+  // written, and the client calls back to continue.
+  //
+  // Nothing is re-spent on the way. Values the AI or a catalog lookup resolved
+  // are already persisted per product, so a later slice reads them instead of
+  // asking again.
+  if (!continuing && plan.length <= 1) {
+    // One file — it fits, and the client keeps polling as it always has.
+    after(async () => {
+      await runJob(null).catch(() => {});
+    });
+    return NextResponse.json({ jobId, mode: "background" });
+  }
+
+  const started = Date.now();
+  let pending = continuing ? existingPending : plan;
+  if (!continuing) await setJobPlan(jobId, plan);
+
+  // At least one group per request, then as many more as the budget allows.
+  while (pending.length > 0) {
+    const group = pending[0];
+    await runJob([group]);
+    pending = pending.filter((g) => g !== group);
+    if (Date.now() - started > SLICE_BUDGET_MS) break;
+  }
+
+  if (pending.length === 0) {
+    const zip = await assembleJobZip(jobId);
+    const payload = await unwrapSingleFileZip(zip);
+    await prisma.project.update({ where: { id }, data: { status: "done" } }).catch(() => {});
+    await resolveJob(jobId, payload.buffer, {
+      extension: payload.extension,
+      contentType: payload.contentType,
+      missingTemplateCategories: [...new Set(sliceMissing)],
+      unfilledRequired: {
+        columns: mergeUnfilled(sliceUnfilled),
+        aiUnavailable: sliceAiDown,
+        recorded: true,
+      },
+    });
+  }
+
+  return NextResponse.json({
+    jobId,
+    mode: "sliced",
+    done: pending.length === 0,
+    remaining: pending.length,
+    total: totalGroups,
+  });
+}
+
+/** Worst count per column across the slices that reported it. */
+function mergeUnfilled(all: { label: string; rows: number }[]): { label: string; rows: number }[] {
+  const byLabel = new Map<string, number>();
+  for (const c of all) byLabel.set(c.label, (byLabel.get(c.label) ?? 0) + c.rows);
+  return [...byLabel].sort((a, b) => b[1] - a[1]).map(([label, rows]) => ({ label, rows }));
 }

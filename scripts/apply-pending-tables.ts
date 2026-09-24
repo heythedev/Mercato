@@ -113,6 +113,39 @@ const TABLES: { name: string; column?: string; statements: string[] }[] = [
     statements: [`ALTER TABLE "ExportJob" ADD COLUMN IF NOT EXISTS "unfilledRequired" JSONB`],
   },
   {
+    // A large export is built one slice per request; each finished file is kept
+    // here so the next request resumes instead of restarting.
+    name: "ExportJobFile",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "ExportJobFile" (
+         "id" TEXT NOT NULL,
+         "jobId" TEXT NOT NULL,
+         "name" TEXT NOT NULL,
+         "data" BYTEA NOT NULL,
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "ExportJobFile_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "ExportJobFile_jobId_name_key" ON "ExportJobFile"("jobId", "name")`,
+      `CREATE INDEX IF NOT EXISTS "ExportJobFile_jobId_idx" ON "ExportJobFile"("jobId")`,
+      `DO $$
+       BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ExportJobFile_jobId_fkey') THEN
+           ALTER TABLE "ExportJobFile"
+             ADD CONSTRAINT "ExportJobFile_jobId_fkey"
+             FOREIGN KEY ("jobId") REFERENCES "ExportJob"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+         END IF;
+       END $$`,
+    ],
+  },
+  {
+    name: "ExportJob",
+    column: "pendingGroups",
+    statements: [
+      `ALTER TABLE "ExportJob" ADD COLUMN IF NOT EXISTS "pendingGroups" JSONB`,
+      `ALTER TABLE "ExportJob" ADD COLUMN IF NOT EXISTS "totalGroups" INTEGER`,
+    ],
+  },
+  {
     name: "Team",
     statements: [
       `CREATE TABLE IF NOT EXISTS "Team" (

@@ -508,8 +508,69 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
         return;
       }
 
-      const { jobId } = (await startRes.json()) as { jobId: string };
+      type StartResult = {
+        jobId: string;
+        mode?: "sliced" | "background";
+        done?: boolean;
+        remaining?: number;
+        total?: number;
+      };
+      let start = (await startRes.json()) as StartResult;
+      const { jobId } = start;
       setStatusMsg("Processing files…");
+
+      // ── Resume loop ────────────────────────────────────────────────────
+      //
+      // An export that produces more than one file is built a group at a time,
+      // because a whole catalogue does not fit in one serverless invocation.
+      // Each request writes the files it managed and reports what is left; this
+      // calls back until nothing is.
+      //
+      // Nothing already finished is redone: the files are stored server-side as
+      // they are written, and values the AI resolved are persisted per product,
+      // so a later pass reads them instead of paying for them again.
+      if (start.mode === "sliced") {
+        // Generous: a slice runs to the server's own budget, and the tail of a
+        // large catalogue is the slowest part.
+        const MAX_PASSES = 60;
+        for (let pass = 0; pass < MAX_PASSES && !start.done; pass++) {
+          const total = start.total ?? 0;
+          const remaining = start.remaining ?? 0;
+          setStatusMsg(
+            total > 0
+              ? `Building files — ${total - remaining} of ${total} done…`
+              : "Building files…",
+          );
+          const nextRes = await fetch(
+            `/api/projects/${projectId}/export?jobId=${encodeURIComponent(jobId)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            },
+          );
+          if (!nextRes.ok) {
+            // The invocation may have been cut short mid-slice. Whatever it
+            // wrote is kept, so retrying continues rather than restarting —
+            // but stop asking after a failure and let the user decide.
+            const text = await nextRes.text().catch(() => "");
+            let msg = "Export stopped part-way — press Export again to continue from where it left off.";
+            try {
+              msg = (JSON.parse(text) as { error?: string }).error ?? msg;
+            } catch {
+              /* keep the friendly message */
+            }
+            toast.error(msg);
+            return;
+          }
+          start = (await nextRes.json()) as StartResult;
+        }
+        if (!start.done) {
+          toast.error("Export is taking unusually long — press Export again to continue.");
+          return;
+        }
+        setStatusMsg("Finishing…");
+      }
 
       // A fixed wall-clock deadline used to abandon exports that were still
       // running fine — the ZIP finished server-side but nobody collected it, so

@@ -286,6 +286,12 @@ model ExportJob {
   extension   String?  // zip | xlsx | csv
   contentType String?
   missingTemplateCategories Json? // string[] — Temu categories with no matching template
+  /// string[] — output groups still to be written. An export is built one slice
+  /// per request because the whole job cannot fit in one serverless
+  /// invocation; this is what the next request picks up.
+  pendingGroups Json?
+  /// How many groups the job started with, so progress can be reported.
+  totalGroups   Int?
   /// { columns: [{ label, rows }], aiUnavailable } — REQUIRED cells this export
   /// shipped empty, rolled up per column, plus whether the AI was reachable at
   /// all. Kept so the export screen can offer to set a default for a genuinely
@@ -295,7 +301,32 @@ model ExportJob {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) // heartbeat — bumped on every phase/touch
 
+  files ExportJobFile[]
+
   @@index([updatedAt])
+}
+
+/// One finished file of an export, kept until the whole job is assembled.
+///
+/// A large export does not fit in one 300-second serverless invocation, and
+/// before this every attempt threw away everything it had written. Each output
+/// file is stored the moment it is finished, so the next request starts from
+/// the first group that is still missing rather than from the beginning.
+///
+/// Deleted as a set once the ZIP is assembled, and with the job itself when the
+/// 48-hour retention sweep runs.
+model ExportJobFile {
+  id        String   @id @default(cuid())
+  jobId     String
+  /// Path inside the finished ZIP, e.g. "Furniture.xlsx".
+  name      String
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  job ExportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, name])
+  @@index([jobId])
 }
 
 // ── Paid-service usage ────────────────────────────────────────────────────────
