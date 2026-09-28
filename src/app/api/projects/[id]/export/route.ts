@@ -25,7 +25,14 @@ import {
   touchJob,
 } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
-import { UNCATEGORIZED_GROUP, categoriesInGroups, exportGroupOf } from "@/lib/export/category-group";
+import {
+  UNCATEGORIZED_GROUP,
+  categoriesInGroups,
+  chunkFileName,
+  exportGroupOf,
+  parseSliceKey,
+  planSliceKeys,
+} from "@/lib/export/category-group";
 
 export const maxDuration = 300;
 
@@ -53,6 +60,28 @@ const DROPDOWN_BUDGET_MS = 180_000;
 const SLICE_BUDGET_MS = Number(process.env.EXPORT_SLICE_BUDGET_MS) || 210_000;
 
 /**
+ * The most products one slice will take on.
+ *
+ * A group used to be indivisible, so the largest department set the ceiling
+ * for the entire export: Furniture is 1,799 products on the Mathis catalogue
+ * that kept failing, and no amount of splitting between groups helps when one
+ * group cannot finish on its own. Above this it is built in parts, each its
+ * own file.
+ *
+ * 700 is chosen from measurement rather than taste: loading 1,799 products of
+ * that project takes 14s, so 700 is ~6s, and it leaves the rest of a 300s
+ * invocation for enrichment, the fill and the write.
+ */
+const MAX_SLICE_PRODUCTS = Number(process.env.EXPORT_MAX_SLICE_PRODUCTS) || 700;
+
+/** Room kept clear at the end of an invocation to write and store what was
+ *  built. A slice that spends its last second on the model has nothing to
+ *  show for the whole pass. */
+const WRITE_RESERVE_MS = 60_000;
+/** Vercel's ceiling for this route; see maxDuration above. */
+const INVOCATION_MS = 300_000;
+
+/**
  * Output groups this project will produce, cheapest way possible.
  *
  * Counted in SQL from the distinct categories: the plan has to exist before
@@ -65,14 +94,20 @@ async function planGroups(projectId: string, marketplace: string): Promise<strin
     where: { projectId },
     _count: { _all: true },
   });
-  const groups = new Set<string>();
+  const counts = new Map<string, number>();
   for (const r of rows) {
     const cat = r.marketplaceCategory;
     // Uncategorized rows are written as their own file by every category-split
     // path, so they are a group like any other and must be sliced like one.
-    groups.add(!cat || cat === "Uncategorized" ? UNCATEGORIZED_GROUP : exportGroupOf(cat, marketplace));
+    const key = !cat || cat === "Uncategorized" ? UNCATEGORIZED_GROUP : exportGroupOf(cat, marketplace);
+    counts.set(key, (counts.get(key) ?? 0) + r._count._all);
   }
-  return [...groups];
+  // Split anything too big to finish inside one invocation. Ordered largest
+  // first so the pass that is most likely to run out of room is the one that
+  // runs with a whole budget in front of it.
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .flatMap(([group, n]) => planSliceKeys(group, n, MAX_SLICE_PRODUCTS));
 }
 
 
@@ -91,13 +126,14 @@ async function planGroups(projectId: string, marketplace: string): Promise<strin
  * direction is a cheap DISTINCT over categories (165 rows on that project)
  * followed by an IN over the ones that map into this slice.
  */
-async function productWhereForSlice(
+async function productQueryForSlice(
   projectId: string,
   marketplace: string,
   sliceGroups: string[] | null,
-): Promise<Prisma.ProductWhereInput> {
-  if (!sliceGroups) return { projectId };
+): Promise<{ where: Prisma.ProductWhereInput; skip?: number; take?: number }> {
+  if (!sliceGroups) return { where: { projectId } };
 
+  const keys = sliceGroups.map(parseSliceKey);
   const rows = await prisma.product.groupBy({
     by: ["marketplaceCategory"],
     where: { projectId },
@@ -107,7 +143,7 @@ async function productWhereForSlice(
   const { categories, includeUncategorized } = categoriesInGroups(
     rows.map((r) => r.marketplaceCategory),
     marketplace,
-    sliceGroups,
+    keys.map((k) => k.group),
   );
 
   const or: Prisma.ProductWhereInput[] = [];
@@ -117,8 +153,24 @@ async function productWhereForSlice(
   }
   // A slice that matches no category selects NOTHING. Returning `{ projectId }`
   // here would quietly build the whole catalogue into one group's file.
-  if (!or.length) return { projectId, id: "__none__" };
-  return { projectId, OR: or };
+  if (!or.length) return { where: { projectId, id: "__none__" } };
+  const where: Prisma.ProductWhereInput = { projectId, OR: or };
+
+  // A part of a split group. The window is derived from the group's CURRENT
+  // row count rather than MAX_SLICE_PRODUCTS, so the parts still tile the
+  // group exactly if that setting is changed between passes of a running job.
+  const chunk = keys.length === 1 && keys[0].total > 1 ? keys[0] : null;
+  if (!chunk) return { where };
+
+  const inGroup = rows.reduce((n, row) => {
+    const cat = row.marketplaceCategory;
+    const mine = !cat || cat === "Uncategorized"
+      ? includeUncategorized
+      : categories.includes(cat);
+    return mine ? n + row._count._all : n;
+  }, 0);
+  const size = Math.ceil(inGroup / chunk.total);
+  return { where, skip: (chunk.index - 1) * size, take: size };
 }
 
 // Poll job status / download completed ZIP
@@ -210,6 +262,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // the moment it responds — the tail of a long run is its costliest part.
   after(() => flushUsage());
 
+  // When THIS invocation began — every deadline below is measured from it,
+  // not from the start of a group, because the ceiling belongs to the request.
+  const requestStartedAt = Date.now();
+
   const body = await req.json().catch(() => ({}));
   const autoMatch: boolean = body.autoMatch ?? false;
   const templateId: string | undefined = body.templateId;
@@ -276,7 +332,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // products died at "Building spreadsheet files…" while a 1,251-product
     // Walmart export (no dropdown fill) finished in under three minutes.
     // Leaves ~90s to write and store the ZIP after the fill stops.
-    setDropdownDeadline(jobStartedAt + DROPDOWN_BUDGET_MS);
+    // Whichever comes first: the fill's own budget, or the point in THIS
+    // invocation after which there would be no time left to write what was
+    // built. The fixed budget alone was measured from the group's start, so a
+    // slow load or enrichment pushed the fill's end past the ceiling and the
+    // whole pass was lost rather than shipping with some cells unfilled — the
+    // outcome the compliance report exists for.
+    setDropdownDeadline(
+      Math.min(
+        jobStartedAt + DROPDOWN_BUDGET_MS,
+        requestStartedAt + INVOCATION_MS - WRITE_RESERVE_MS,
+      ),
+    );
     // Mark exporting inside the background job so the POST can return the jobId
     // immediately without a DB round-trip. Previously this was awaited in the
     // request handler — if the DB was slow or the connection pool was exhausted
@@ -326,10 +393,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         vendorData: true,
         // liveData is fetched separately and slimmed — see below.
       } as const;
-      // Only this slice's rows leave the database. See productWhereForSlice.
-      const sliceWhere = await productWhereForSlice(id, mp, sliceGroups);
+      // Only this slice's rows leave the database. See productQueryForSlice.
+      const sliceQuery = await productQueryForSlice(id, mp, sliceGroups);
       const [productRows, rawTemplates] = await Promise.all([
-        prisma.product.findMany({ where: sliceWhere, select: productSelect }),
+        prisma.product.findMany({
+          where: sliceQuery.where,
+          select: productSelect,
+          // A stable order is what makes the parts of a split group tile it.
+          // Without it Postgres may return rows in any order and two parts
+          // could contain the same product while another is never exported.
+          orderBy: { id: "asc" },
+          ...(sliceQuery.skip !== undefined ? { skip: sliceQuery.skip, take: sliceQuery.take } : {}),
+        }),
         useAutoMatch
           ? prisma.exportTemplate.findMany({
               where: { marketplace: { in: mpFamily, mode: "insensitive" }, OR: templateOwnerOr },
@@ -393,7 +468,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // a group contains, and a mismatch between it and the SQL would
       // otherwise write another group's rows into this group's file.
       if (sliceGroups) {
-        const wanted = new Set(sliceGroups);
+        const wanted = new Set(sliceGroups.map((k) => parseSliceKey(k).group));
         products = products.filter((p) => {
           const cat = p.marketplaceCategory;
           const group =
@@ -689,10 +764,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // still leaves finished work for the next request to build on.
         const JSZip = (await import("jszip")).default;
         const produced = await JSZip.loadAsync(zipBuffer as Buffer);
+        // Every part of a split group produces a file named after the group,
+        // so without this the parts overwrite each other in the job's file
+        // store and the export quietly ships only the last one. The compliance
+        // CSVs are renamed too — they are per-part as well.
+        const part = sliceGroups.length === 1 ? parseSliceKey(sliceGroups[0]) : null;
         const files: { name: string; data: Buffer }[] = [];
         for (const [name, entry] of Object.entries(produced.files)) {
           if (entry.dir) continue;
-          files.push({ name, data: await entry.async("nodebuffer") });
+          files.push({
+            name: part ? chunkFileName(name, part.index, part.total) : name,
+            data: await entry.async("nodebuffer"),
+          });
         }
         await saveJobFiles(jobId, files);
         await markGroupsDone(jobId, sliceGroups);

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { UNCATEGORIZED_GROUP, categoriesInGroups, exportGroupOf } from "./category-group";
+import {
+  UNCATEGORIZED_GROUP,
+  categoriesInGroups,
+  chunkFileName,
+  exportGroupOf,
+  parseSliceKey,
+  planSliceKeys,
+  sliceKey,
+} from "./category-group";
 
 /**
  * Which rows belong to a slice.
@@ -109,5 +117,81 @@ describe("slice category filter", () => {
     const r = categoriesInGroups(cats, "bestbuy", [cats[0]]);
     expect(r.categories).toEqual(cats);
     expect(categoriesInGroups(cats, "bestbuy", ["Home and Garden"]).categories).toEqual([]);
+  });
+});
+
+describe("splitting a group too big for one invocation", () => {
+  it("leaves a group that fits completely alone", () => {
+    expect(planSliceKeys("Rugs", 10, 700)).toEqual(["Rugs"]);
+    expect(planSliceKeys("Furniture", 700, 700)).toEqual(["Furniture"]);
+    expect(parseSliceKey("Rugs")).toEqual({ group: "Rugs", index: 1, total: 1 });
+  });
+
+  it("splits Furniture — the group that was setting the ceiling", () => {
+    const keys = planSliceKeys("Furniture", 1799, 700);
+    expect(keys).toHaveLength(3);
+    expect(keys.map(parseSliceKey)).toEqual([
+      { group: "Furniture", index: 1, total: 3 },
+      { group: "Furniture", index: 2, total: 3 },
+      { group: "Furniture", index: 3, total: 3 },
+    ]);
+  });
+
+  it("the parts tile the group exactly — no row lost, none exported twice", () => {
+    // This is the property that matters. skip/take are derived the same way in
+    // the route: size = ceil(n / total), skip = (i-1) * size.
+    for (const n of [1, 699, 700, 701, 1400, 1401, 1799, 4811]) {
+      const keys = planSliceKeys("G", n, 700);
+      const total = keys.length;
+      const size = Math.ceil(n / total);
+      const covered = new Set<number>();
+      for (let i = 1; i <= total; i++) {
+        for (let r = (i - 1) * size; r < Math.min(i * size, n); r++) {
+          expect(covered.has(r)).toBe(false); // never twice
+          covered.add(r);
+        }
+      }
+      expect(covered.size).toBe(n); // never missed
+    }
+  });
+
+  it("a category name cannot forge a chunk key", () => {
+    // The separator is a control character precisely so that a path full of
+    // punctuation — which real Mathis and Best Buy categories are — can never
+    // be read back as "part 2 of 3" and silently export a third of its rows.
+    for (const name of [
+      "Furniture > Dining Room > Dining Tables",
+      "Home and Garden/Household Furnishings/Decor/Seasonal Decorations",
+      "Outdoor (part 2 of 3)",
+      "6115 - Luggage Racks",
+      "Decor 1|2|3",
+    ]) {
+      expect(parseSliceKey(name)).toEqual({ group: name, index: 1, total: 1 });
+    }
+  });
+
+  it("refuses a malformed chunk key rather than exporting the wrong window", () => {
+    const sep = "\u0001";
+    for (const bad of [`G${sep}0${sep}3`, `G${sep}4${sep}3`, `G${sep}x${sep}3`, `G${sep}1${sep}0`]) {
+      expect(parseSliceKey(bad).total).toBe(1);
+    }
+  });
+
+  it("names each part's files so they cannot overwrite one another", () => {
+    // Every part builds a file named after the group; without this the job's
+    // file store keeps only the last one written.
+    expect(chunkFileName("Furniture.xlsx", 2, 3)).toBe("Furniture (part 2 of 3).xlsx");
+    expect(chunkFileName("Missing_Mandatory_Fields.csv", 1, 3)).toBe(
+      "Missing_Mandatory_Fields (part 1 of 3).csv",
+    );
+    // An unsplit group keeps the name it always had.
+    expect(chunkFileName("Rugs.xlsx", 1, 1)).toBe("Rugs.xlsx");
+    // A name with no extension still reads sensibly.
+    expect(chunkFileName("Outdoor", 2, 2)).toBe("Outdoor (part 2 of 2)");
+  });
+
+  it("round-trips a group name through a key unchanged", () => {
+    const name = "Home and Garden/Household Furnishings/Decor/Seasonal Decorations";
+    expect(parseSliceKey(sliceKey(name, 2, 4))).toEqual({ group: name, index: 2, total: 4 });
   });
 });

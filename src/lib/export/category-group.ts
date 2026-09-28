@@ -76,3 +76,62 @@ export function categoriesInGroups(
   }
   return { categories: out, includeUncategorized };
 }
+
+/**
+ * A group too big for one invocation is built in parts.
+ *
+ * A slice is one output file, and one group was always one slice — so the
+ * biggest department set the ceiling for the whole export. On the Mathis
+ * catalogue that failed repeatedly, Furniture alone is 1,799 products; if that
+ * cannot be loaded, enriched, filled and written inside a single 300s
+ * invocation then no amount of splitting BETWEEN groups helps, because the
+ * group itself is indivisible.
+ *
+ * So a slice key is either a plain group name or a group plus "part i of n".
+ * The separator is a control character: a category path can contain "/", ">",
+ * "-", "(" and most punctuation, and picking a printable delimiter would mean
+ * a category named just so could forge a chunk key.
+ */
+const CHUNK_SEP = "\u0001";
+
+export type SliceKey = { group: string; index: number; total: number };
+
+/** `total <= 1` returns the bare group name, so an unsplit plan is unchanged. */
+export function sliceKey(group: string, index: number, total: number): string {
+  return total <= 1 ? group : `${group}${CHUNK_SEP}${index}${CHUNK_SEP}${total}`;
+}
+
+/** Always succeeds: anything that is not a chunk key is part 1 of 1. */
+export function parseSliceKey(key: string): SliceKey {
+  const parts = key.split(CHUNK_SEP);
+  if (parts.length !== 3) return { group: key, index: 1, total: 1 };
+  const index = Number(parts[1]);
+  const total = Number(parts[2]);
+  if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index < 1 || index > total) {
+    return { group: key, index: 1, total: 1 };
+  }
+  return { group: parts[0], index, total };
+}
+
+/**
+ * Split one group into as many parts as its product count needs.
+ * Returns a single bare key when it fits, so small groups look as they did.
+ */
+export function planSliceKeys(group: string, products: number, maxPerSlice: number): string[] {
+  const total = Math.max(1, Math.ceil(products / Math.max(1, maxPerSlice)));
+  if (total <= 1) return [group];
+  return Array.from({ length: total }, (_, i) => sliceKey(group, i + 1, total));
+}
+
+/**
+ * The name a chunk's file takes, so parts of one group do not collide in the
+ * job's file store — which would silently keep only the last one written.
+ * `Furniture.xlsx` → `Furniture (part 2 of 3).xlsx`.
+ */
+export function chunkFileName(name: string, index: number, total: number): string {
+  if (total <= 1) return name;
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  return `${stem} (part ${index} of ${total})${ext}`;
+}
