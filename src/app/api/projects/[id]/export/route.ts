@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { actorOf, adminUserIds, canOperateProject, canReadJob, templateVisibilityOr } from "@/lib/authz";
+import { actorOf, canOperateProject, canReadJob, templateOwnerIdsTuple, templateVisibilityOr } from "@/lib/authz";
 import { after } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { enterAiContext } from "@/lib/ai/usage-context";
@@ -253,7 +253,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       // Own templates, the global ones, and anything an admin uploaded before
       // the userId=null convention — the same rule the Templates screen uses.
-      const templateOwnerOr = templateVisibilityOr(actorOf(user), await adminUserIds());
+      const templateOwnerOr = templateVisibilityOr(actorOf(user), ...(await templateOwnerIdsTuple()));
 
       // Include fileData so category-zip exports can use fillTemplateXlsx and preserve
       // original template formatting, column widths, styles, and dropdown validations.

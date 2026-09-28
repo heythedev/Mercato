@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authGuard } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
-import { actorOf, adminUserIds, canReadProject, ownerIdForNewTemplate, teamIdForNewRow, templateVisibilityOr } from "@/lib/authz";
+import { actorOf, canReadProject, ownerIdForNewTemplate, teamIdForNewRow, templateOwnerIdsTuple, templateVisibilityOr } from "@/lib/authz";
 import { bestBuyTemplateColumns, getBestBuyColumnsForCategory } from "@/lib/export/bestbuy-template";
 import { normCategoryPath } from "@/lib/export/zip";
 import { miraklConfigured } from "@/lib/bestbuy/mirakl-client";
@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
   const templates = await prisma.exportTemplate.findMany({
     where: {
       marketplace: { equals: "bestbuy", mode: "insensitive" },
-      OR: templateVisibilityOr(actor, await adminUserIds()),
+      OR: templateVisibilityOr(actor, ...(await templateOwnerIdsTuple())),
     },
     select: { id: true, name: true, category: true },
   });
@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
     where: {
       marketplace: { equals: "bestbuy", mode: "insensitive" },
       category: { equals: category, mode: "insensitive" },
-      OR: templateVisibilityOr(actor, await adminUserIds()),
+      OR: templateVisibilityOr(actor, ...(await templateOwnerIdsTuple())),
     },
     select: { id: true, name: true, marketplace: true, category: true, fileFormat: true, userId: true },
   });

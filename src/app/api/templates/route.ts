@@ -6,11 +6,11 @@ import { readXlsxGrid } from "@/lib/vendor/xlsx-lite";
 import { detectTemplateCategory } from "@/lib/ai/detect-template-category";
 import {
   actorOf,
-  adminUserIds,
   canWriteTemplate,
   isGlobalTemplate,
   ownerIdForNewTemplate,
   teamIdForNewRow,
+  templateOwnerIds,
   templateVisibilityOr,
 } from "@/lib/authz";
 
@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
 
   // Also pick up templates owned by admin users — some may have userId=adminId instead of null
   // if they were uploaded before the userId=null convention was enforced.
-  const adminIds = await adminUserIds();
+  const { adminIds, teamAdminIds } = await templateOwnerIds();
   const adminIdSet = new Set(adminIds);
   const actor = actorOf(user);
 
@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
   const rawTemplates = await prisma.exportTemplate.findMany({
     where: {
       ...(marketplace ? { marketplace: { in: marketplaceFamily(marketplace), mode: "insensitive" } } : {}),
-      OR: templateVisibilityOr(actor, adminIds),
+      OR: templateVisibilityOr(actor, adminIds, teamAdminIds),
     },
     select: {
       id: true, name: true, marketplace: true, category: true,

@@ -154,12 +154,43 @@ describe("project list scope", () => {
 });
 
 describe("template visibility", () => {
-  it("selects own, global, admin-owned and the actor's team", () => {
-    expect(templateVisibilityOr(owner, ["a1"])).toEqual([
+  it("gives a member their own, the global ones, and their TEAM ADMIN's", () => {
+    // Not the whole team's. Two people on one team working different suppliers
+    // should not have each other's working templates offered to them on export.
+    expect(templateVisibilityOr(owner, ["a1"], ["ta"])).toEqual([
       { userId: "u1" },
       { userId: null },
       { userId: { in: ["a1"] } },
+      { teamId: TEAM, userId: { in: ["ta"] } },
+    ]);
+  });
+
+  it("does not show a member their team-mate's upload", () => {
+    // `mate` is an ordinary member of the same team. Nothing in the clause set
+    // can match a row owned by them: the team clause is narrowed to team-admin
+    // owners, and the only unrestricted userId clauses are the actor's own and
+    // the global ones.
+    const clauses = templateVisibilityOr(owner, ["a1"], ["ta"]);
+    expect(JSON.stringify(clauses)).not.toContain(mate.id);
+  });
+
+  it("gives a team admin their whole team, members' private uploads included", () => {
+    // Someone has to be able to manage a team's library, and that is them.
+    expect(templateVisibilityOr(teamAdmin, ["a1"], ["ta"])).toEqual([
+      { userId: "ta" },
+      { userId: null },
+      { userId: { in: ["a1"] } },
       { teamId: TEAM },
+    ]);
+  });
+
+  it("omits the team clause entirely when a team has no admin yet", () => {
+    // With no team admin there is nothing team-wide to see, and `{ teamId }`
+    // alone would hand the member every colleague's private upload.
+    expect(templateVisibilityOr(owner, ["a1"], [])).toEqual([
+      { userId: "u1" },
+      { userId: null },
+      { userId: { in: ["a1"] } },
     ]);
   });
 
@@ -188,7 +219,7 @@ describe("template visibility", () => {
     // A team admin publishes to their team, never across teams: no clause here
     // can match another team's rows, and only the super admin's uploads
     // (userId null) are visible to everyone.
-    const clauses = templateVisibilityOr(teamAdmin, ["a1"]);
+    const clauses = templateVisibilityOr(teamAdmin, ["a1"], ["ta"]);
     expect(clauses).toEqual([
       { userId: "ta" },
       { userId: null },

@@ -167,24 +167,65 @@ export async function adminUserIds(): Promise<string[]> {
 }
 
 /**
+ * The two id sets template visibility turns on, in one query.
+ *
+ * Visibility depends on the ROLE OF THE UPLOADER, not only on who is asking: a
+ * super admin's upload is global, a team admin's is shared with their team, and
+ * a member's is private to them. Reading that back means knowing which ids
+ * belong to which role, and every call site needs both sets — so they are
+ * fetched together rather than as two round trips.
+ *
+ * Not cached. A stale list would keep showing a demoted admin's uploads as
+ * global, or hide a newly promoted team admin's from their own team.
+ */
+export async function templateOwnerIds(): Promise<{ adminIds: string[]; teamAdminIds: string[] }> {
+  const rows = await prisma.user.findMany({
+    where: { role: { in: ["admin", "team_admin"] } },
+    select: { id: true, role: true },
+  });
+  return {
+    adminIds: rows.filter((r) => r.role === "admin").map((r) => r.id),
+    teamAdminIds: rows.filter((r) => r.role === "team_admin").map((r) => r.id),
+  };
+}
+
+/**
+ * The same ids as {@link templateOwnerIds}, positioned for spreading straight
+ * into {@link templateVisibilityOr}'s trailing arguments — for the call sites
+ * that build a `where` inline and have no use for the ids themselves.
+ */
+export async function templateOwnerIdsTuple(): Promise<[string[], string[]]> {
+  const { adminIds, teamAdminIds } = await templateOwnerIds();
+  return [adminIds, teamAdminIds];
+}
+
+/**
  * The OR clause selecting the templates an actor may use.
  *
- * The rule, in the order the clauses below express it:
- *   super admin  → every template there is, including each team's own
- *   anyone else  → their own, their team's, and the global ones
+ * How far an upload reaches is decided by who uploaded it:
  *
- * "Global" means uploaded by the super admin: {@link ownerIdForNewTemplate}
- * stamps `userId: null` for an admin and the actor's own id for everyone else,
- * and {@link teamIdForNewRow} stamps the uploader's team. So a team admin's
- * upload stays inside that team and is shared with its members, and only the
- * super admin can publish to everyone.
+ *   super admin uploads → everyone, on every team
+ *   team admin uploads  → that team, shared with its members
+ *   member uploads      → that member alone
  *
- * Pass the ids from {@link adminUserIds}; it is a separate query so a caller
- * that needs the ids for its own display logic does not run it twice.
+ * and who may look:
+ *
+ *   super admin → everything there is
+ *   team admin  → their own team entirely, members' private uploads included
+ *   member      → their own, their team admin's, and the global ones
+ *
+ * A member's upload being private is the point of the third row: two people on
+ * the same team working different suppliers should not have each other's
+ * working templates offered to them on export. Their team admin still sees
+ * them, because someone has to be able to manage a team's library.
+ *
+ * Pass the ids from {@link templateOwnerIds}; they are a separate query so a
+ * caller that needs them for its own display logic does not run it twice.
  */
 export function templateVisibilityOr(
   actor: Actor,
   adminIds: string[],
+  teamAdminIds: string[] = [],
 ): Prisma.ExportTemplateWhereInput[] {
   // The super admin sees everything. Without this the account that administers
   // the system had the NARROWEST view of it: measured on live data the admin
@@ -202,10 +243,20 @@ export function templateVisibilityOr(
     { userId: actor.id },
     { userId: null },
     ...(adminIds.length > 0 ? [{ userId: { in: adminIds } }] : []),
-    // A team's own templates, shared between its members. Guarded on teamId
-    // being set: `{ teamId: null }` would match every pre-teams row and make
-    // the whole library visible to everyone.
-    ...(actor.teamId ? [{ teamId: actor.teamId }] : []),
+    // The team clause. Guarded on teamId being set either way: `{ teamId: null
+    // }` would match every pre-teams row and make the whole library visible to
+    // everyone.
+    //
+    // A team admin gets their whole team, which is what lets them manage a
+    // member's uploads. A member gets only what a team admin put there — not
+    // what another member did, whose templates are theirs alone.
+    ...(actor.teamId
+      ? isTeamAdmin(actor)
+        ? [{ teamId: actor.teamId }]
+        : teamAdminIds.length > 0
+          ? [{ teamId: actor.teamId, userId: { in: teamAdminIds } }]
+          : []
+      : []),
   ];
 }
 

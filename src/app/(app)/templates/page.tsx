@@ -4,10 +4,10 @@ import { AdminTemplatesClient } from "@/components/admin/templates-client";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 import {
   actorOf,
-  adminUserIds,
   allowedMarketplacesFor,
   isAdmin,
   isGlobalTemplate,
+  templateOwnerIds,
   templateVisibilityOr,
 } from "@/lib/authz";
 
@@ -24,13 +24,13 @@ export default async function TemplatesPage() {
 
   // Fetch admin user IDs so their templates also appear as global defaults.
   // Some may have userId=adminId instead of null if uploaded before the null convention.
-  const adminIds = await adminUserIds();
+  const { adminIds, teamAdminIds } = await templateOwnerIds();
   const adminIdSet = new Set(adminIds);
 
   // Exclude fileData (BYTEA blob) — the raw workbook can't be serialized into
   // the page payload and the client only needs the column definitions.
   const rawTemplates = await prisma.exportTemplate.findMany({
-    where: { OR: templateVisibilityOr(actor, adminIds) },
+    where: { OR: templateVisibilityOr(actor, adminIds, teamAdminIds) },
     omit: { fileData: true },
     orderBy: { createdAt: "desc" },
   });
