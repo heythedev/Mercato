@@ -44,3 +44,35 @@ export function exportGroupOf(category: string, marketplace: string): string {
   }
   return category;
 }
+
+/** The group key used for rows with no usable category. Must match the export route. */
+export const UNCATEGORIZED_GROUP = "__uncategorized__";
+
+/**
+ * Which categories belong to a set of export groups.
+ *
+ * The inverse of {@link exportGroupOf}, and it lives here so the two can never
+ * drift: the export loads one slice by filtering products on these categories
+ * IN SQL, and if that filter disagreed with the grouping by so much as one
+ * path, a category's rows would be written into another category's file.
+ *
+ * Takes the project's DISTINCT categories — a cheap query — rather than its
+ * products.
+ */
+export function categoriesInGroups(
+  categories: (string | null)[],
+  marketplace: string,
+  groups: string[],
+): { categories: string[]; includeUncategorized: boolean } {
+  const wanted = new Set(groups);
+  const out: string[] = [];
+  let includeUncategorized = false;
+  for (const cat of categories) {
+    if (!cat || cat === "Uncategorized") {
+      if (wanted.has(UNCATEGORIZED_GROUP)) includeUncategorized = true;
+      continue;
+    }
+    if (wanted.has(exportGroupOf(cat, marketplace))) out.push(cat);
+  }
+  return { categories: out, includeUncategorized };
+}

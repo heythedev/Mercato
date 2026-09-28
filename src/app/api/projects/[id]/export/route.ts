@@ -25,7 +25,7 @@ import {
   touchJob,
 } from "@/lib/export/job-store";
 import { buildDownloadName, contentDisposition } from "@/lib/export/filename";
-import { exportGroupOf } from "@/lib/export/category-group";
+import { UNCATEGORIZED_GROUP, categoriesInGroups, exportGroupOf } from "@/lib/export/category-group";
 
 export const maxDuration = 300;
 
@@ -75,7 +75,51 @@ async function planGroups(projectId: string, marketplace: string): Promise<strin
   return [...groups];
 }
 
-const UNCATEGORIZED_GROUP = "__uncategorized__";
+
+/**
+ * The product filter for one slice, expressed in SQL.
+ *
+ * The slice used to be applied in memory: every pass loaded the WHOLE
+ * catalogue and then discarded the rows it was not building. That is the
+ * single most expensive thing an export does — the comment on productSelect
+ * below measures it at ~68s for a 7k project, before a row is written — and
+ * paying it twelve times to build twelve groups is why a 4,811-product Mathis
+ * export still died with FUNCTION_INVOCATION_TIMEOUT after the job had been
+ * split. Slicing the work did not help while the load stayed whole.
+ *
+ * Groups are derived from the category by a pure function, so the reverse
+ * direction is a cheap DISTINCT over categories (165 rows on that project)
+ * followed by an IN over the ones that map into this slice.
+ */
+async function productWhereForSlice(
+  projectId: string,
+  marketplace: string,
+  sliceGroups: string[] | null,
+): Promise<Prisma.ProductWhereInput> {
+  if (!sliceGroups) return { projectId };
+
+  const rows = await prisma.product.groupBy({
+    by: ["marketplaceCategory"],
+    where: { projectId },
+    _count: { _all: true },
+  });
+
+  const { categories, includeUncategorized } = categoriesInGroups(
+    rows.map((r) => r.marketplaceCategory),
+    marketplace,
+    sliceGroups,
+  );
+
+  const or: Prisma.ProductWhereInput[] = [];
+  if (categories.length) or.push({ marketplaceCategory: { in: categories } });
+  if (includeUncategorized) {
+    or.push({ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" });
+  }
+  // A slice that matches no category selects NOTHING. Returning `{ projectId }`
+  // here would quietly build the whole catalogue into one group's file.
+  if (!or.length) return { projectId, id: "__none__" };
+  return { projectId, OR: or };
+}
 
 // Poll job status / download completed ZIP
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -282,11 +326,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         vendorData: true,
         // liveData is fetched separately and slimmed — see below.
       } as const;
-      const [project, rawTemplates, liveDataRows] = await Promise.all([
-        prisma.project.findUnique({
-          where: { id },
-          include: { products: { select: productSelect } },
-        }),
+      // Only this slice's rows leave the database. See productWhereForSlice.
+      const sliceWhere = await productWhereForSlice(id, mp, sliceGroups);
+      const [productRows, rawTemplates] = await Promise.all([
+        prisma.product.findMany({ where: sliceWhere, select: productSelect }),
         useAutoMatch
           ? prisma.exportTemplate.findMany({
               where: { marketplace: { in: mpFamily, mode: "insensitive" }, OR: templateOwnerOr },
@@ -311,13 +354,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // image fields are KEPT, because the generic "match a template column
         // name against a liveData key" fallback can legitimately resolve a
         // Description or Image column from them.
-        prisma.$queryRawUnsafe<Array<{ id: string; liveData: unknown }>>(
-          `SELECT id, ("liveData" - 'variants' - 'imageEntities') AS "liveData"
-           FROM "Product"
-           WHERE "projectId" = $1 AND "liveData" IS NOT NULL`,
-          id,
-        ),
       ]);
+
+      // liveData for the slice only, keyed on the ids just loaded rather than
+      // the whole project. Sequential because the id list is the filter —
+      // cheap, since this now returns the slice's rows instead of the
+      // catalogue's, and nothing at all for a marketplace that skips Verify.
+      const liveDataRows = productRows.length
+        ? await prisma.$queryRawUnsafe<Array<{ id: string; liveData: unknown }>>(
+            `SELECT id, ("liveData" - 'variants' - 'imageEntities') AS "liveData"
+             FROM "Product"
+             WHERE id = ANY($1::text[]) AND "liveData" IS NOT NULL`,
+            productRows.map((p) => p.id),
+          )
+        : [];
 
       // Both user-uploaded and admin/global templates are included in the export pool.
       // When the user has uploaded a template with the same name as an admin template,
@@ -329,20 +379,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const nonOverriddenAdmin = adminTemplates.filter(t => !userNames.has(t.name.toLowerCase().trim()));
       const allTemplates = [...userOwnTemplates, ...nonOverriddenAdmin] as TemplateRow[];
 
-      if (!project) throw new Error("Project not found");
-
       // Attach the slimmed liveData fetched above. Products with no verification
       // result simply have none, matching the previous behaviour.
       const liveById = new Map(liveDataRows.map((r) => [r.id, r.liveData]));
-      type ExportProduct = (typeof project.products)[number] & { liveData: Prisma.JsonValue };
-      let products: ExportProduct[] = project.products.map((p) => ({
+      type ExportProduct = (typeof productRows)[number] & { liveData: Prisma.JsonValue };
+      let products: ExportProduct[] = productRows.map((p) => ({
         ...p,
         liveData: (liveById.get(p.id) ?? null) as Prisma.JsonValue,
       }));
 
-      // Narrow the catalogue to this slice. Everything below — the back-fill,
-      // the AI fill, the template writes — then works on a set that fits inside
-      // one invocation, and the groups it finishes are kept.
+      // Belt and braces. The SQL filter above already returns only this
+      // slice, so this is a no-op — kept because it is the definition of what
+      // a group contains, and a mismatch between it and the SQL would
+      // otherwise write another group's rows into this group's file.
       if (sliceGroups) {
         const wanted = new Set(sliceGroups);
         products = products.filter((p) => {
@@ -704,12 +753,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   let pending = continuing ? existingPending : plan;
   if (!continuing) await setJobPlan(jobId, plan);
 
-  // At least one group per request, then as many more as the budget allows.
+  // At least one group per request, then as many more as there is ROOM for.
+  //
+  // "Room" is the point here, and the reason this is not just a deadline: the
+  // old check asked whether the budget had already been spent, which permitted
+  // a group to START at 209s and run for another 150 — straight through the
+  // 300s ceiling, losing that group's work and returning the client an
+  // invocation timeout rather than a slice result. Carrying the longest group
+  // seen so far and refusing to begin another without space for one that size
+  // keeps small groups batching while never opening a slice that cannot close.
+  let longestGroupMs = 0;
   while (pending.length > 0) {
     const group = pending[0];
+    const groupStart = Date.now();
     await runJob([group]);
+    longestGroupMs = Math.max(longestGroupMs, Date.now() - groupStart);
     pending = pending.filter((g) => g !== group);
-    if (Date.now() - started > SLICE_BUDGET_MS) break;
+
+    const elapsed = Date.now() - started;
+    if (elapsed + longestGroupMs > SLICE_BUDGET_MS) break;
   }
 
   if (pending.length === 0) {
