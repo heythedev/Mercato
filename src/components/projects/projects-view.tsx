@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   Plus, FolderOpen, Package, Clock, CheckCircle2, Loader2, Trash2,
   Search, ChevronLeft, ChevronRight, X, ChevronDown, Check, Square, CheckSquare,
-  CalendarDays, Play,
+  CalendarDays, Play, User,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -33,6 +33,13 @@ type Project = {
   productCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Who created it. Present for everyone; only SHOWN when the list can hold
+   *  someone else's work — see `showOwner`. */
+  ownerId: string;
+  ownerName: string;
+  ownerEmail: string;
+  teamName: string | null;
+  isMine: boolean;
 };
 
 type FilterOption = {
@@ -421,7 +428,16 @@ function DateRangeFilter({
   );
 }
 
-export function ProjectsView({ projects: initial, allowedTiles }: { projects: Project[]; allowedTiles: string[] }) {
+export function ProjectsView({
+  projects: initial,
+  allowedTiles,
+  showOwner = false,
+}: {
+  projects: Project[];
+  allowedTiles: string[];
+  /** True when this list can contain other people's projects. */
+  showOwner?: boolean;
+}) {
   const router = useRouter();
   const confirm = useConfirm();
   const [projects, setProjects] = useState(initial);
@@ -431,6 +447,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [marketplaceFilter, setMarketplaceFilter] = useState("");
+  const [ownerFilter, setOwnerFilter] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
@@ -438,6 +455,30 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
   // Re-renders this list whenever the Run Queue changes, so a card's Run
   // button disables the instant it's enqueued (or a slot frees and it starts).
   useSyncExternalStore(runQueue.subscribe, runQueue.getSnapshot, runQueue.getSnapshot);
+
+  /** Everyone who owns something in this list, most projects first, so the
+   *  busiest people are at the top rather than in alphabetical order. */
+  const ownerOptions = useMemo(() => {
+    const byId = new Map<string, { value: string; label: string; count: number }>();
+    for (const p of initial) {
+      const cur = byId.get(p.ownerId);
+      if (cur) cur.count++;
+      else byId.set(p.ownerId, { value: p.ownerId, label: p.isMine ? `${p.ownerName} (you)` : p.ownerName, count: 1 });
+    }
+    return [...byId.values()]
+      .sort((a, b) => b.count - a.count)
+      .map((o) => ({ value: o.value, label: `${o.label} · ${o.count}` }));
+  }, [initial]);
+
+  /**
+   * Whether to put an owner on each card.
+   *
+   * Role alone is not enough: a team admin whose team has only their own work
+   * would get "You" stamped on every card, which is the same noise a plain
+   * user would get. The column earns its place only when the list actually
+   * holds more than one person's projects.
+   */
+  const showOwnerColumn = showOwner && ownerOptions.length > 1;
 
   const marketplaceOptions = useMemo(() => {
     const allowed = new Set(allowedTiles);
@@ -456,7 +497,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [allowedTiles, initial]);
 
-  const hasActiveFilters = !!(search || statusFilter || marketplaceFilter || dateFrom);
+  const hasActiveFilters = !!(search || statusFilter || marketplaceFilter || ownerFilter || dateFrom);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -467,11 +508,15 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
         const matchesSearch =
           p.name.toLowerCase().includes(q) ||
           p.marketplaceLabel.toLowerCase().includes(q) ||
+          // The owner is on the card now, so it should be searchable too —
+          // typing a colleague's name is the fastest way to find their work.
+          (showOwner && (p.ownerName.toLowerCase().includes(q) || p.ownerEmail.toLowerCase().includes(q))) ||
           p.status.toLowerCase().includes(q);
         if (!matchesSearch) return false;
       }
       if (statusFilter && p.status !== statusFilter) return false;
       if (marketplaceFilter && p.marketplace !== marketplaceFilter) return false;
+      if (ownerFilter && p.ownerId !== ownerFilter) return false;
       if (fromTs !== null || toTs !== null) {
         const created = new Date(p.createdAt).getTime();
         if (fromTs !== null && created < fromTs) return false;
@@ -479,7 +524,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
       }
       return true;
     });
-  }, [projects, search, statusFilter, marketplaceFilter, dateFrom, dateTo]);
+  }, [projects, search, statusFilter, marketplaceFilter, ownerFilter, dateFrom, dateTo, showOwner]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -507,6 +552,7 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
     setSearch("");
     setStatusFilter("");
     setMarketplaceFilter("");
+    setOwnerFilter("");
     setDateFrom("");
     setDateTo("");
     setPage(1);
@@ -689,6 +735,18 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
             placeholder="All marketplaces"
             className="w-46"
           />
+
+          {/* Only when the list can hold other people's work, and only when
+              it actually does — a lone owner is not a choice. */}
+          {showOwnerColumn && (
+            <FilterSelect
+              value={ownerFilter}
+              onChange={(v) => { setOwnerFilter(v); resetPage(); }}
+              options={ownerOptions}
+              placeholder="All owners"
+              className="w-48"
+            />
+          )}
 
           <DateRangeFilter
             from={dateFrom}
@@ -873,6 +931,19 @@ export function ProjectsView({ projects: initial, allowedTiles }: { projects: Pr
                       <Clock className="w-3.5 h-3.5" />
                       {formatDateTime(p.updatedAt)}
                     </span>
+                    {/* Whose work this is. Your own says "You" rather than your
+                        own name: on an admin's list 52 of 136 rows are theirs,
+                        and reading your own name back that many times is noise
+                        when the useful signal is which ones are NOT yours. */}
+                    {showOwnerColumn && (
+                      <span
+                        className={cn("flex items-center gap-1 ml-auto min-w-0", p.isMine && "text-foreground/70")}
+                        title={p.teamName ? `${p.ownerEmail} · ${p.teamName}` : p.ownerEmail}
+                      >
+                        <User className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">{p.isMine ? "You" : p.ownerName}</span>
+                      </span>
+                    )}
                   </div>
 
                   {/* A bare bar told you a proportion of nothing nameable.
