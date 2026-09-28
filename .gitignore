@@ -45,3 +45,10 @@ next-env.d.ts
 # Best Buy template workbooks — loaded into the DB by
 # scripts/upload-bestbuy-templates.ts, not source code (39MB of xlsx).
 Best buy templates/
+
+# MCP server config. It holds a Supabase access token in plain text, so it
+# never goes in the repo — the token is a credential like anything in .env.
+# To share the SETUP with the team instead, put the token in a real
+# environment variable and commit a copy whose env block reads
+# "${SUPABASE_ACCESS_TOKEN}"; that file carries no secret.
+.mcp.json
