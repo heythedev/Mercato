@@ -144,3 +144,38 @@ body {
   background-image: none;
   opacity: 1;
 }
+
+/* ── Reduced motion ─────────────────────────────────────────────────────────
+   Nothing in this app asked before: 21 spinners, 4 pulses and 38 transitions,
+   none of them checking. For someone with vestibular sensitivity that is not a
+   rough edge — a screen that spins for the half hour a categorise run takes is
+   a reason to stop using the software.
+
+   Durations go to 1ms rather than 0 so transitionend still fires and any code
+   waiting on it is not left hanging. Spinners keep ONE slow revolution instead
+   of stopping dead, because a frozen spinner reads as a crashed page; at 6s it
+   says "working" without the motion being the problem.
+
+   JavaScript-driven motion — a number counting up, a sparkline advancing — is
+   outside CSS's reach and consults useReducedMotion() instead. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .animate-spin {
+    animation-duration: 6s !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  /* A pulsing dot is a status light. Hold it lit rather than blinking. */
+  .animate-pulse {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}

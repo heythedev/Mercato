@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { Tag, Loader2, CheckCircle2, AlertTriangle, XCircle, Download, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
+import { Notice, StatRow, StatTile } from "@/components/ui/primitives";
 import { LottieLoader } from "@/components/ui/lottie-loader";
-import { formatDuration } from "@/lib/utils";
+import { cn, formatDuration } from "@/lib/utils";
 
 type Product = {
   id: string;
@@ -318,33 +319,31 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
 
       {/* Progress — each tile filters the table below, same as the Verify step. */}
       {(hasResults || hasStreamedResults) && (
-        <div className={`grid grid-cols-1 gap-3 sm:gap-4 mb-3 ${needsReview.length > 0 ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
+        <StatRow className={cn("mb-3", needsReview.length > 0 ? "lg:grid-cols-4" : "lg:grid-cols-3")}>
           {([
-            { key: "categorized" as const, label: "Categorized", count: categorized.length, show: true,
-              bg: "bg-green-50/70 dark:bg-green-950/20", text: "text-green-700 dark:text-green-400", ring: "ring-green-400" },
-            { key: "review" as const, label: "Low confidence", count: needsReview.length, show: needsReview.length > 0,
-              bg: "bg-amber-50/70 dark:bg-amber-950/20", text: "text-amber-600 dark:text-amber-400", ring: "ring-amber-400" },
-            { key: "uncategorized" as const, label: "Uncategorized", count: uncategorized.length, show: true,
-              bg: uncategorized.length > 0 ? "bg-orange-50/70 dark:bg-orange-950/20" : "bg-muted/30",
-              text: uncategorized.length > 0 ? "text-orange-600 dark:text-orange-400" : "", ring: "ring-orange-400" },
-            { key: null, label: "Total products", count: total, show: true,
-              bg: "bg-muted/30", text: "", ring: "ring-foreground/30" },
-          ]).filter((s) => s.show).map((s) => {
-            const isActive = activeFilter === s.key;
-            return (
-              <button
-                key={s.label}
-                onClick={() => { setActiveFilter(isActive ? null : s.key); setVisibleRows(INITIAL_ROWS); }}
-                className={`rounded-2xl p-5 text-left w-full transition-all ${s.bg} ${
-                  isActive ? `ring-2 ${s.ring} shadow-sm` : "hover:shadow-sm hover:brightness-95"
-                }`}
-              >
-                <p className={`text-2xl font-bold ${s.text}`}>{s.count}</p>
-                <p className="text-sm text-muted-foreground">{s.label}</p>
-              </button>
-            );
-          })}
-        </div>
+            { key: "categorized" as const, label: "Categorised", count: categorized.length,
+              show: true, tone: "good" as const, note: `of ${total.toLocaleString()}` },
+            { key: "review" as const, label: "Low confidence", count: needsReview.length,
+              show: needsReview.length > 0, tone: "warning" as const, note: "check before export" },
+            { key: "uncategorized" as const, label: "Uncategorised", count: uncategorized.length,
+              show: true, tone: uncategorized.length > 0 ? ("critical" as const) : ("neutral" as const),
+              note: uncategorized.length > 0 ? "excluded from export" : undefined },
+            { key: null, label: "Total products", count: total, show: true, tone: "neutral" as const },
+          ]).filter((s) => s.show).map((s) => (
+            <StatTile
+              key={s.label}
+              label={s.label}
+              value={s.count.toLocaleString()}
+              note={s.note}
+              tone={s.tone}
+              selected={activeFilter === s.key}
+              onClick={() => {
+                setActiveFilter(activeFilter === s.key ? null : s.key);
+                setVisibleRows(INITIAL_ROWS);
+              }}
+            />
+          ))}
+        </StatRow>
       )}
       {(hasResults || hasStreamedResults) && (
         <p className="text-xs text-muted-foreground mb-6">
@@ -414,19 +413,15 @@ export function CategorizeStep({ projectId, projectName, products, categorizedCo
           flagged that it was guessing between plausible entries. Surfaced so a
           human can check them before export instead of silently publishing. */}
       {hasResults && !loading && needsReview.length > 0 && (
-        <div className="mb-6 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-semibold text-amber-800">
-                {needsReview.length} product{needsReview.length !== 1 ? "s" : ""} categorized with low confidence
-              </p>
-              <p className="text-xs text-amber-700 mt-1">
-                The AI assigned these a category but wasn&apos;t sure between multiple plausible options — usually because the product name is short or ambiguous. They&apos;re marked &quot;Review&quot; in the table below. Check them before exporting, or download the CSV, correct the categories, and upload it back.
-              </p>
-            </div>
-          </div>
-        </div>
+        <Notice
+          tone="warning"
+          className="mb-6"
+          title={`${needsReview.length} product${needsReview.length !== 1 ? "s" : ""} categorised with low confidence`}
+        >
+          The model picked a category but was torn between plausible options — usually a short or
+          ambiguous product name. They are marked <strong>Review</strong> in the table below. Check
+          them before exporting, or download the CSV, correct the categories and upload it back.
+        </Notice>
       )}
 
       {!hasResults && !loading && (

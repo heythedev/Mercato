@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { exportGroupOf } from "@/lib/export/category-group";
 import { buildDownloadName } from "@/lib/export/filename";
+import { Notice, StatRow, StatTile } from "@/components/ui/primitives";
 import { LottieLoader } from "@/components/ui/lottie-loader";
 import { sleepForPoll } from "@/lib/poll-scheduler";
 
@@ -1044,67 +1045,59 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
       })()}
 
       {/* Summary cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6">
+      <StatRow className="mb-6 lg:grid-cols-3">
         {usesCategoryZip ? (
           <>
-            <div className="rounded-2xl p-4 bg-green-50/70 dark:bg-green-950/20">
-              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{categories.length - preExportMissingCategories.length}</p>
-              <p className="text-sm text-muted-foreground">Categories → files</p>
-            </div>
-            <div className="rounded-2xl p-4 bg-muted/30">
-              <p className="text-2xl font-bold">{exportableCount}</p>
-              <p className="text-sm text-muted-foreground">Products to export</p>
-            </div>
-            <div className="rounded-2xl p-4 bg-muted/30">
-              <div className="flex items-center justify-between">
-                <p className="text-2xl font-bold">{templates.length}</p>
+            <StatTile
+              label="Categories → files"
+              value={categories.length - preExportMissingCategories.length}
+              tone="good"
+              note={
+                preExportMissingCategories.length > 0
+                  ? `${preExportMissingCategories.length} without a template`
+                  : undefined
+              }
+            />
+            <StatTile label="Products to export" value={exportableCount.toLocaleString()} />
+            <StatTile
+              label="Templates available"
+              value={templates.length}
+              note={
                 <button
                   onClick={() => loadTemplates(true)}
                   disabled={refreshing}
-                  title="Refresh templates"
-                  className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-background/60 text-muted-foreground hover:bg-background transition disabled:opacity-50"
+                  className="inline-flex items-center gap-1 hover:text-foreground disabled:opacity-50"
                 >
-                  <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
+                  <RefreshCw className={cn("h-3 w-3", refreshing && "animate-spin")} />
+                  refresh
                 </button>
-              </div>
-              <p className="text-sm text-muted-foreground">Templates available</p>
-            </div>
+              }
+            />
           </>
         ) : (
           <>
-            <div className="rounded-2xl p-4 bg-green-50/70 dark:bg-green-950/20">
-              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{products.length}</p>
-              <p className="text-sm text-muted-foreground">Products to export</p>
-            </div>
-            <div className="rounded-2xl p-4 bg-muted/30">
-              <p className="text-2xl font-bold">{categories.length}</p>
-              <p className="text-sm text-muted-foreground">Categories detected</p>
-            </div>
-            <div className="rounded-2xl p-4 bg-muted/30">
-              <p className="text-2xl font-bold">{templates.length}</p>
-              <p className="text-sm text-muted-foreground">Templates available</p>
-            </div>
+            <StatTile label="Products to export" value={products.length.toLocaleString()} tone="good" />
+            <StatTile label="Categories detected" value={categories.length} />
+            <StatTile label="Templates available" value={templates.length} />
           </>
         )}
-      </div>
+      </StatRow>
 
       {/* Uncategorized warning banner */}
       {usesCategoryZip && !fetching && uncategorizedCount > 0 && (
-        <div className="mb-4 rounded-2xl bg-orange-50/70 dark:bg-orange-950/20 p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
-            <div>
-              <p className="text-sm font-semibold text-orange-800">
-                {uncategorizedCount} product{uncategorizedCount !== 1 ? "s" : ""} {hasTemplates ? "will be exported to a separate Uncategorized.csv" : "will be excluded from the export"}
-              </p>
-              <p className="text-xs text-orange-700 mt-1">
-                {hasTemplates
-                  ? `These products were marked "Uncategorized" and will go into their own Uncategorized.csv for review — they are not placed into any template file. ${exportableCount} categorized product${exportableCount !== 1 ? "s" : ""} will be matched to their specific templates.`
-                  : `These products were marked "Uncategorized" and don't match any available category. Only ${exportableCount} product${exportableCount !== 1 ? "s" : ""} will be included in the ZIP.`}
-              </p>
-            </div>
-          </div>
-        </div>
+        <Notice
+          tone="warning"
+          className="mb-4"
+          title={`${uncategorizedCount.toLocaleString()} product${uncategorizedCount !== 1 ? "s" : ""} ${
+            hasTemplates
+              ? "will be exported to a separate Uncategorized.csv"
+              : "will be excluded from the export"
+          }`}
+        >
+          {hasTemplates
+            ? `These are not placed into any template file — they go to Uncategorized.csv for review. The other ${exportableCount.toLocaleString()} are matched to their templates.`
+            : `These match no available category. Only ${exportableCount.toLocaleString()} product${exportableCount !== 1 ? "s" : ""} will be in the ZIP.`}
+        </Notice>
       )}
 
       {fetching && (
