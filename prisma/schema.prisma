@@ -18,15 +18,15 @@ datasource db {
 /// and genuinely global ones (an admin's template, a compliance default that
 /// applies to every client), carry no team and stay visible to all.
 model Team {
-  id   String @id @default(cuid())
-  name String
+  id                  String   @id @default(cuid())
+  name                String
   /// URL-safe handle, unique. Used in admin screens, never in a route yet.
-  slug String @unique
+  slug                String   @unique
   /// The ceiling for this team. A team_admin may grant its members any subset
   /// of this list and never anything outside it.
   allowedMarketplaces String[] @default([])
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   users     User[]
   projects  Project[]
@@ -37,29 +37,30 @@ model Team {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String    @unique
-  emailVerified DateTime?
-  image         String?
-  password      String?
+  id                  String    @id @default(cuid())
+  name                String?
+  email               String    @unique
+  emailVerified       DateTime?
+  image               String?
+  password            String?
   /// "user" | "team_admin" | "admin".
   /// "admin" is the super admin and predates teams — it is deliberately NOT
   /// renamed, so no existing row has to be migrated.
-  role          String    @default("user")
+  role                String    @default("user")
   /// Null for rows that predate teams, and for the super admin.
-  teamId        String?
+  teamId              String?
   // Marketplace ids a non-admin user may create projects for. Empty = none
   // allowed (explicit allow-list). Admins ignore this and see all.
-  allowedMarketplaces String[] @default([])
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  allowedMarketplaces String[]  @default([])
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   accounts  Account[]
   sessions  Session[]
   projects  Project[]
   templates ExportTemplate[]
-  team      Team? @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  mcpTokens McpToken[]
+  team      Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
   @@index([teamId])
 }
@@ -103,13 +104,13 @@ model VerificationToken {
 // ── Core ─────────────────────────────────────────────────────────────────────
 
 model Project {
-  id          String   @id @default(cuid())
-  userId      String
+  id           String  @id @default(cuid())
+  userId       String
   /// Stamped from the creator's team. Null on rows that predate teams.
-  teamId      String?
-  name        String
-  marketplace String   // amazon | bestbuy | walmart | temu | mathis | sears
-  status      String   @default("uploaded") // uploaded | verifying | verified | categorizing | categorized | exporting | done
+  teamId       String?
+  name         String
+  marketplace  String // amazon | bestbuy | walmart | temu | mathis | sears
+  status       String  @default("uploaded") // uploaded | verifying | verified | categorizing | categorized | exporting | done
   // New-listing projects have no live marketplace page to verify against, so the
   // Verify step is skipped and the flow goes straight to Categorize.
   isNewListing Boolean @default(false)
@@ -118,13 +119,13 @@ model Project {
   // requests, so we accumulate the ACTIVE processing time of each pass (idle
   // gaps between resumes are not counted). `*CompletedAt` is set when the phase
   // fully finishes, which is also the signal the UI uses to show the summary.
-  verifyMs          Int?      // total active verification time in ms
-  verifyCompletedAt DateTime?
-  categorizeMs          Int?  // total active categorization time in ms
+  verifyMs              Int? // total active verification time in ms
+  verifyCompletedAt     DateTime?
+  categorizeMs          Int? // total active categorization time in ms
   categorizeCompletedAt DateTime?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   team     Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
@@ -144,12 +145,12 @@ model Product {
   description String?
   price       Float?
   imageUrl    String?
-  vendorData  Json?   // full raw vendor row
+  vendorData  Json? // full raw vendor row
 
   // Verification
-  verifyStatus String?   // ok | warning | mismatch | not_found | pending
-  liveData     Json?     // raw marketplace response
-  verifyFields Json?     // field-by-field comparison array
+  verifyStatus String? // ok | warning | mismatch | not_found | pending
+  liveData     Json? // raw marketplace response
+  verifyFields Json? // field-by-field comparison array
   verifiedAt   DateTime?
 
   // Categorization
@@ -164,7 +165,7 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   /// Values resolved once (catalog lookup or AI) and reused by later exports.
   attributes ProductAttribute[]
 
@@ -250,7 +251,7 @@ model WalmartItemCache {
 
 model ExportTemplate {
   id          String   @id @default(cuid())
-  userId      String?  // null = global (admin-created); set = user-private
+  userId      String? // null = global (admin-created); set = user-private
   /// Set = visible to that team only. Null WITH a null userId means truly
   /// global; the two fields together answer "who may use this template".
   teamId      String?
@@ -258,8 +259,8 @@ model ExportTemplate {
   marketplace String
   category    String?
   fileFormat  String   @default("xlsx") // xlsx | csv
-  columns     Json     // [{ key, label, required }]
-  fileData    Bytes?   // raw uploaded template file — used as base workbook on export
+  columns     Json // [{ key, label, required }]
+  fileData    Bytes? // raw uploaded template file — used as base workbook on export
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -276,30 +277,30 @@ model ExportTemplate {
 // can land on any instance, and the instance that built the ZIP can be frozen
 // or recycled at any moment. Rows are pruned by createJob after 48h.
 model ExportJob {
-  id          String   @id // `${projectId}_${startedAtMs}` — minted by the export POST
-  projectId   String
-  userId      String   // owner — polls from other users are refused
-  status      String   @default("processing") // processing | done | error
-  phase       String?  // human-readable progress ("Building spreadsheet files…")
-  error       String?
-  zip         Bytes?   // finished payload (ZIP or bare spreadsheet), set when done
-  extension   String?  // zip | xlsx | csv
-  contentType String?
+  id                        String   @id // `${projectId}_${startedAtMs}` — minted by the export POST
+  projectId                 String
+  userId                    String // owner — polls from other users are refused
+  status                    String   @default("processing") // processing | done | error
+  phase                     String? // human-readable progress ("Building spreadsheet files…")
+  error                     String?
+  zip                       Bytes? // finished payload (ZIP or bare spreadsheet), set when done
+  extension                 String? // zip | xlsx | csv
+  contentType               String?
   missingTemplateCategories Json? // string[] — Temu categories with no matching template
   /// string[] — output groups still to be written. An export is built one slice
   /// per request because the whole job cannot fit in one serverless
   /// invocation; this is what the next request picks up.
-  pendingGroups Json?
+  pendingGroups             Json?
   /// How many groups the job started with, so progress can be reported.
-  totalGroups   Int?
+  totalGroups               Int?
   /// { columns: [{ label, rows }], aiUnavailable } — REQUIRED cells this export
   /// shipped empty, rolled up per column, plus whether the AI was reachable at
   /// all. Kept so the export screen can offer to set a default for a genuinely
   /// unanswerable column — and can refuse to offer one when the cells are empty
   /// merely because the AI had no credit.
-  unfilledRequired Json?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @default(now()) // heartbeat — bumped on every phase/touch
+  unfilledRequired          Json?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @default(now()) // heartbeat — bumped on every phase/touch
 
   files ExportJobFile[]
 
@@ -353,7 +354,7 @@ model ServiceUsage {
   /// kimi | keepa | synccentric
   service String
   /// Model id for kimi (kimi-k2.6, …); null for the metered data providers.
-  model String?
+  model   String?
   /// What the call was FOR: categorize, verify_image, export_dropdown for AI;
   /// the endpoint (product, search, query) for Keepa and Synccentric.
   feature String
@@ -367,14 +368,14 @@ model ServiceUsage {
   outputTokens Int @default(0)
   /// Metered providers — Keepa tokens consumed, Synccentric searches used.
   /// Zero for AI rows, whose cost is in the token columns above.
-  units Int @default(0)
+  units        Int @default(0)
 
   /// Wall-clock duration, for spotting slow paths that also cost.
   durationMs Int?
   /// False when the call threw. Failed calls are still billed by every one of
   /// the three providers, and they were the blind spot in every estimate made
   /// before this table existed.
-  ok Boolean @default(true)
+  ok         Boolean @default(true)
 
   @@index([createdAt])
   @@index([service, createdAt])
@@ -407,12 +408,12 @@ model ExportDefault {
   teamId      String?
   marketplace String
   /// normalizeKey() of the column's label or attribute code.
-  attribute String
+  attribute   String
   /// Human label, for the admin screen only.
-  label String?
-  value String
-  updatedAt DateTime @updatedAt
-  updatedBy String?
+  label       String?
+  value       String
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
 
   team Team? @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
@@ -478,13 +479,47 @@ model ProductAttribute {
 /// readings; increases are top-ups and are ignored rather than netted off, so a
 /// recharge mid-window cannot hide the spend around it.
 model BalanceSnapshot {
-  id      String @id @default(cuid())
+  id           String   @id @default(cuid())
   /// kimi — the only provider that reports a money balance; Keepa and
   /// Synccentric report quotas, which the usage table already measures exactly.
-  service String
+  service      String
   /// Cents, to keep the arithmetic exact. Negative when the account is overdrawn.
   balanceCents Int
   capturedAt   DateTime @default(now())
 
   @@index([service, capturedAt])
+}
+
+/// A personal access token for the MCP endpoint, so Claude can reach Mercato
+/// as a SPECIFIC person rather than as the application.
+///
+/// That distinction is the whole design. A single shared secret would make
+/// every caller equally powerful and quietly undo the scoping in authz.ts —
+/// a member would see their colleagues' templates, a team admin another
+/// team's projects. A token belongs to one user, and every MCP tool builds
+/// its actor from that user, so Claude can see exactly what its owner can
+/// see in the browser and nothing more.
+///
+/// Only the hash is stored. The token itself is shown once, at creation, and
+/// is unrecoverable afterwards — a database copy must not be a set of live
+/// credentials, which matters here because backups now leave the server.
+model McpToken {
+  id         String    @id @default(cuid())
+  userId     String
+  /// SHA-256 of the token. Never the token.
+  tokenHash  String    @unique
+  /// First few characters, for telling two tokens apart in the UI.
+  prefix     String
+  /// What the person called it — "My laptop", "Claude desktop".
+  name       String
+  createdAt  DateTime  @default(now())
+  /// Updated on use, so an unused token is visible as such and can be culled.
+  lastUsedAt DateTime?
+  /// Set instead of deleting, so a revoked token stays auditable.
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
 }

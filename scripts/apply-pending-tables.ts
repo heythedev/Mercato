@@ -205,6 +205,32 @@ const TABLES: { name: string; column?: string; statements: string[] }[] = [
       `ALTER TABLE "ExportDefault" DROP CONSTRAINT IF EXISTS "ExportDefault_marketplace_attribute_key"`,
     ],
   },
+  {
+    name: "McpToken",
+    statements: [
+      // Personal access tokens for the MCP endpoint. Only the hash is stored:
+      // a backup of this database must not be a set of live credentials, and
+      // since 29 Sep backups leave the server.
+      `CREATE TABLE IF NOT EXISTS "McpToken" (
+         "id" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "tokenHash" TEXT NOT NULL,
+         "prefix" TEXT NOT NULL,
+         "name" TEXT NOT NULL,
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         "lastUsedAt" TIMESTAMP(3),
+         "revokedAt" TIMESTAMP(3),
+         CONSTRAINT "McpToken_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "McpToken_tokenHash_key" ON "McpToken"("tokenHash")`,
+      `CREATE INDEX IF NOT EXISTS "McpToken_userId_idx" ON "McpToken"("userId")`,
+      // Cascade: a deleted account must not leave a working credential behind.
+      `DO $$ BEGIN
+         ALTER TABLE "McpToken" ADD CONSTRAINT "McpToken_userId_fkey"
+           FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
 ];
 
 (async () => {

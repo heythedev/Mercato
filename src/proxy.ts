@@ -10,6 +10,12 @@ export const proxy = auth((req) => {
   const isAuthPage = nextUrl.pathname.startsWith("/login");
   const isApiAuth = nextUrl.pathname.startsWith("/api/auth");
   const isLanding = nextUrl.pathname === "/";
+  // The MCP endpoint authenticates with a bearer token, not a browser
+  // session, so this redirect does not apply — and applying it is worse than
+  // useless: a 302 to /login answers 200 with an HTML page, so a client sees
+  // a successful request containing no JSON-RPC result and reports nothing
+  // useful. It must be allowed through to return its own 401.
+  const isMcp = nextUrl.pathname.startsWith("/api/mcp");
   // The design-system page: static markup, hardcoded sample data, no query and
   // no session. It exists to be openable when the database is not — which is
   // exactly when it is most needed, and exactly when signing in cannot work,
@@ -18,7 +24,7 @@ export const proxy = auth((req) => {
   const isUiPreview =
     process.env.NODE_ENV !== "production" && nextUrl.pathname.startsWith("/ui-preview");
 
-  if (isApiAuth || isUiPreview) return;
+  if (isApiAuth || isUiPreview || isMcp) return;
   if (isAuthPage || isLanding) {
     // Public pages — but signed-in users go straight to the app.
     if (isLoggedIn) return Response.redirect(new URL("/projects", nextUrl));

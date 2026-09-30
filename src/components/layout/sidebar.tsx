@@ -7,8 +7,9 @@ import {
   Users,
   FileText,
   Activity,
-    ChevronsLeft,
+  ChevronsLeft,
   ChevronsRight,
+  Plug,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -23,9 +24,17 @@ type Props = {
   showAmazonSources?: boolean;
 };
 
+// "Connect to Claude" is in BOTH lists on purpose. The MCP endpoint scopes
+// itself to whoever the token belongs to, so a member connecting Claude
+// reaches their own projects and nothing else — hiding the page from them
+// would deny help to the people with the least support while adding no
+// safety the tools do not already enforce.
+const connectNav = { href: "/settings/connect-claude", label: "Connect to Claude", icon: Plug };
+
 const userNav = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/templates", label: "Templates", icon: FileText },
+  connectNav,
 ];
 
 const adminNav = [
@@ -33,6 +42,7 @@ const adminNav = [
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/templates", label: "Templates", icon: FileText },
   { href: "/admin/usage", label: "Usage & credits", icon: Activity },
+  connectNav,
 ];
 
 export function Sidebar({ role, showAmazonSources = false }: Props) {

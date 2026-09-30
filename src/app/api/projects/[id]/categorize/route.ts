@@ -29,6 +29,7 @@ import {
 } from "@/lib/ai/walmart-taxonomy";
 import { findReusableCategories, normalizeProductName } from "@/lib/categorize/category-reuse";
 import { checkAiAvailable } from "@/lib/ai/moonshot";
+import { checkSpendBudget, estimateRunCostUsd } from "@/lib/ai/spend-guard";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
 // Import categories from a CSV file. Expected columns: SKU (or name), Category, [Category Path].
@@ -389,6 +390,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (!availability.ok) {
     return NextResponse.json(
       { error: `Categorization can't start — ${availability.reason}`, code: "AI_UNAVAILABLE" },
+      { status: 503 },
+    );
+  }
+
+  // Having credit is not the same as having enough. The check above refuses
+  // at zero; this refuses when the balance cannot cover the run in front of
+  // it — because a categorise that stops two thirds through leaves a project
+  // half-labelled, and the only sign is an export full of blank cells later.
+  const pending = await prisma.product.count({ where: { projectId: id } });
+  const budget = await checkSpendBudget(estimateRunCostUsd("categorize", pending));
+  if (!budget.ok) {
+    return NextResponse.json(
+      { error: `Categorization held — ${budget.warning}`, code: "AI_BUDGET_LOW" },
       { status: 503 },
     );
   }
