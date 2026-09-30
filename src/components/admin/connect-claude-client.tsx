@@ -129,6 +129,19 @@ export function ConnectClaudeClient({
           <p className="mt-2">
             Mercato stores only a hash of it. If you lose it, revoke it and make another.
           </p>
+          {/*
+            Said here, next to the token, rather than in a policy page nobody
+            opens. The mistake this prevents is a specific and easy one: the
+            setup command below CONTAINS the token, so pasting "the command"
+            into a chat, a ticket or an email to ask why it is not working
+            hands over the credential with it.
+          */}
+          <p className="mt-2">
+            <strong className="text-foreground">Treat it like a password.</strong> The command in
+            step 2 contains it, so pasting that command into a chat, a ticket or an email shares
+            your access along with it. Type it into your own terminal only. If it does get out,
+            revoke it below and create another — revoking takes effect immediately.
+          </p>
         </Notice>
       )}
 
@@ -172,15 +185,42 @@ export function ConnectClaudeClient({
           />
         </div>
         <p className="mt-3 text-sm text-muted-foreground">
-          Then restart Claude and run <code className="text-xs">/mcp</code> — it should list{" "}
-          <strong>mercato</strong>. On claude.ai, add it under Settings → Connectors using the same
-          URL and header.
+          Run it in your own terminal — don&apos;t paste it anywhere else, it carries your token.
+          On claude.ai instead of the CLI, add it under Settings → Connectors using the same URL
+          and the same <code className="text-xs">Authorization</code> header.
         </p>
       </Card>
 
-      {/* ── 3. what to ask ─────────────────────────────────────────── */}
+      {/* ── 3. check ───────────────────────────────────────────────── */}
+      <Card className="mb-4">
+        <h2 className="text-base font-semibold">3. Check it worked</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Restart Claude, then run <code className="text-xs">/mcp</code>. It should list{" "}
+          <strong>mercato</strong>. If it doesn&apos;t, the message tells you which step to redo:
+        </p>
+        {/*
+          Every row is a failure somebody can actually hit, paired with the ONE
+          thing that fixes it. A troubleshooting list that says "check your
+          configuration" sends people back to the start of the page.
+        */}
+        <dl className="mt-4 space-y-3 text-sm">
+          {[
+            ["mercato isn't listed at all", <>The command didn&apos;t run, or Claude wasn&apos;t restarted afterwards. Run step 2 again and restart.</>],
+            ["401 Unauthorized", <>The token is wrong or has been revoked. Check the header reads <code className="text-xs">Bearer </code> followed by the token, then create a fresh one above.</>],
+            ["404 Not Found", <>Either the URL is missing <code className="text-xs">/api/mcp</code>, or MCP is switched off on this deployment — your tokens are untouched and start working again when it&apos;s switched back on.</>],
+            ["It connects but sees nothing", <>Expected if the account holds no projects. Claude sees exactly what you see when you sign in — no more, and no less.</>],
+          ].map(([symptom, fix]) => (
+            <div key={String(symptom)} className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+              <dt className="font-medium">{symptom}</dt>
+              <dd className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{fix}</dd>
+            </div>
+          ))}
+        </dl>
+      </Card>
+
+      {/* ── 4. what to ask ─────────────────────────────────────────── */}
       <Card className="mb-6">
-        <h2 className="text-base font-semibold">3. Ask it something</h2>
+        <h2 className="text-base font-semibold">4. Ask it something</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Plain English. Claude picks the right tool itself.
         </p>
