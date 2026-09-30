@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ShieldCheck, Loader2, ChevronDown, ChevronUp,
-  CheckCircle2, AlertTriangle, XCircle, HelpCircle, Download, ThumbsUp, Ban, Sparkles, RefreshCw,
+  XCircle, Download, ThumbsUp, Ban, Sparkles, RefreshCw,
 } from "lucide-react";
 import { cn, formatDuration } from "@/lib/utils";
 import { verdictStyle } from "@/components/projects/verdict";
@@ -12,6 +12,7 @@ import { LottieLoader } from "@/components/ui/lottie-loader";
 import { toast } from "sonner";
 import { buildDownloadName } from "@/lib/export/filename";
 import { isImageCheckPending } from "@/lib/marketplaces/image-check-state";
+import { EmptyState, Notice, PageHeader, StatRow, StatTile } from "@/components/ui/primitives";
 
 type FieldResult = {
   field: string;
@@ -603,31 +604,35 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
   return (
     <div className="p-4 sm:p-8">
-      <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Marketplace Verification</h2>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Compare catalog data against live {marketplaceLabel} listings — title, images, description &amp; dimensions
-          </p>
-          {loading && formatDuration(liveElapsedMs) && (
-            <p className="text-xs text-muted-foreground mt-1 font-medium tabular-nums">
-              {verifyDone != null && verifyTotal != null && verifyTotal > 0
-                ? <>Verifying {verifyDone.toLocaleString()} / {verifyTotal.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>
-                : <>Verifying… {formatDuration(liveElapsedMs)} elapsed</>}
-            </p>
-          )}
-          {/* Same as Categorize: a run recovered after its process died has no
-              recorded duration, and gating on one hid the completion line
-              entirely. */}
-          {!loading && completedAt && (
-            <p className="text-xs text-green-700 mt-1 font-medium">
-              {formatDuration(elapsedMs)
-                ? <>Verification done in {formatDuration(elapsedMs)}</>
-                : <>Verification complete</>}
-            </p>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 sm:justify-end sm:gap-3">
+      <PageHeader
+        as="section"
+        className="items-center"
+        title="Marketplace Verification"
+        subtitle={
+          <>
+            Compare catalog data against live {marketplaceLabel} listings — title, images,
+            description &amp; dimensions
+            {loading && formatDuration(liveElapsedMs) && (
+              <span className="mt-1 block text-xs font-medium tabular-nums">
+                {verifyDone != null && verifyTotal != null && verifyTotal > 0
+                  ? <>Verifying {verifyDone.toLocaleString()} / {verifyTotal.toLocaleString()} · {formatDuration(liveElapsedMs)} elapsed</>
+                  : <>Verifying… {formatDuration(liveElapsedMs)} elapsed</>}
+              </span>
+            )}
+            {/* Same as Categorize: a run recovered after its process died has no
+                recorded duration, and gating on one hid the completion line
+                entirely. */}
+            {!loading && completedAt && (
+              <span className="mt-1 block text-xs font-medium text-[var(--status-good)]">
+                {formatDuration(elapsedMs)
+                  ? <>Verification done in {formatDuration(elapsedMs)}</>
+                  : <>Verification complete</>}
+              </span>
+            )}
+          </>
+        }
+        actions={
+          <>
           {hasResults && (
             <button
               onClick={downloadReport}
@@ -675,38 +680,41 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
             {loading ? <LottieLoader size={20} onDark className="-my-2" /> : <ShieldCheck className="w-4 h-4" />}
             {loading ? "Verifying…" : hasResults ? "Continue →" : "Run verification"}
           </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Summary cards — shown as soon as any result exists, so the tallies
           climb while the run is still going. */}
       {(hasResults || hasStreamedResults) && (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3">
+          {/* Each tile filters the list below it, so they are buttons with a
+              real pressed state rather than tinted panels with a ring bolted
+              on. The tone carries the verdict; the tile itself stays a card,
+              which is what stops five saturated blocks competing with the
+              products they are meant to introduce. */}
+          <StatRow className="lg:grid-cols-5 mb-3">
             {[
-              { label: "Match",        status: "ok",           count: verifiedCount,    color: "bg-green-50/70 dark:bg-green-950/20",    text: "text-green-700 dark:text-green-400",   ring: "ring-green-400" },
-              { label: "Warning",      status: "warning",      count: warningCount,     color: "bg-yellow-50/70 dark:bg-yellow-950/20",  text: "text-yellow-700 dark:text-yellow-400",  ring: "ring-yellow-400" },
-              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,    color: "bg-red-50/70 dark:bg-red-950/20",        text: "text-red-700 dark:text-red-400",     ring: "ring-red-400" },
-              { label: "Not Found",    status: "not_found",    count: notFoundCount,    color: "bg-muted/30",      text: "text-gray-600 dark:text-gray-400",    ring: "ring-gray-400" },
-              { label: "Discontinued", status: "discontinued", count: discontinuedCount, color: "bg-purple-50/70 dark:bg-purple-950/20", text: "text-purple-700 dark:text-purple-400",  ring: "ring-purple-400" },
-            ].map((s) => {
-              const isActive = activeFilter === s.status;
-              return (
-                <button
-                  key={s.label}
-                  onClick={() => { setActiveFilter(isActive ? null : s.status); setExpanded(null); setVisibleRows(INITIAL_ROWS); }}
-                  className={cn(
-                    "rounded-2xl p-4 text-left transition-all w-full",
-                    s.color,
-                    isActive ? `ring-2 ${s.ring} shadow-sm` : "hover:shadow-sm hover:brightness-95",
-                  )}
-                >
-                  <p className={cn("text-2xl font-bold", s.text)}>{s.count}</p>
-                  <p className={cn("text-sm font-medium", s.text)}>{s.label}</p>
-                </button>
-              );
-            })}
-          </div>
+              { label: "Match",        status: "ok",           count: verifiedCount,     tone: "good" as const },
+              { label: "Warning",      status: "warning",      count: warningCount,      tone: "warning" as const },
+              { label: "Mismatch",     status: "mismatch",     count: mismatchCount,     tone: "critical" as const },
+              { label: "Not Found",    status: "not_found",    count: notFoundCount,     tone: "neutral" as const },
+              { label: "Discontinued", status: "discontinued", count: discontinuedCount, tone: "accent" as const },
+            ].map((s) => (
+              <StatTile
+                key={s.label}
+                label={s.label}
+                value={s.count.toLocaleString()}
+                tone={s.tone}
+                selected={activeFilter === s.status}
+                onClick={() => {
+                  setActiveFilter(activeFilter === s.status ? null : s.status);
+                  setExpanded(null);
+                  setVisibleRows(INITIAL_ROWS);
+                }}
+              />
+            ))}
+          </StatRow>
           <p className="text-xs text-muted-foreground mb-6">
             {loading ? (
               // Mid-run the tallies are still climbing, so an export-count
@@ -729,13 +737,10 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
       )}
 
       {!hasResults && !loading && (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <ShieldCheck className="w-12 h-12 text-muted-foreground mb-4" />
-          <h3 className="text-base font-semibold mb-1">Ready to verify</h3>
-          <p className="text-sm text-muted-foreground max-w-sm">
-            We&apos;ll check each product against the live {marketplaceLabel} listing and flag any discrepancies in title, images, description and dimensions.
-          </p>
-        </div>
+        <EmptyState icon={ShieldCheck} title="Ready to verify" className="py-16">
+          We&apos;ll check each product against the live {marketplaceLabel} listing and flag any
+          discrepancies in title, images, description and dimensions.
+        </EmptyState>
       )}
 
       {/* Full-page loader only until the first results arrive. Once products
@@ -771,58 +776,45 @@ export function VerifyStep({ projectId, projectName, marketplace, products, veri
 
           {/* ── Background batch image-check progress banner ───────────────────── */}
           {bgCheckStatus?.paused && (
-            <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-[12px] text-red-700 dark:text-red-300">
-              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold">AI image checks paused — nothing is being written</p>
-                <p className="mt-0.5 text-red-700/80 dark:text-red-300/80">{bgCheckStatus.paused}</p>
-                <p className="mt-0.5 text-red-700/80 dark:text-red-300/80">
-                  {(bgCheckStatus.total - bgCheckStatus.done).toLocaleString()} product image
-                  {bgCheckStatus.total - bgCheckStatus.done === 1 ? "" : "s"} still waiting. Once the account has
-                  credit again, click Retry — the queue continues exactly where it stopped.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={retryImageSweep}
-                className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-red-500/40 bg-background text-[12px] font-medium text-red-700 hover:bg-red-500/10 transition dark:text-red-300"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Retry
-              </button>
-            </div>
+            <Notice
+              tone="critical"
+              title="AI image checks paused — nothing is being written"
+              action={
+                <button
+                  type="button"
+                  onClick={retryImageSweep}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border bg-background text-xs font-medium transition hover:bg-muted"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Retry
+                </button>
+              }
+            >
+              <p>{bgCheckStatus.paused}</p>
+              <p className="mt-0.5">
+                {(bgCheckStatus.total - bgCheckStatus.done).toLocaleString()} product image
+                {bgCheckStatus.total - bgCheckStatus.done === 1 ? "" : "s"} still waiting. Once the
+                account has credit again, click Retry — the queue continues exactly where it
+                stopped.
+              </p>
+            </Notice>
           )}
           {bgCheckStatus && !bgCheckStatus.paused && (
-            <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-2.5 text-[12px] text-blue-700 dark:text-blue-300">
-              {bgCheckStatus.done < bgCheckStatus.total ? (
-                <>
-                  {/* Spinner */}
-                  <svg className="h-4 w-4 shrink-0 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                  </svg>
-                  <span className="font-medium">
-                    Auto-checking images&nbsp;
-                    <span className="font-bold">{bgCheckStatus.done + 1} of {bgCheckStatus.total}</span>
-                    {bgCheckStatus.current && (
-                      <span className="font-normal text-blue-600/80 dark:text-blue-300/70">
-                        &nbsp;— {bgCheckStatus.current}
-                      </span>
-                    )}
-                  </span>
-                </>
-              ) : (
-                <>
-                  {/* Checkmark */}
-                  <svg className="h-4 w-4 shrink-0 text-green-500" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                  <span className="font-medium text-green-700 dark:text-green-300">
-                    Image auto-check complete — {bgCheckStatus.total} product{bgCheckStatus.total !== 1 ? "s" : ""} checked
-                  </span>
-                </>
-              )}
-            </div>
+            bgCheckStatus.done < bgCheckStatus.total ? (
+              <Notice
+                tone="info"
+                icon={Loader2}
+                iconClassName="animate-spin"
+                title={`Auto-checking images ${bgCheckStatus.done + 1} of ${bgCheckStatus.total}`}
+              >
+                {bgCheckStatus.current ?? "Working through the queue…"}
+              </Notice>
+            ) : (
+              <Notice
+                tone="good"
+                title={`Image auto-check complete — ${bgCheckStatus.total} product${bgCheckStatus.total !== 1 ? "s" : ""} checked`}
+              />
+            )
           )}
 
           {visibleProducts.slice(0, visibleRows).map((p) => {

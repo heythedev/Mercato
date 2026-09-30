@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getLastMoonshotBalance } from "@/lib/ai/moonshot";
+import { flags } from "@/lib/flags";
 
 /**
  * Stop work before the money runs out, rather than after.
@@ -68,6 +69,14 @@ async function spentLast24h(): Promise<number | null> {
  * given, the balance must cover it with the floor still intact.
  */
 export async function checkSpendBudget(estimatedUsd?: number): Promise<SpendCheck> {
+  // Switched off: behave exactly as before this existed — any credit at all
+  // is enough to start. Kept removable because the estimate is an estimate,
+  // and a wrong one blocking real work must be undoable in a minute rather
+  // than a release.
+  if (!flags.spendGuard()) {
+    return { ok: true, warning: null, balanceUsd: null, spentLast24hUsd: null };
+  }
+
   const bal = getLastMoonshotBalance();
   const balanceUsd = bal?.availableBalance ?? null;
   const spent = await spentLast24h().catch(() => null);

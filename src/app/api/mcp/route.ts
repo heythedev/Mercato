@@ -1,6 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
+import { flags } from "@/lib/flags";
 import { actorForToken } from "@/lib/mcp/tokens";
 import { TOOLS } from "@/lib/mcp/tools";
+import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
+
+/**
+ * The tools this request may use.
+ *
+ * Read tools always; write tools only when MCP_WRITE_ENABLED says so. They are
+ * withheld from tools/list as well as refused on call, so a model cannot
+ * discover a tool it is not allowed to use and keep trying — an error it can
+ * see is an error it will work around.
+ */
+function availableTools() {
+  return flags.mcpWrite() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS;
+}
 
 /**
  * Mercato's MCP endpoint.
@@ -62,6 +76,13 @@ function toJsonSchema(shape: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function POST(req: NextRequest) {
+  // Off entirely: 404, not 503. A disabled endpoint should look absent rather
+  // than broken, so nobody spends an afternoon debugging a connection to
+  // something that was switched off on purpose.
+  if (!flags.mcp()) {
+    return NextResponse.json({ error: "MCP is disabled on this deployment" }, { status: 404 });
+  }
+
   let body: RpcRequest;
   try {
     body = (await req.json()) as RpcRequest;
@@ -107,7 +128,7 @@ export async function POST(req: NextRequest) {
 
   if (method === "tools/list") {
     return result(id, {
-      tools: TOOLS.map((t) => ({
+      tools: availableTools().map((t) => ({
         name: t.name,
         title: t.title,
         description: t.description,
@@ -119,7 +140,7 @@ export async function POST(req: NextRequest) {
   if (method === "tools/call") {
     const name = String((params as { name?: string })?.name ?? "");
     const args = ((params as { arguments?: Record<string, unknown> })?.arguments ?? {}) as Record<string, unknown>;
-    const tool = TOOLS.find((t) => t.name === name);
+    const tool = availableTools().find((t) => t.name === name);
     if (!tool) return failure(id, -32602, `No such tool: ${name}`);
 
     try {
@@ -143,10 +164,14 @@ export async function POST(req: NextRequest) {
 /** A plain GET is someone pasting the URL into a browser. Tell them what it
  *  is rather than returning a bare 405 they have to decode. */
 export async function GET() {
+  if (!flags.mcp()) {
+    return NextResponse.json({ error: "MCP is disabled on this deployment" }, { status: 404 });
+  }
   return NextResponse.json({
     name: "mercato-mcp",
     transport: "streamable-http (POST, JSON-RPC 2.0)",
-    tools: TOOLS.map((t) => t.name),
+    tools: availableTools().map((t) => t.name),
+    writeToolsEnabled: flags.mcpWrite(),
     auth: "Authorization: Bearer mrc_… — create one under Settings → Connect to Claude",
   });
 }

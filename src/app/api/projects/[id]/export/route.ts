@@ -17,6 +17,7 @@ import {
   getJobStatus,
   getJobZip,
   markGroupsDone,
+  recordSliceOutcome,
   rejectJob,
   resolveJob,
   saveJobFiles,
@@ -29,10 +30,12 @@ import {
   UNCATEGORIZED_GROUP,
   categoriesInGroups,
   chunkFileName,
+  chunkWindow,
   exportGroupOf,
   parseSliceKey,
   planSliceKeys,
 } from "@/lib/export/category-group";
+import { nextSliceEstimateMs, roomForAnotherSlice } from "@/lib/export/slice-budget";
 
 export const maxDuration = 300;
 
@@ -169,8 +172,7 @@ async function productQueryForSlice(
       : categories.includes(cat);
     return mine ? n + row._count._all : n;
   }, 0);
-  const size = Math.ceil(inGroup / chunk.total);
-  return { where, skip: (chunk.index - 1) * size, take: size };
+  return { where, ...chunkWindow(inGroup, chunk.index, chunk.total) };
 }
 
 // Poll job status / download completed ZIP
@@ -304,10 +306,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     ? existing!.totalGroups || existing!.pendingGroups.length
     : plan.length;
 
-  // Accumulated across the slices of one job, and reported once at the end.
-  const sliceMissing: string[] = [];
-  const sliceUnfilled: { label: string; rows: number }[] = [];
-  let sliceAiDown = false;
+  // Slice findings are recorded ON THE JOB (see recordSliceOutcome), not in
+  // locals here. A sliced export spans several requests, so anything kept in
+  // this handler's scope describes one request rather than the job — which is
+  // how a Best Buy run could report no missing templates while its first
+  // request had found ten.
 
   // All heavy work (loading products JSON, loading template fileData BYTEA)
   // runs after the response. `after()` matters on Vercel: a bare fire-and-forget
@@ -778,10 +781,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           });
         }
         await saveJobFiles(jobId, files);
+        // Before markGroupsDone: a slice counted as finished whose findings
+        // were never written would be lost for good, since nothing revisits a
+        // group that is no longer pending.
+        await recordSliceOutcome(jobId, {
+          missingTemplateCategories,
+          unfilled: unfilledColumns,
+          aiUnavailable,
+        });
         await markGroupsDone(jobId, sliceGroups);
-        sliceMissing.push(...missingTemplateCategories);
-        sliceUnfilled.push(...unfilledColumns);
-        sliceAiDown = sliceAiDown || aiUnavailable;
         return;
       }
 
@@ -842,9 +850,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // old check asked whether the budget had already been spent, which permitted
   // a group to START at 209s and run for another 150 — straight through the
   // 300s ceiling, losing that group's work and returning the client an
-  // invocation timeout rather than a slice result. Carrying the longest group
-  // seen so far and refusing to begin another without space for one that size
-  // keeps small groups batching while never opening a slice that cannot close.
+  // invocation timeout rather than a slice result. The rule itself lives in
+  // slice-budget.ts, where it can be checked without a 4,811-product catalogue.
   let longestGroupMs = 0;
   while (pending.length > 0) {
     const group = pending[0];
@@ -853,21 +860,41 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     longestGroupMs = Math.max(longestGroupMs, Date.now() - groupStart);
     pending = pending.filter((g) => g !== group);
 
-    const elapsed = Date.now() - started;
-    if (elapsed + longestGroupMs > SLICE_BUDGET_MS) break;
+    const now = Date.now();
+    const room = roomForAnotherSlice({
+      elapsedMs: now - started,
+      // From the START of the invocation, not of the loop. Everything before
+      // it — auth, the body, planGroups' groupBy, creating the job — used to
+      // be free in this arithmetic, and on a large catalogue it is seconds.
+      invocationElapsedMs: now - requestStartedAt,
+      longestSliceMs: longestGroupMs,
+      budgetMs: SLICE_BUDGET_MS,
+      invocationMs: INVOCATION_MS,
+      finishReserveMs: WRITE_RESERVE_MS,
+    });
+    if (!room) {
+      console.log(
+        `[export] stopping after ${Math.round((now - started) / 1000)}s with ${pending.length} ` +
+          `group(s) left — no room for another ${Math.round(nextSliceEstimateMs(longestGroupMs) / 1000)}s slice`,
+      );
+      break;
+    }
   }
 
   if (pending.length === 0) {
     const zip = await assembleJobZip(jobId);
     const payload = await unwrapSingleFileZip(zip);
+    // Read back what EVERY slice recorded, across every request the job took
+    // — not just the ones this request happened to build.
+    const finished = await getJobStatus(jobId);
     await prisma.project.update({ where: { id }, data: { status: "done" } }).catch(() => {});
     await resolveJob(jobId, payload.buffer, {
       extension: payload.extension,
       contentType: payload.contentType,
-      missingTemplateCategories: [...new Set(sliceMissing)],
-      unfilledRequired: {
-        columns: mergeUnfilled(sliceUnfilled),
-        aiUnavailable: sliceAiDown,
+      missingTemplateCategories: finished?.missingTemplateCategories ?? [],
+      unfilledRequired: finished?.unfilledRequired ?? {
+        columns: [],
+        aiUnavailable: false,
         recorded: true,
       },
     });
@@ -880,11 +907,4 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     remaining: pending.length,
     total: totalGroups,
   });
-}
-
-/** Worst count per column across the slices that reported it. */
-function mergeUnfilled(all: { label: string; rows: number }[]): { label: string; rows: number }[] {
-  const byLabel = new Map<string, number>();
-  for (const c of all) byLabel.set(c.label, (byLabel.get(c.label) ?? 0) + c.rows);
-  return [...byLabel].sort((a, b) => b[1] - a[1]).map(([label, rows]) => ({ label, rows }));
 }

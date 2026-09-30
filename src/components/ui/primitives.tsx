@@ -71,6 +71,7 @@ export function Notice({
   tone = "info",
   title,
   icon,
+  iconClassName,
   action,
   children,
   className,
@@ -79,6 +80,13 @@ export function Notice({
   title: React.ReactNode;
   /** Override only when a specific icon says more than the tone's default. */
   icon?: LucideIcon;
+  /**
+   * For the one case the tone cannot express: something is happening RIGHT
+   * NOW. `animate-spin` on a Loader2 says "still running" in a way no colour
+   * does, and a notice reporting live progress that sits perfectly still
+   * reads as a notice about something already finished.
+   */
+  iconClassName?: string;
   action?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
@@ -88,7 +96,7 @@ export function Notice({
   return (
     <div className={cn("rounded-xl border p-4", t.ring, t.tint, className)}>
       <div className="flex items-start gap-3">
-        <Icon className={cn("mt-px h-4 w-4 shrink-0", t.mark)} />
+        <Icon className={cn("mt-px h-4 w-4 shrink-0", t.mark, iconClassName)} />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium leading-snug text-foreground">{title}</p>
           {children ? (
@@ -211,7 +219,18 @@ export function PageHeader({
         className,
       )}
     >
-      <div className="min-w-0">
+      {/*
+        `grow basis-64` rather than a bare `min-w-0`.
+
+        With flex-wrap, a flex line wraps BEFORE it shrinks: give the text
+        block its natural width and a header whose title and buttons would
+        together be a hundred pixels too wide drops the buttons onto their own
+        row, even though the subtitle had plenty of slack. A 16rem basis lets
+        the text absorb that instead — it grows to fill whatever is left, and
+        only at genuinely narrow widths does the row wrap, which is where
+        wrapping is what you want.
+      */}
+      <div className="min-w-0 grow basis-64">
         <Heading
           className={cn(
             "font-semibold leading-tight tracking-tight",

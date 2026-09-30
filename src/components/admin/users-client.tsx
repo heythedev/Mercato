@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { formatDate } from "@/lib/format-date";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { MARKETPLACE_TILES } from "@/lib/marketplaces/catalog";
+import { Card, Notice, Pill } from "@/components/ui/primitives";
 
 type User = {
   id: string;
@@ -31,6 +32,14 @@ const ROLE_LABEL: Record<string, string> = {
   admin: "Super admin",
 };
 
+/**
+ * Role colour, worn by a Pill so the shape matches every other badge.
+ *
+ * These stay their own hues rather than becoming status tones: a role is an
+ * identity, not a verdict, and painting "Super admin" green or amber would say
+ * something about it that is not true. The status colours are kept for the one
+ * thing on this row that IS a verdict — a team admin with no team.
+ */
 const ROLE_BADGE: Record<string, string> = {
   user: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
   team_admin: "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300",
@@ -232,14 +241,18 @@ export function AdminUsersClient({
 
       {/* Add form */}
       {showAdd && (
-        <div className="mb-4 rounded-xl border bg-card p-4">
+        <Card inset={false} className="mb-4 p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-sm">New User</h3>
             <button onClick={() => { setShowAdd(false); setError(""); }} className="text-muted-foreground hover:text-foreground">
               <X className="w-4 h-4" />
             </button>
           </div>
-          {error && <p className="text-destructive text-sm mb-3">{error}</p>}
+          {error && (
+            <Notice tone="critical" title="The account was not created" className="mb-3">
+              {error}
+            </Notice>
+          )}
           <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <input
               placeholder="Name (optional)"
@@ -286,7 +299,7 @@ export function AdminUsersClient({
               </button>
             </div>
           </form>
-        </div>
+        </Card>
       )}
 
       {/* Table */}
@@ -313,14 +326,9 @@ export function AdminUsersClient({
                 <td className="px-4 py-3 font-medium">{user.name ?? <span className="text-muted-foreground">—</span>}</td>
                 <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
                 <td className="px-4 py-3">
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium",
-                      ROLE_BADGE[user.role] ?? "bg-muted text-muted-foreground",
-                    )}
-                  >
+                  <Pill className={ROLE_BADGE[user.role]}>
                     {ROLE_LABEL[user.role] ?? user.role}
-                  </span>
+                  </Pill>
                   {isSuperAdmin ? (
                     // Which team someone works in is set here, next to the role
                     // it qualifies: "Team admin" means nothing until you can see
@@ -347,9 +355,7 @@ export function AdminUsersClient({
                   {user.role === "team_admin" && !user.teamId && (
                     // The role is scoped to a team; without one it grants
                     // nothing at all, which is worth saying out loud.
-                    <span className="ml-2 text-[11px] text-amber-600 dark:text-amber-400">
-                      needs a team
-                    </span>
+                    <Pill tone="warning" className="ml-2">needs a team</Pill>
                   )}
                 </td>
                 <td className="px-4 py-3">
@@ -409,7 +415,13 @@ export function AdminUsersClient({
             })}
             {users.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground text-sm">No users yet</td>
+                <td colSpan={6} className="px-4 py-10 text-center text-sm">
+                  <p className="font-medium">No users yet</p>
+                  <p className="mt-1 text-[13px] text-muted-foreground">
+                    Add one above. A new account starts with no marketplaces, so grant those before
+                    they try to create a project.
+                  </p>
+                </td>
               </tr>
             )}
           </tbody>
@@ -478,7 +490,7 @@ function SetPasswordModal({ user, onClose }: { user: User; onClose: () => void }
             {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
           </button>
         </div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
+        {error && <Notice tone="critical" title="The password was not changed">{error}</Notice>}
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" onClick={onClose} className="h-9 px-4 rounded-lg border text-sm">Cancel</button>
           <button type="submit" disabled={saving || password.length < 8} className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50">
@@ -568,7 +580,11 @@ function ManageMarketplacesModal({ user, onClose, onSaved }: {
           );
         })}
       </div>
-      {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
+      {error && (
+        <Notice tone="critical" title="Access was not saved" className="mt-3">
+          {error}
+        </Notice>
+      )}
       <div className="mt-4 flex justify-end gap-2">
         <button type="button" onClick={onClose} className="h-9 px-4 rounded-lg border text-sm">Cancel</button>
         <button type="button" onClick={save} disabled={saving} className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50">

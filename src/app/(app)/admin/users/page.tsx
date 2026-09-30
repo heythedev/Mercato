@@ -2,6 +2,7 @@ import { requireAnyAdmin } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/db";
 import { AdminUsersClient } from "@/components/admin/users-client";
 import { actorOf, isAdmin } from "@/lib/authz";
+import { PageHeader } from "@/components/ui/primitives";
 
 export default async function AdminUsersPage() {
   const account = await requireAnyAdmin();
@@ -26,10 +27,7 @@ export default async function AdminUsersPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-8 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold">Users</h1>
-        <p className="text-muted-foreground text-sm mt-1">Manage user accounts and roles</p>
-      </div>
+      <PageHeader title="Users" subtitle="Manage user accounts and roles" />
       <AdminUsersClient users={users} teams={teams} isSuperAdmin={isAdmin(actor)} />
     </div>
   );

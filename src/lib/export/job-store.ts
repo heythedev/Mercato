@@ -70,6 +70,89 @@ export function toUnfilledReport(raw: unknown): UnfilledReport {
   return { columns: o.columns ?? [], aiUnavailable: !!o.aiUnavailable, recorded: Array.isArray(o.columns) };
 }
 
+/** What one slice of a sliced export found while it was building. */
+export type SliceOutcome = {
+  missingTemplateCategories: string[];
+  unfilled: UnfilledColumn[];
+  aiUnavailable: boolean;
+};
+
+/**
+ * Fold one slice's findings into what the job has recorded so far.
+ *
+ * Pure, and separate from the write, because the merge rules are the whole
+ * point and each is a different kind of claim:
+ *
+ *  • categories with no template — a SET. Best Buy publishes no bulk template,
+ *    so this list is the instruction for which workbooks to go and fetch from
+ *    the portal. A category named by any slice belongs in it.
+ *  • unfilled required columns — a SUM. Each slice counts only its own rows,
+ *    so the export's total for a column is the total across its slices.
+ *  • aiUnavailable — OR. If the AI was unreachable for any part of the run,
+ *    the empty cells in that part are not evidence the column is unanswerable,
+ *    and offering a fixed default for them would write one wrong value into
+ *    every row of every future export.
+ */
+export function mergeSliceOutcome(
+  prev: { missingTemplateCategories: string[]; unfilledRequired: UnfilledReport },
+  slice: SliceOutcome,
+): { missingTemplateCategories: string[]; unfilledRequired: UnfilledReport } {
+  const rows = new Map<string, number>();
+  for (const c of [...prev.unfilledRequired.columns, ...slice.unfilled]) {
+    rows.set(c.label, (rows.get(c.label) ?? 0) + c.rows);
+  }
+  return {
+    missingTemplateCategories: [
+      ...new Set([...prev.missingTemplateCategories, ...slice.missingTemplateCategories]),
+    ].sort(),
+    unfilledRequired: {
+      columns: [...rows].sort((a, b) => b[1] - a[1]).map(([label, n]) => ({ label, rows: n })),
+      aiUnavailable: prev.unfilledRequired.aiUnavailable || slice.aiUnavailable,
+      recorded: true,
+    },
+  };
+}
+
+/**
+ * Keep one slice's findings ON THE JOB, not in the request that built it.
+ *
+ * They used to accumulate in local variables inside the POST handler, which
+ * silently threw most of them away: a job spanning several requests reported
+ * only what its FINAL request happened to find. A Best Buy export that
+ * discovered ten categories with no template in its first request and finished
+ * in its third reported none of them — and that list is precisely what tells
+ * you which templates to go and fetch. The Mathis catalogue that prompted the
+ * slicing takes about a dozen groups, so it was never a one-request job.
+ *
+ * Read-modify-write is safe here: a sliced job runs one request at a time,
+ * because the client only asks for the next slice once the previous one has
+ * answered.
+ */
+export async function recordSliceOutcome(id: string, slice: SliceOutcome): Promise<void> {
+  const job = await prisma.exportJob.findUnique({
+    where: { id },
+    select: { missingTemplateCategories: true, unfilledRequired: true },
+  });
+  if (!job) return;
+
+  const merged = mergeSliceOutcome(
+    {
+      missingTemplateCategories: (job.missingTemplateCategories as string[] | null) ?? [],
+      unfilledRequired: toUnfilledReport(job.unfilledRequired),
+    },
+    slice,
+  );
+
+  await prisma.exportJob.update({
+    where: { id },
+    data: {
+      missingTemplateCategories: merged.missingTemplateCategories,
+      unfilledRequired: merged.unfilledRequired,
+      updatedAt: new Date(),
+    },
+  });
+}
+
 const RETENTION_MS = 48 * 60 * 60 * 1000;
 
 export async function createJob(id: string, projectId: string, userId: string): Promise<void> {

@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { requireUser } from "@/lib/auth-helpers";
 import { listTokens } from "@/lib/mcp/tokens";
+import { flags } from "@/lib/flags";
 import { ConnectClaudeClient } from "@/components/admin/connect-claude-client";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,8 @@ export default async function ConnectClaudePage() {
   return (
     <div className="px-6 py-8">
       <ConnectClaudeClient
+        enabled={flags.mcp()}
+        writeEnabled={flags.mcpWrite()}
         email={(user as { email?: string }).email ?? "your account"}
         baseUrl={baseUrl}
         initialTokens={tokens.map((t) => ({

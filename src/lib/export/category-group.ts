@@ -124,6 +124,24 @@ export function planSliceKeys(group: string, products: number, maxPerSlice: numb
 }
 
 /**
+ * The slice of rows one part covers, as skip/take for the query.
+ *
+ * Lives beside planSliceKeys rather than in the export route because the two
+ * have to agree exactly: if the parts do not tile the group, a product is
+ * either exported twice or not at all, and both are silent — the file looks
+ * fine, it is simply missing rows. Keeping the arithmetic in one place is also
+ * what lets a test cover the code the route actually runs, instead of a
+ * re-derivation of it that can drift.
+ *
+ * Derived from the group's CURRENT row count, not from MAX_SLICE_PRODUCTS, so
+ * the parts still tile it if that setting changes while a job is running.
+ */
+export function chunkWindow(rows: number, index: number, total: number): { skip: number; take: number } {
+  const size = Math.ceil(rows / Math.max(1, total));
+  return { skip: (index - 1) * size, take: size };
+}
+
+/**
  * The name a chunk's file takes, so parts of one group do not collide in the
  * job's file store — which would silently keep only the last one written.
  * `Furniture.xlsx` → `Furniture (part 2 of 3).xlsx`.

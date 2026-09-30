@@ -16,6 +16,7 @@ import { toTileId } from "@/lib/marketplaces/catalog";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { NewProjectModal } from "@/components/projects/new-project-modal";
 import { runQueue, nextActionFor } from "@/lib/client/run-queue-store";
+import { Card, EmptyState, PageHeader } from "@/components/ui/primitives";
 
 // Statuses the classic per-project page already owns — a run started there
 // (or a still-finishing one from a previous session) must not ALSO get
@@ -499,6 +500,16 @@ export function ProjectsView({
 
   const hasActiveFilters = !!(search || statusFilter || marketplaceFilter || ownerFilter || dateFrom);
 
+  // Named so an empty result can say WHICH filter emptied it. Without this the
+  // screen says "no projects match the current filters" while the filters
+  // themselves have scrolled out of view.
+  const activeFilterNames = [
+    statusFilter && "status",
+    marketplaceFilter && "marketplace",
+    ownerFilter && "owner",
+    (dateFrom || dateTo) && "date",
+  ].filter(Boolean) as string[];
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const fromTs = dateFrom ? new Date(dateFrom + "T00:00:00").getTime() : null;
@@ -645,23 +656,26 @@ export function ProjectsView({
   return (
     <div className="p-4 sm:p-8 max-w-6xl mx-auto">
       {/* Header — carded so the initial screen reads as structured panels */}
-      <div className="mb-6 flex items-center justify-between rounded-2xl border bg-card px-5 py-4 sm:px-6">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Projects</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {filtered.length} {filtered.length === 1 ? "project" : "projects"}
-            {hasActiveFilters && ` (of ${projects.length})`}
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setNewProjectOpen(true)}
-          className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
-        >
-          <Plus className="w-4 h-4" />
-          New project
-        </button>
-      </div>
+      <Card inset={false} className="mb-6 px-5 py-4 sm:px-6">
+        <PageHeader
+          className="mb-0 items-center"
+          title="Projects"
+          subtitle={
+            `${filtered.length} ${filtered.length === 1 ? "project" : "projects"}` +
+            (hasActiveFilters ? ` (of ${projects.length})` : "")
+          }
+          actions={
+            <button
+              type="button"
+              onClick={() => setNewProjectOpen(true)}
+              className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
+            >
+              <Plus className="w-4 h-4" />
+              New project
+            </button>
+          }
+        />
+      </Card>
 
       {/* Bulk action bar */}
       {selected.size > 0 && (
@@ -769,40 +783,45 @@ export function ProjectsView({
 
       {/* Empty state */}
       {projects.length === 0 && (
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed bg-card/50 py-24 text-center">
-          <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-            <FolderOpen className="w-7 h-7 text-muted-foreground" />
-          </div>
-          <h3 className="text-base font-semibold mb-1">No projects yet</h3>
-          <p className="text-sm text-muted-foreground mb-6 max-w-xs">
-            Upload a vendor file to start sourcing products across any marketplace.
-          </p>
-          <button
-            type="button"
-            onClick={() => setNewProjectOpen(true)}
-            className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
-          >
-            <Plus className="w-4 h-4" />
-            Create your first project
-          </button>
-        </div>
+        <EmptyState
+          icon={FolderOpen}
+          title="No projects yet"
+          className="py-20"
+          action={
+            <button
+              type="button"
+              onClick={() => setNewProjectOpen(true)}
+              className="inline-flex items-center gap-2 h-9 px-5 rounded-full bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition"
+            >
+              <Plus className="w-4 h-4" />
+              Create your first project
+            </button>
+          }
+        >
+          Upload a vendor file to start sourcing products across any marketplace.
+        </EmptyState>
       )}
 
       {/* No filter results */}
       {projects.length > 0 && filtered.length === 0 && (
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed bg-card/50 py-24 text-center gap-3">
-          <p className="text-sm text-muted-foreground">
-            No projects match the current filters
-            {search ? ` for “${search}”` : ""}
-          </p>
-          <button
-            type="button"
-            onClick={clearFilters}
-            className="text-sm font-medium text-primary hover:underline"
-          >
-            Clear filters
-          </button>
-        </div>
+        <EmptyState
+          icon={Search}
+          title={`No projects match the current filters${search ? ` for “${search}”` : ""}`}
+          className="py-20"
+          action={
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="text-sm font-medium text-primary hover:underline"
+            >
+              Clear filters
+            </button>
+          }
+        >
+          {activeFilterNames.length
+            ? `Filtering by ${activeFilterNames.join(", ")}.`
+            : "Nothing here matches that search."}
+        </EmptyState>
       )}
 
       {/* Grid */}

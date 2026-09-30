@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
+import { flags } from "@/lib/flags";
 
 const { auth } = NextAuth(authConfig);
 
@@ -19,10 +20,9 @@ export const proxy = auth((req) => {
   // The design-system page: static markup, hardcoded sample data, no query and
   // no session. It exists to be openable when the database is not — which is
   // exactly when it is most needed, and exactly when signing in cannot work,
-  // since authentication reads the user table. Dev only; in production it is
-  // treated like any other page and requires a login.
-  const isUiPreview =
-    process.env.NODE_ENV !== "production" && nextUrl.pathname.startsWith("/ui-preview");
+  // since authentication reads the user table. On by default in development
+  // only; UI_PREVIEW_ENABLED shows it on a deployment while reviewing.
+  const isUiPreview = flags.uiPreview() && nextUrl.pathname.startsWith("/ui-preview");
 
   if (isApiAuth || isUiPreview || isMcp) return;
   if (isAuthPage || isLanding) {

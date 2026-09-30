@@ -5,6 +5,7 @@ import { FileText, Plus, Trash2, X, ChevronDown, ChevronUp, Upload, FileSpreadsh
 import { cn } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { toTileId } from "@/lib/marketplaces/catalog";
+import { Card, EmptyState, Notice, Pill } from "@/components/ui/primitives";
 
 type Template = {
   id: string;
@@ -275,7 +276,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
 
       {/* Add form */}
       {showAdd && (
-        <div className="mb-4 rounded-xl border bg-card p-4">
+        <Card inset={false} className="mb-4 p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-sm">New Template</h3>
             <button onClick={() => { setShowAdd(false); setError(""); setUploadFile(null); }} className="text-muted-foreground hover:text-foreground">
@@ -298,7 +299,11 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
             ))}
           </div>
 
-          {error && <p className="text-destructive text-sm mb-3">{error}</p>}
+          {error && (
+            <Notice tone="critical" title="The template was not saved" className="mb-3">
+              {error}
+            </Notice>
+          )}
 
           {/* File upload mode */}
           {addMode === "file" && (
@@ -420,13 +425,14 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
               </div>
             </form>
           )}
-        </div>
+        </Card>
       )}
 
       {templates.length === 0 && !showAdd && (
-        <div className="rounded-xl border border-dashed px-6 py-12 text-center text-muted-foreground text-sm">
-          No templates yet. Upload a marketplace template file to get started.
-        </div>
+        <EmptyState icon={FileSpreadsheet} title="No templates yet">
+          Upload a marketplace template file and Mercato reads its header row — those columns are
+          what an export fills.
+        </EmptyState>
       )}
 
       {/* Grouped list — each marketplace is an accordion section */}
@@ -513,17 +519,14 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-medium text-sm">{tpl.name}</span>
-                            {isAdminTemplate && (
-                              <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300">Admin</span>
-                            )}
+                            {isAdminTemplate && <Pill tone="accent">Admin</Pill>}
                           </div>
                           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                            {tpl.category && (
-                              <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">{tpl.category}</span>
-                            )}
-                            <span className={cn("text-xs px-1.5 py-0.5 rounded font-medium",
-                              tpl.fileFormat === "xlsx" ? "bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300" : "bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300"
-                            )}>{tpl.fileFormat.toUpperCase()}</span>
+                            {tpl.category && <Pill>{tpl.category}</Pill>}
+                            {/* Both formats read neutral. A green XLSX against a
+                                blue CSV said one of them was the right answer,
+                                which is not what a file format is. */}
+                            <Pill>{tpl.fileFormat.toUpperCase()}</Pill>
                             <span className="text-xs text-muted-foreground">{cols.length} columns</span>
                           </div>
                         </div>
@@ -549,7 +552,7 @@ export function AdminTemplatesClient({ templates: initial, isAdmin = false, allo
                     {isOpen && !isEditing && (
                       <div className="px-4 pb-3 flex flex-wrap gap-1.5">
                         {cols.map((c) => (
-                          <span key={c.key} className="text-xs bg-muted px-2 py-0.5 rounded-full text-muted-foreground">{c.label}</span>
+                          <Pill key={c.key}>{c.label}</Pill>
                         ))}
                       </div>
                     )}

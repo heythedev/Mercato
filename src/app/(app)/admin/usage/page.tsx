@@ -1,5 +1,6 @@
 import { requireAnyAdmin } from "@/lib/auth-helpers";
 import { AdminUsageClient } from "@/components/admin/usage-client";
+import { PageHeader } from "@/components/ui/primitives";
 
 /**
  * Admin-only report of what the paid balances were spent on — Kimi (AI), Keepa
@@ -16,13 +17,10 @@ export default async function AdminUsagePage() {
 
   return (
     <div className="mx-auto max-w-6xl px-8 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold">Usage &amp; credits</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Where the money goes. Mercato pays three outside services to do its work — this is what
-          each one cost, what triggered it, and whether it can still run.
-        </p>
-      </div>
+      <PageHeader
+        title="Usage & credits"
+        subtitle="Where the money goes. Mercato pays three outside services to do its work — this is what each one cost, what triggered it, and whether it can still run."
+      />
       <AdminUsageClient />
     </div>
   );

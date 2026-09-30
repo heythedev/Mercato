@@ -55,10 +55,16 @@ export function ConnectClaudeClient({
   email,
   baseUrl,
   initialTokens,
+  enabled,
+  writeEnabled,
 }: {
   email: string;
   baseUrl: string;
   initialTokens: Token[];
+  /** MCP_ENABLED. Off: say so plainly rather than issue tokens that cannot work. */
+  enabled: boolean;
+  /** MCP_WRITE_ENABLED. Off by default — writes are a deliberate decision. */
+  writeEnabled: boolean;
 }) {
   // Seeded from the server, so the page renders complete rather than empty
   // and then filled. Refetched only after a change, never on mount.
@@ -107,6 +113,13 @@ export function ConnectClaudeClient({
         title="Connect to Claude"
         subtitle={`Ask Claude about Mercato in plain English. It connects as ${email} and sees exactly what you see — nothing more.`}
       />
+
+      {!enabled && (
+        <Notice tone="critical" title="MCP is switched off on this deployment" className="mb-6">
+          Tokens below are not revoked and start working again the moment it is switched back on.
+          Set <code className="text-xs">MCP_ENABLED=true</code> to re-enable.
+        </Notice>
+      )}
 
       {fresh && (
         <Notice tone="warning" title="Copy this now — it cannot be shown again" className="mb-6">
@@ -185,10 +198,20 @@ export function ConnectClaudeClient({
             </li>
           ))}
         </ul>
-        <Notice tone="info" className="mt-4" title="Read-only, for now">
-          Claude can look at anything you can look at, and change nothing. Write actions — setting a
-          category, starting an export — come once we know which ones people actually reach for.
-        </Notice>
+        {writeEnabled ? (
+          <Notice tone="warning" className="mt-4" title="Write tools are on">
+            Claude can also change things — set a category, clear a wrong value, set an export
+            default. Bulk changes show you what they would touch and write nothing until you
+            confirm, and nothing can be done that you could not do in the browser. Switch them off
+            with <code className="text-xs">MCP_WRITE_ENABLED=false</code>.
+          </Notice>
+        ) : (
+          <Notice tone="info" className="mt-4" title="Read-only">
+            Claude can look at anything you can look at, and change nothing. Write tools exist but
+            are switched off — turn them on with{" "}
+            <code className="text-xs">MCP_WRITE_ENABLED=true</code> once you have read what they do.
+          </Notice>
+        )}
       </Card>
 
       {/* ── tokens ─────────────────────────────────────────────────── */}

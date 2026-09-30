@@ -3,6 +3,7 @@ import {
   UNCATEGORIZED_GROUP,
   categoriesInGroups,
   chunkFileName,
+  chunkWindow,
   exportGroupOf,
   parseSliceKey,
   planSliceKeys,
@@ -138,21 +139,43 @@ describe("splitting a group too big for one invocation", () => {
   });
 
   it("the parts tile the group exactly — no row lost, none exported twice", () => {
-    // This is the property that matters. skip/take are derived the same way in
-    // the route: size = ceil(n / total), skip = (i-1) * size.
+    // The property that matters, checked against chunkWindow itself — the
+    // function the export route calls to build skip/take. This test used to
+    // re-derive the arithmetic, which meant it would have gone on passing
+    // while the route computed something else entirely.
     for (const n of [1, 699, 700, 701, 1400, 1401, 1799, 4811]) {
       const keys = planSliceKeys("G", n, 700);
-      const total = keys.length;
-      const size = Math.ceil(n / total);
       const covered = new Set<number>();
-      for (let i = 1; i <= total; i++) {
-        for (let r = (i - 1) * size; r < Math.min(i * size, n); r++) {
+      for (const key of keys) {
+        const { index, total } = parseSliceKey(key);
+        const { skip, take } = chunkWindow(n, index, total);
+        // `take` is what the query asks for; Postgres returns fewer on the
+        // final part, so the window is clamped the way the database clamps it.
+        for (let r = skip; r < Math.min(skip + take, n); r++) {
           expect(covered.has(r)).toBe(false); // never twice
           covered.add(r);
         }
       }
       expect(covered.size).toBe(n); // never missed
     }
+  });
+
+  it("tiles a group whose row count changed since the plan was made", () => {
+    // The window is derived from the CURRENT count, so a job whose project
+    // gained or lost products between requests still covers what is there —
+    // rather than reading past the end, or stopping short of it.
+    for (const now of [1500, 1799, 2400]) {
+      const covered = new Set<number>();
+      for (let i = 1; i <= 3; i++) {
+        const { skip, take } = chunkWindow(now, i, 3);
+        for (let r = skip; r < Math.min(skip + take, now); r++) covered.add(r);
+      }
+      expect(covered.size, `${now} rows`).toBe(now);
+    }
+  });
+
+  it("a single part covers the whole group", () => {
+    expect(chunkWindow(1799, 1, 1)).toEqual({ skip: 0, take: 1799 });
   });
 
   it("a category name cannot forge a chunk key", () => {

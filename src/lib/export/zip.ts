@@ -846,9 +846,14 @@ export async function generateCategoryZip(
     const summary = unfilledByColumn(complianceRows)
       .map((c) => `${c.label} (${c.rows})`)
       .join(", ");
+    // Worded carefully. "NOT written to the ZIP" used to sit right after the
+    // row count, which reads as "those rows were dropped from the export" —
+    // they are not, and every one of them is in the workbook. It is the GAP
+    // REPORT that stays out of the client's download.
     console.log(
-      `[export] ${complianceRows.length} row(s) still missing mandatory values — ` +
-      `NOT written to the ZIP. By column: ${summary}`,
+      `[export] ${complianceRows.length} exported row(s) carry at least one empty mandatory cell. ` +
+      `The rows themselves ARE in the workbook; only this gap report is kept out of the ` +
+      `client's ZIP. By column: ${summary}`,
     );
   }
 
