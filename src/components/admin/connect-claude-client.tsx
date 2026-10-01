@@ -195,11 +195,9 @@ export function ConnectClaudeClient({
           was never going to work. Saying what IS supported, and what is not
           yet, is more use than an optimistic pointer.
         */}
-        <Notice tone="info" className="mt-4" title="Claude Code only, for now">
-          This connects Claude Code — the terminal app. Adding Mercato as a connector on
-          claude.ai in the browser needs OAuth, which Mercato does not offer yet, so a
-          hand-entered token will not work there. If you don&apos;t use a terminal, wait for
-          that rather than fighting this.
+        <Notice tone="info" className="mt-4" title="Works with Claude Code">
+          Connectors added in the claude.ai browser app sign in a different way, with no
+          place to enter a token — so use Claude Code for now. Browser support is coming.
         </Notice>
       </Card>
 
