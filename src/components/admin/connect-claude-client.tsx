@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Globe, Plus, Terminal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Card, EmptyState, Notice, PageHeader, Pill } from "@/components/ui/primitives";
@@ -9,11 +9,16 @@ import { Card, EmptyState, Notice, PageHeader, Pill } from "@/components/ui/prim
 /**
  * The guide, inside the tool.
  *
- * A separate setup document goes stale the week after it is written, and
- * whoever needs it is not the person who knows where it lives. So the
- * instructions sit next to the button that issues the token, and the URL is
- * read from the browser rather than typed into a doc that will one day be
- * wrong.
+ * Rebuilt around the one decision a person actually makes — browser or
+ * terminal — after it had grown into four numbered steps where the first
+ * ("create a token") applied to only one of the two routes, and a
+ * troubleshooting table sat between setting it up and using it. Numbered
+ * steps are the wrong shape for a fork in the road: half of them are noise
+ * whichever way you go.
+ *
+ * So: pick a route, see only that route's instructions, and the things you
+ * need when something is wrong are at the bottom where you will look for
+ * them rather than in the middle where they interrupt.
  */
 
 type Token = {
@@ -25,11 +30,16 @@ type Token = {
   revokedAt: string | null;
 };
 
-function CopyBox({ value, label }: { value: string; label?: string }) {
+function CopyBox({ value, label, big }: { value: string; label?: string; big?: boolean }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-stretch gap-2">
-      <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-lg border border-border bg-muted/50 px-3 py-2 text-[12px] leading-relaxed">
+      <code
+        className={cn(
+          "min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-lg border border-border bg-background px-3 py-2 leading-relaxed",
+          big ? "text-sm font-medium" : "text-[12px]",
+        )}
+      >
         {value}
       </code>
       <button
@@ -51,6 +61,20 @@ function CopyBox({ value, label }: { value: string; label?: string }) {
   );
 }
 
+function Step({ n, title, children }: { n: number; title: string; children?: React.ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-foreground text-[11px] font-semibold text-background">
+        {n}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium leading-snug">{title}</p>
+        {children ? <div className="mt-2">{children}</div> : null}
+      </div>
+    </li>
+  );
+}
+
 export function ConnectClaudeClient({
   email,
   baseUrl,
@@ -66,9 +90,8 @@ export function ConnectClaudeClient({
   /** MCP_WRITE_ENABLED. Off by default — writes are a deliberate decision. */
   writeEnabled: boolean;
 }) {
-  // Seeded from the server, so the page renders complete rather than empty
-  // and then filled. Refetched only after a change, never on mount.
   const [tokens, setTokens] = useState<Token[]>(initialTokens);
+  const [route, setRoute] = useState<"browser" | "terminal">("browser");
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [fresh, setFresh] = useState<string | null>(null);
@@ -126,127 +149,98 @@ export function ConnectClaudeClient({
           <div className="mt-2">
             <CopyBox value={fresh} label="token" />
           </div>
-          <p className="mt-2">
-            Mercato stores only a hash of it. If you lose it, revoke it and make another.
-          </p>
           {/*
-            Said here, next to the token, rather than in a policy page nobody
-            opens. The mistake this prevents is a specific and easy one: the
-            setup command below CONTAINS the token, so pasting "the command"
-            into a chat, a ticket or an email to ask why it is not working
-            hands over the credential with it.
+            Said next to the token rather than in a policy page nobody opens.
+            The mistake is specific and easy: the setup command CONTAINS the
+            token, so pasting "the command" into a chat to ask why it is not
+            working hands over the credential with it.
           */}
           <p className="mt-2">
-            <strong className="text-foreground">Treat it like a password.</strong> The command in
-            step 2 contains it, so pasting that command into a chat, a ticket or an email shares
-            your access along with it. Type it into your own terminal only. If it does get out,
-            revoke it below and create another — revoking takes effect immediately.
+            <strong className="text-foreground">Treat it like a password.</strong> The command
+            below contains it — type it into your own terminal only, never into a chat or a
+            ticket. If it does get out, revoke it here and make another.
           </p>
         </Notice>
       )}
 
-      {/* ── 1. token ───────────────────────────────────────────────── */}
-      <Card className="mb-4">
-        <h2 className="text-base font-semibold">1. Create a token</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Only for the terminal — skip this if you&apos;re connecting in the browser. One per
-          device, so you can revoke a laptop without disturbing anything else.
-        </p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void create(); }}
-            placeholder="My laptop"
-            maxLength={60}
-            className="min-w-48 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
-          />
+      {/* ── pick a route ───────────────────────────────────────────── */}
+      <div className="mb-4 flex w-fit gap-1 rounded-lg bg-muted p-1">
+        {([
+          ["browser", "In the browser", Globe],
+          ["terminal", "In a terminal", Terminal],
+        ] as const).map(([k, label, Icon]) => (
           <button
-            onClick={() => void create()}
-            disabled={!name.trim() || creating}
-            className="inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-40"
+            key={k}
+            onClick={() => setRoute(k)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition",
+              route === k ? "bg-background shadow" : "text-muted-foreground hover:text-foreground",
+            )}
           >
-            <Plus className="h-4 w-4" />
-            {creating ? "Creating…" : "Create token"}
+            <Icon className="h-3.5 w-3.5" />
+            {label}
           </button>
-        </div>
-      </Card>
+        ))}
+      </div>
 
-      {/* ── 2. connect ─────────────────────────────────────────────── */}
-      <Card className="mb-4">
-        <h2 className="text-base font-semibold">2. Add Mercato to Claude</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Two ways in. The browser needs no token at all — step 1 is only for the terminal.
-        </p>
+      {route === "browser" ? (
+        <Card className="mb-6">
+          <ol className="space-y-5">
+            <Step n={1} title="In Claude, open Settings → Connectors → Add custom connector" />
+            <Step n={2} title="Name it “Mercato”, and paste this as the MCP server URL">
+              <CopyBox value={url} label="server URL" big />
+              <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+                That is the whole field. There is no token to enter here.
+              </p>
+            </Step>
+            <Step n={3} title="Press Continue, then Allow on the Mercato page it opens">
+              <p className="text-[13px] leading-relaxed text-muted-foreground">
+                Claude sends you here to sign in and approve. You can withdraw it later from this
+                page.
+              </p>
+            </Step>
+          </ol>
+        </Card>
+      ) : (
+        <Card className="mb-6">
+          <ol className="space-y-5">
+            <Step n={1} title="Create a token for this device">
+              <div className="flex flex-wrap gap-2">
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void create(); }}
+                  placeholder="My laptop"
+                  maxLength={60}
+                  className="min-w-48 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20"
+                />
+                <button
+                  onClick={() => void create()}
+                  disabled={!name.trim() || creating}
+                  className="inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-40"
+                >
+                  <Plus className="h-4 w-4" />
+                  {creating ? "Creating…" : "Create token"}
+                </button>
+              </div>
+              <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+                One per device, so you can revoke a laptop without disturbing anything else.
+              </p>
+            </Step>
+            <Step n={2} title="Run this, replacing YOUR_TOKEN with the one just created">
+              <CopyBox
+                label="command"
+                value={`claude mcp add --transport http mercato ${url} --header "Authorization: Bearer YOUR_TOKEN"`}
+              />
+            </Step>
+            <Step n={3} title="Restart Claude, then run /mcp — it should list mercato" />
+          </ol>
+        </Card>
+      )}
 
-        {/*
-          The browser goes first now that Mercato is its own OAuth provider.
-          It is the better route for most people: nothing to copy, nothing to
-          paste into the wrong window, and the grant can be revoked centrally
-          rather than only by whoever holds the token.
-        */}
-        <div className="mt-4 rounded-xl border border-border bg-muted/30 p-4">
-          <p className="text-sm font-medium">In the browser, on claude.ai</p>
-          <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
-            Settings → Connectors → <strong>Add custom connector</strong>. Give it a name and
-            paste this as the MCP server URL:
-          </p>
-          <div className="mt-3">
-            <CopyBox value={url} label="server URL" />
-          </div>
-          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
-            Claude sends you to Mercato to sign in and approve. There is no token to copy, and
-            you can withdraw it later from here.
-          </p>
-        </div>
-
-        <div className="mt-3 rounded-xl border border-border bg-muted/30 p-4">
-          <p className="text-sm font-medium">In a terminal, with Claude Code</p>
-          <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
-            Replace <code className="text-xs">YOUR_TOKEN</code> with the one from step 1.
-          </p>
-          <div className="mt-3">
-            <CopyBox
-              label="command"
-              value={`claude mcp add --transport http mercato ${url} --header "Authorization: Bearer YOUR_TOKEN"`}
-            />
-          </div>
-          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
-            Run it in your own terminal — don&apos;t paste it anywhere else, it carries your token.
-          </p>
-        </div>
-      </Card>
-
-      {/* ── 3. check ───────────────────────────────────────────────── */}
-      <Card className="mb-4">
-        <h2 className="text-base font-semibold">3. Check it worked</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Restart Claude, then run <code className="text-xs">/mcp</code>. It should list{" "}
-          <strong>mercato</strong>. If it doesn&apos;t, the message tells you which step to redo:
-        </p>
-        {/*
-          Every row is a failure somebody can actually hit, paired with the ONE
-          thing that fixes it. A troubleshooting list that says "check your
-          configuration" sends people back to the start of the page.
-        */}
-        <dl className="mt-4 space-y-3 text-sm">
-          {[
-            ["mercato isn't listed at all", <>The command didn&apos;t run, or Claude wasn&apos;t restarted afterwards. Run step 2 again and restart.</>],
-            ["401 Unauthorized", <>The token is wrong or has been revoked. Check the header reads <code className="text-xs">Bearer </code> followed by the token, then create a fresh one above.</>],
-            ["404 Not Found", <>Either the URL is missing <code className="text-xs">/api/mcp</code>, or MCP is switched off on this deployment — your tokens are untouched and start working again when it&apos;s switched back on.</>],
-            ["It connects but sees nothing", <>Expected if the account holds no projects. Claude sees exactly what you see when you sign in — no more, and no less.</>],
-          ].map(([symptom, fix]) => (
-            <div key={String(symptom)} className="rounded-lg border border-border bg-muted/30 px-3 py-2">
-              <dt className="font-medium">{symptom}</dt>
-              <dd className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{fix}</dd>
-            </div>
-          ))}
-        </dl>
-      </Card>
-
-      {/* ── 4. what to ask ─────────────────────────────────────────── */}
+      {/* ── what to ask ────────────────────────────────────────────── */}
       <Card className="mb-6">
-        <h2 className="text-base font-semibold">4. Ask it something</h2>
+        <h2 className="text-base font-semibold">Then ask it something</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Plain English. Claude picks the right tool itself.
         </p>
@@ -255,9 +249,7 @@ export function ConnectClaudeClient({
             "Which of my projects still have uncategorised products?",
             "For the Vickerman project, which required columns would ship empty and why?",
             "Find every product with no barcode in MS-WM 2.",
-            "How far through is the Mathis export, and what is left?",
             "What has Kimi cost over the last 14 days, by feature?",
-            "Which templates do I have for Best Buy?",
           ].map((q) => (
             <li key={q} className="rounded-lg border border-border bg-muted/30 px-3 py-2">
               &ldquo;{q}&rdquo;
@@ -266,59 +258,75 @@ export function ConnectClaudeClient({
         </ul>
         {writeEnabled ? (
           <Notice tone="warning" className="mt-4" title="Write tools are on">
-            Claude can also change things — set a category, clear a wrong value, set an export
-            default. Bulk changes show you what they would touch and write nothing until you
-            confirm, and nothing can be done that you could not do in the browser. Switch them off
-            with <code className="text-xs">MCP_WRITE_ENABLED=false</code>.
+            Claude can also change things. Bulk changes show you what they would touch and write
+            nothing until you confirm, and nothing can be done that you could not do yourself.
           </Notice>
         ) : (
           <Notice tone="info" className="mt-4" title="Read-only">
-            Claude can look at anything you can look at, and change nothing. Write tools exist but
-            are switched off. <code className="text-xs">MCP_WRITE_ENABLED=true</code> turns on all
-            of them; naming them instead — e.g.{" "}
-            <code className="text-xs">MCP_WRITE_ENABLED=submit_categorization</code> — turns on one
-            at a time, which is the safer way in.
+            Claude can look at anything you can look at, and change nothing.
           </Notice>
         )}
       </Card>
 
       {/* ── tokens ─────────────────────────────────────────────────── */}
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-        Your tokens
-      </h2>
-      {active.length === 0 ? (
-        <EmptyState title="No tokens yet">
-          Create one above to connect Claude to Mercato.
-        </EmptyState>
-      ) : (
-        <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
-          {active.map((t) => (
-            <div key={t.id} className="flex items-center gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{t.name}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  <code>{t.prefix}…</code> · created {new Date(t.createdAt).toLocaleDateString()}
-                </p>
-              </div>
-              {t.lastUsedAt ? (
-                <Pill tone="good">used {new Date(t.lastUsedAt).toLocaleDateString()}</Pill>
-              ) : (
-                <Pill tone="neutral">never used</Pill>
-              )}
-              <button
-                onClick={() => void revoke(t.id, t.name)}
-                aria-label={`Revoke ${t.name}`}
-                className={cn(
-                  "shrink-0 rounded-lg border border-border p-2 text-muted-foreground",
-                  "hover:border-red-300 hover:text-red-600",
+      {active.length > 0 && (
+        <>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Your tokens
+          </h2>
+          <div className="mb-6 divide-y divide-border overflow-hidden rounded-xl border border-border">
+            {active.map((t) => (
+              <div key={t.id} className="flex items-center gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{t.name}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    <code>{t.prefix}…</code> · created {new Date(t.createdAt).toLocaleDateString()}
+                  </p>
+                </div>
+                {t.lastUsedAt ? (
+                  <Pill tone="good">used {new Date(t.lastUsedAt).toLocaleDateString()}</Pill>
+                ) : (
+                  <Pill tone="neutral">never used</Pill>
                 )}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+                <button
+                  onClick={() => void revoke(t.id, t.name)}
+                  aria-label={`Revoke ${t.name}`}
+                  className={cn(
+                    "shrink-0 rounded-lg border border-border p-2 text-muted-foreground",
+                    "hover:border-red-300 hover:text-red-600",
+                  )}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {active.length === 0 && route === "terminal" && (
+        <EmptyState title="No tokens yet" className="mb-6">
+          Create one above to connect Claude Code to Mercato.
+        </EmptyState>
+      )}
+
+      {/* ── troubleshooting, at the bottom where it is looked for ──── */}
+      <details className="rounded-xl border border-border px-4 py-3">
+        <summary className="cursor-pointer text-sm font-medium">If it didn&apos;t work</summary>
+        <dl className="mt-3 space-y-3 text-sm">
+          {[
+            ["Claude says it can't reach the server", <>Check the URL ends in <code className="text-xs">/api/mcp</code> with nothing after it — a trailing slash is enough to break it.</>],
+            ["mercato isn't listed after setup", <>Claude reads its configuration at startup. Restart it — in the desktop app, close the window rather than just the chat.</>],
+            ["401 Unauthorized", <>The token is wrong or revoked. Check the header reads <code className="text-xs">Bearer </code> then the token, or create a fresh one above.</>],
+            ["It connects but sees nothing", <>Expected if your account holds no projects. Claude sees exactly what you see signed in — no more, no less.</>],
+          ].map(([symptom, fix]) => (
+            <div key={String(symptom)} className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+              <dt className="font-medium">{symptom}</dt>
+              <dd className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{fix}</dd>
             </div>
           ))}
-        </div>
-      )}
+        </dl>
+      </details>
     </div>
   );
 }
