@@ -8,6 +8,7 @@ import {
   type ProposedAssignment,
 } from "@/lib/categorize/taxonomy";
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
+import { RUNS_PER_DAY, invokeAsUser, runQuotaRemaining } from "./invoke";
 import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
 
 /**
@@ -42,6 +43,136 @@ const ok = (data: unknown): ToolResult => ({
 });
 
 export const WRITE_TOOLS: McpTool[] = [
+  {
+    name: "run_categorization",
+    title: "Run Mercato's categorisation",
+    description:
+      "Start (or continue) Mercato's own categorisation on a project — the same run the Categorize button starts, " +
+      "with the same taxonomy, reuse and confidence. Long runs come back with done=false and a resumeFrom; call " +
+      "again with it until done. Only projects you own. Spends Mercato's AI balance.",
+    schema: {
+      projectId: z.string(),
+      force: z.boolean().optional().describe("Re-categorise everything, not just uncategorised rows"),
+      resumeFrom: z.number().optional().describe("Echo back from a previous partial result"),
+    },
+    async run(actor: Actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only run categorisation on projects you own." });
+      }
+
+      // Only the first call of a logical run counts against the quota —
+      // continuing one somebody already started is finishing work, not
+      // starting new spend, and refusing halfway would strand the project.
+      if (a.resumeFrom == null) {
+        const left = await runQuotaRemaining(actor.id, ["run_categorization"]);
+        if (left <= 0) {
+          return ok({
+            error: `You have started ${RUNS_PER_DAY} runs in the last 24 hours, which is the limit. ` +
+              "Run it from Mercato directly if this is deliberate.",
+          });
+        }
+      }
+
+      // Mercato's own endpoint, called the way the browser calls it — so the
+      // spend guard, the taxonomy, the reuse cache and the resume logic are
+      // the ones already in use, not a second copy.
+      const res = await invokeAsUser(actor.id, `/api/projects/${encodeURIComponent(id)}/categorize`, {
+        method: "POST",
+        body: { force: a.force === true, ...(a.resumeFrom != null ? { resumeFrom: a.resumeFrom } : {}) },
+      });
+
+      if (!res.ok) {
+        const b = res.body as { error?: string; code?: string };
+        return ok({
+          error: b?.error ?? `Mercato refused the run (HTTP ${res.status})`,
+          ...(b?.code === "AI_BUDGET_LOW" ? { hint: "Top up the Kimi balance and try again." } : {}),
+        });
+      }
+
+      const b = res.body as { partial?: boolean; resumeFrom?: number; [k: string]: unknown };
+      const remaining = await prisma.product.count({
+        where: { projectId: id, OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }] },
+      });
+      return ok({
+        ...b,
+        done: b?.partial !== true,
+        stillUncategorised: remaining,
+        note:
+          b?.partial === true
+            ? "The run hit its time budget. Call again with the resumeFrom above to continue."
+            : "Finished. Check export_readiness before exporting.",
+      });
+    },
+  },
+
+  {
+    name: "run_export",
+    title: "Run Mercato's export",
+    description:
+      "Start (or continue) Mercato's own export — the same one the Export button starts, filling your uploaded " +
+      "templates. A large catalogue comes back with done=false; call again with the jobId until done, then " +
+      "download it from Mercato. Only projects you own.",
+    schema: {
+      projectId: z.string(),
+      jobId: z.string().optional().describe("Echo back from a previous partial result to continue"),
+      autoMatch: z.boolean().optional().describe("Match each category to its closest template (default true)"),
+    },
+    async run(actor: Actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only export projects you own." });
+      }
+
+      if (!a.jobId) {
+        const left = await runQuotaRemaining(actor.id, ["run_export"]);
+        if (left <= 0) {
+          return ok({ error: `You have started ${RUNS_PER_DAY} exports in the last 24 hours, which is the limit.` });
+        }
+      }
+
+      // The export is already built one slice per request — the browser
+      // drives exactly this loop. Claude takes the same role, so the slicing,
+      // the budget and the job store are the ones already in use.
+      const qs = a.jobId ? `?jobId=${encodeURIComponent(String(a.jobId))}` : "";
+      const res = await invokeAsUser(
+        actor.id,
+        `/api/projects/${encodeURIComponent(id)}/export${qs}`,
+        { method: "POST", body: { autoMatch: a.autoMatch !== false } },
+      );
+      if (!res.ok) {
+        const b = res.body as { error?: string };
+        return ok({ error: b?.error ?? `Mercato refused the export (HTTP ${res.status})` });
+      }
+
+      const b = res.body as { jobId?: string; done?: boolean; remaining?: number; total?: number; mode?: string };
+      const done = b?.mode === "background" ? undefined : b?.done === true;
+      return ok({
+        jobId: b?.jobId,
+        mode: b?.mode,
+        ...(b?.total != null ? { filesDone: (b.total ?? 0) - (b.remaining ?? 0), filesTotal: b.total } : {}),
+        done,
+        // The finished file is a spreadsheet, and a spreadsheet does not
+        // belong in a conversation — base64 of a real catalogue is megabytes
+        // of noise. Mercato serves it; this says where.
+        note:
+          done === false
+            ? "Not finished. Call again with this jobId to build the next part."
+            : "Open the project's Export step in Mercato to download it.",
+      });
+    },
+  },
+
   {
     name: "submit_categorization",
     title: "Submit categories for a batch",
