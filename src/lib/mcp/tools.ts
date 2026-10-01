@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import {
   adminUserIds,
+  canOperateProject,
   canReadProject,
   isAnyAdmin,
   projectListScope,
@@ -9,6 +10,11 @@ import {
   templateVisibilityOr,
   type Actor,
 } from "@/lib/authz";
+import {
+  INLINE_TAXONOMY_MAX,
+  categoryIndex,
+  nextSegments,
+} from "@/lib/categorize/taxonomy";
 
 /**
  * What Claude may do in Mercato, on behalf of one person.
@@ -43,7 +49,128 @@ export type McpTool = {
   run: (actor: Actor, args: Record<string, unknown>) => Promise<ToolResult>;
 };
 
+/**
+ * How many products one categorisation batch hands over.
+ *
+ * Small enough that the whole batch plus the taxonomy is readable in one go,
+ * large enough that a 4,811-product catalogue is tens of calls rather than
+ * hundreds. The caller loops until nothing is left, exactly as the export's
+ * client does.
+ */
+const CATEGORIZE_BATCH = 40;
+const CATEGORIZE_BATCH_MAX = 100;
+
+/** A few vendor attributes, small enough not to crowd out the taxonomy. */
+function vendorHints(vendorData: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!vendorData || typeof vendorData !== "object") return out;
+  for (const [k, v] of Object.entries(vendorData as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 8) break;
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (!s || s.length > 120) continue;
+    out[k] = s;
+  }
+  return out;
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "next_categorization_batch",
+    title: "Next products to categorise",
+    description:
+      "Hand over the next batch of uncategorised products together with the marketplace's valid category list. " +
+      "Choose one EXACT path from that list per product, then call submit_categorization. Repeat until remaining is 0.",
+    schema: {
+      projectId: z.string(),
+      limit: z.number().optional().describe(`Products to return (default ${CATEGORIZE_BATCH})`),
+      categoryPrefix: z
+        .string()
+        .optional()
+        .describe("For large taxonomies only: drill into this path to see the next level"),
+      includeTaxonomy: z
+        .boolean()
+        .optional()
+        .describe("Default true. Pass false once you have the list — it does not change between batches."),
+    },
+    async run(actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      // Owner-only, like the write half. Handing someone a batch of work they
+      // would then be refused permission to submit is a dead end, not a
+      // courtesy.
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only categorise projects you own." });
+      }
+
+      const index = categoryIndex(project.marketplace);
+      if (!index) {
+        return ok({
+          error: `No category list is available for ${project.marketplace}, so nothing could be checked against one. Categorise this project in Mercato instead.`,
+        });
+      }
+
+      const uncategorised = {
+        projectId: id,
+        OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }],
+      };
+      const [total, remaining, rows] = await Promise.all([
+        prisma.product.count({ where: { projectId: id } }),
+        prisma.product.count({ where: uncategorised }),
+        prisma.product.findMany({
+          where: uncategorised,
+          select: { id: true, name: true, brand: true, vendorSku: true, description: true, vendorData: true },
+          orderBy: { id: "asc" },
+          take: Math.min(Number(a.limit ?? CATEGORIZE_BATCH), CATEGORIZE_BATCH_MAX),
+        }),
+      ]);
+
+      // Big taxonomies are drilled into a level at a time. Walmart's 5,242
+      // paths would otherwise crowd out the products they are meant to
+      // classify — and truncating the list would mean offering a choice that
+      // silently excludes the right answer.
+      // The list is identical on every call, and Best Buy's is 1,450 paths —
+      // roughly 90KB. Repeating that down a hundred batches is most of the
+      // conversation spent re-reading something that has not changed.
+      const want = a.includeTaxonomy !== false;
+      const inline = index.paths.length <= INLINE_TAXONOMY_MAX;
+      const taxonomy = !want
+        ? { mode: "omitted" as const, count: index.paths.length, note: "Asked for; use the list from an earlier call." }
+        : inline
+        ? { mode: "full" as const, count: index.paths.length, paths: index.paths }
+        : {
+            mode: "drill" as const,
+            count: index.paths.length,
+            prefix: String(a.categoryPrefix ?? "") || null,
+            options: nextSegments(index.paths, a.categoryPrefix ? String(a.categoryPrefix) : undefined),
+            note: "Too large to list. Call again with categoryPrefix set to one of these to see the next level, until you reach full paths.",
+          };
+
+      return ok({
+        project: { id: project.id, name: project.name, marketplace: project.marketplace },
+        progress: { total, categorised: total - remaining, remaining },
+        taxonomy,
+        products: rows.map((p) => ({
+          productId: p.id,
+          name: p.name,
+          brand: p.brand,
+          sku: p.vendorSku,
+          description: p.description ? p.description.slice(0, 300) : null,
+          attributes: vendorHints(p.vendorData),
+        })),
+        instructions:
+          "Pick one path per product, copied EXACTLY from the list above — anything not in it is refused, " +
+          "and a shortened path would quietly route the product into the wrong export file. " +
+          "Include a confidence 0-1; use a low one rather than guessing, and those rows stay flagged for review. " +
+          "Then call submit_categorization and request the next batch.",
+      });
+    },
+  },
+
   {
     name: "list_projects",
     title: "List projects",

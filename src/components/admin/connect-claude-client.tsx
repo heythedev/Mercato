@@ -248,8 +248,10 @@ export function ConnectClaudeClient({
         ) : (
           <Notice tone="info" className="mt-4" title="Read-only">
             Claude can look at anything you can look at, and change nothing. Write tools exist but
-            are switched off — turn them on with{" "}
-            <code className="text-xs">MCP_WRITE_ENABLED=true</code> once you have read what they do.
+            are switched off. <code className="text-xs">MCP_WRITE_ENABLED=true</code> turns on all
+            of them; naming them instead — e.g.{" "}
+            <code className="text-xs">MCP_WRITE_ENABLED=submit_categorization</code> — turns on one
+            at a time, which is the safer way in.
           </Notice>
         )}
       </Card>

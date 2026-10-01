@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { flags } from "@/lib/flags";
+import { flags, mcpWriteTools, writeToolEnabled } from "@/lib/flags";
 import { actorForToken } from "@/lib/mcp/tokens";
 import { TOOLS } from "@/lib/mcp/tools";
 import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
@@ -13,7 +13,10 @@ import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
  * see is an error it will work around.
  */
 function availableTools() {
-  return flags.mcpWrite() ? [...TOOLS, ...WRITE_TOOLS] : TOOLS;
+  // Per tool, not all-or-nothing: enabling category assignment should not also
+  // enable clearing fields or setting a default that governs every future
+  // export. MCP_WRITE_ENABLED takes a list — see mcpWriteTools().
+  return [...TOOLS, ...WRITE_TOOLS.filter((t) => writeToolEnabled(t.name))];
 }
 
 /**
@@ -171,7 +174,7 @@ export async function GET() {
     name: "mercato-mcp",
     transport: "streamable-http (POST, JSON-RPC 2.0)",
     tools: availableTools().map((t) => t.name),
-    writeToolsEnabled: flags.mcpWrite(),
+    writeToolsEnabled: mcpWriteTools(),
     auth: "Authorization: Bearer mrc_… — create one under Settings → Connect to Claude",
   });
 }

@@ -2,6 +2,11 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
+import {
+  categoryIndex,
+  resolveAssignments,
+  type ProposedAssignment,
+} from "@/lib/categorize/taxonomy";
 import type { McpTool, ToolResult } from "./tools";
 
 /**
@@ -36,6 +41,105 @@ const ok = (data: unknown): ToolResult => ({
 });
 
 export const WRITE_TOOLS: McpTool[] = [
+  {
+    name: "submit_categorization",
+    title: "Submit categories for a batch",
+    description:
+      "Write the categories chosen for a batch from next_categorization_batch. Every path is checked against the " +
+      "marketplace's category list; anything not in it is refused and that product stays uncategorised. Only projects you own.",
+    schema: {
+      projectId: z.string(),
+      assignments: z
+        .array(
+          z.object({
+            productId: z.string(),
+            category: z.string().describe("An EXACT path from the list the batch supplied"),
+            confidence: z.number().optional().describe("0-1; low values stay flagged for review"),
+          }),
+        )
+        .describe("One entry per product"),
+    },
+    async run(actor: Actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only categorise projects you own." });
+      }
+
+      const proposals = Array.isArray(a.assignments) ? (a.assignments as ProposedAssignment[]) : [];
+      if (!proposals.length) return ok({ error: "No assignments given" });
+      if (proposals.length > MAX_WRITE) {
+        return ok({ error: `${proposals.length} assignments, over the ${MAX_WRITE} limit. Send smaller batches.` });
+      }
+
+      // Without a list there is nothing to check against, and an unchecked
+      // category is the failure this tool exists to prevent.
+      const index = categoryIndex(project.marketplace);
+      if (!index) {
+        return ok({ error: `No category list for ${project.marketplace} — refusing to write unchecked categories.` });
+      }
+
+      const { accepted, rejected } = resolveAssignments(index, proposals);
+
+      // Every id must belong to THIS project. Without it a product id from a
+      // project the caller cannot even see could be written through a project
+      // they own — the filter, not the id, is what authorisation rests on.
+      const mine = accepted.length
+        ? await prisma.product.findMany({
+            where: { projectId: id, id: { in: accepted.map((x) => x.productId) } },
+            select: { id: true },
+          })
+        : [];
+      const mineIds = new Set(mine.map((p) => p.id));
+      const writable = accepted.filter((x) => mineIds.has(x.productId));
+      for (const x of accepted) {
+        if (!mineIds.has(x.productId)) {
+          rejected.push({ productId: x.productId, category: x.category, reason: "Not a product of this project" });
+        }
+      }
+
+      const now = new Date();
+      let written = 0;
+      for (const x of writable) {
+        await prisma.product.update({
+          where: { id: x.productId },
+          // Both columns, as the batch categoriser writes them: the export
+          // groups on marketplaceCategory and the UI reads categoryPath.
+          data: {
+            marketplaceCategory: x.category,
+            categoryPath: x.category,
+            categoryConfidence: x.confidence,
+            categorizedAt: now,
+          },
+        });
+        written++;
+      }
+
+      const remaining = await prisma.product.count({
+        where: { projectId: id, OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }] },
+      });
+      // Mirrors what a finished batch run leaves behind, so a project
+      // categorised this way looks the same to every other screen.
+      if (remaining === 0 && written > 0) {
+        await prisma.project.update({ where: { id }, data: { status: "categorized" } }).catch(() => {});
+      }
+
+      return ok({
+        written,
+        rejected,
+        remaining,
+        note:
+          remaining > 0
+            ? "Call next_categorization_batch again for the rest. Rejected products are still uncategorised and will come back."
+            : "Every product in this project now has a category.",
+      });
+    },
+  },
+
   {
     name: "set_product_category",
     title: "Set a category",
