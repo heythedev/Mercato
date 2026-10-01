@@ -149,7 +149,8 @@ export function ConnectClaudeClient({
       <Card className="mb-4">
         <h2 className="text-base font-semibold">1. Create a token</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          One per device, so you can revoke a laptop without disturbing anything else.
+          Only for the terminal — skip this if you&apos;re connecting in the browser. One per
+          device, so you can revoke a laptop without disturbing anything else.
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <input
@@ -175,30 +176,45 @@ export function ConnectClaudeClient({
       <Card className="mb-4">
         <h2 className="text-base font-semibold">2. Add Mercato to Claude</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          In a terminal, from anywhere. Replace <code className="text-xs">YOUR_TOKEN</code> with the
-          one above.
+          Two ways in. The browser needs no token at all — step 1 is only for the terminal.
         </p>
-        <div className="mt-4">
-          <CopyBox
-            label="command"
-            value={`claude mcp add --transport http mercato ${url} --header "Authorization: Bearer YOUR_TOKEN"`}
-          />
-        </div>
-        <p className="mt-3 text-sm text-muted-foreground">
-          Run it in your own terminal — don&apos;t paste it anywhere else, it carries your token.
-        </p>
+
         {/*
-          This used to say "on claude.ai, add it under Connectors with the same
-          header", which was a guess. claude.ai's connectors authenticate with
-          OAuth, and Mercato is not an OAuth provider yet — so that instruction
-          sent people who do not use a terminal off to fail at something that
-          was never going to work. Saying what IS supported, and what is not
-          yet, is more use than an optimistic pointer.
+          The browser goes first now that Mercato is its own OAuth provider.
+          It is the better route for most people: nothing to copy, nothing to
+          paste into the wrong window, and the grant can be revoked centrally
+          rather than only by whoever holds the token.
         */}
-        <Notice tone="info" className="mt-4" title="Works with Claude Code">
-          Connectors added in the claude.ai browser app sign in a different way, with no
-          place to enter a token — so use Claude Code for now. Browser support is coming.
-        </Notice>
+        <div className="mt-4 rounded-xl border border-border bg-muted/30 p-4">
+          <p className="text-sm font-medium">In the browser, on claude.ai</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+            Settings → Connectors → <strong>Add custom connector</strong>. Give it a name and
+            paste this as the MCP server URL:
+          </p>
+          <div className="mt-3">
+            <CopyBox value={url} label="server URL" />
+          </div>
+          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+            Claude sends you to Mercato to sign in and approve. There is no token to copy, and
+            you can withdraw it later from here.
+          </p>
+        </div>
+
+        <div className="mt-3 rounded-xl border border-border bg-muted/30 p-4">
+          <p className="text-sm font-medium">In a terminal, with Claude Code</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+            Replace <code className="text-xs">YOUR_TOKEN</code> with the one from step 1.
+          </p>
+          <div className="mt-3">
+            <CopyBox
+              label="command"
+              value={`claude mcp add --transport http mercato ${url} --header "Authorization: Bearer YOUR_TOKEN"`}
+            />
+          </div>
+          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+            Run it in your own terminal — don&apos;t paste it anywhere else, it carries your token.
+          </p>
+        </div>
       </Card>
 
       {/* ── 3. check ───────────────────────────────────────────────── */}
