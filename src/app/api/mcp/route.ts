@@ -45,13 +45,41 @@ export const maxDuration = 60;
 
 const PROTOCOL_VERSION = "2025-06-18";
 
+/**
+ * CORS, because a connector added in the browser is a browser making the
+ * request — and without these it never arrives at all. The symptom is
+ * "Couldn't reach mercato", which reads like the server being down rather
+ * than the response being discarded by the browser after a successful round
+ * trip.
+ *
+ * `*` is safe here precisely because this endpoint authenticates with a
+ * bearer header and never a cookie: there is no ambient credential for
+ * another origin to ride on.
+ *
+ * Expose-Headers is the one that is easy to miss. WWW-Authenticate carries
+ * the pointer to the OAuth metadata, and a header a browser cannot READ is a
+ * header that may as well be absent — the client would see a bare 401 with
+ * no way to discover there is an authorization server at all.
+ */
+const CORS: Record<string, string> = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type, authorization, mcp-protocol-version, mcp-session-id, last-event-id",
+  "access-control-expose-headers": "WWW-Authenticate, Mcp-Session-Id",
+  "access-control-max-age": "86400",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS });
+}
+
 type RpcRequest = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown> };
 
 const result = (id: RpcRequest["id"], value: unknown) =>
-  NextResponse.json({ jsonrpc: "2.0", id: id ?? null, result: value });
+  NextResponse.json({ jsonrpc: "2.0", id: id ?? null, result: value }, { headers: CORS });
 
 const failure = (id: RpcRequest["id"], code: number, message: string, status = 200) =>
-  NextResponse.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }, { status });
+  NextResponse.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }, { status, headers: CORS });
 
 /** Zod shapes are convenient to declare and useless to a client; JSON Schema
  *  is what the protocol asks for. Only the shapes these tools actually use. */
@@ -134,7 +162,10 @@ export async function POST(req: NextRequest) {
       },
       {
         status: 401,
-        headers: { "WWW-Authenticate": `Bearer realm="mercato", resource_metadata="${metadata}"` },
+        headers: {
+          ...CORS,
+          "WWW-Authenticate": `Bearer realm="mercato", resource_metadata="${metadata}"`,
+        },
       },
     );
   }
@@ -199,15 +230,32 @@ export async function POST(req: NextRequest) {
 
 /** A plain GET is someone pasting the URL into a browser. Tell them what it
  *  is rather than returning a bare 405 they have to decode. */
-export async function GET() {
+export async function GET(req: NextRequest) {
   if (!flags.mcp()) {
     return NextResponse.json({ error: "MCP is disabled on this deployment" }, { status: 404 });
   }
-  return NextResponse.json({
-    name: "mercato-mcp",
-    transport: "streamable-http (POST, JSON-RPC 2.0)",
-    tools: availableTools().map((t) => t.name),
-    writeToolsEnabled: mcpWriteTools(),
-    auth: "Authorization: Bearer mrc_… — create one under Settings → Connect to Claude",
-  });
+
+  // A client opening the Streamable HTTP server→client channel asks for
+  // text/event-stream. This server has no SSE stream to give — every reply is
+  // the response to a POST — and the spec is explicit that a server which
+  // does not offer one MUST answer 405 here. Returning a friendly JSON blob
+  // instead leaves a strict client holding a document where it expected a
+  // stream, and what it reports is "couldn't reach the server".
+  const accept = req.headers.get("accept") ?? "";
+  if (accept.includes("text/event-stream")) {
+    return new NextResponse(null, { status: 405, headers: { ...CORS, allow: "POST, OPTIONS" } });
+  }
+
+  // Anything else is a person pasting the URL into a browser. Tell them what
+  // this is rather than returning a bare 405 they have to decode.
+  return NextResponse.json(
+    {
+      name: "mercato-mcp",
+      transport: "streamable-http (POST, JSON-RPC 2.0)",
+      tools: availableTools().map((t) => t.name),
+      writeToolsEnabled: mcpWriteTools(),
+      auth: "Authorization: Bearer mrc_… — or add this URL as a connector and sign in",
+    },
+    { headers: CORS },
+  );
 }
