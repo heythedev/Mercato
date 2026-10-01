@@ -186,9 +186,21 @@ export function ConnectClaudeClient({
         </div>
         <p className="mt-3 text-sm text-muted-foreground">
           Run it in your own terminal — don&apos;t paste it anywhere else, it carries your token.
-          On claude.ai instead of the CLI, add it under Settings → Connectors using the same URL
-          and the same <code className="text-xs">Authorization</code> header.
         </p>
+        {/*
+          This used to say "on claude.ai, add it under Connectors with the same
+          header", which was a guess. claude.ai's connectors authenticate with
+          OAuth, and Mercato is not an OAuth provider yet — so that instruction
+          sent people who do not use a terminal off to fail at something that
+          was never going to work. Saying what IS supported, and what is not
+          yet, is more use than an optimistic pointer.
+        */}
+        <Notice tone="info" className="mt-4" title="Claude Code only, for now">
+          This connects Claude Code — the terminal app. Adding Mercato as a connector on
+          claude.ai in the browser needs OAuth, which Mercato does not offer yet, so a
+          hand-entered token will not work there. If you don&apos;t use a terminal, wait for
+          that rather than fighting this.
+        </Notice>
       </Card>
 
       {/* ── 3. check ───────────────────────────────────────────────── */}
