@@ -7,7 +7,8 @@ import {
   resolveAssignments,
   type ProposedAssignment,
 } from "@/lib/categorize/taxonomy";
-import type { McpTool, ToolResult } from "./tools";
+import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
+import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
 
 /**
  * Tools that change things, behind MCP_WRITE_ENABLED and off by default.
@@ -91,15 +92,41 @@ export const WRITE_TOOLS: McpTool[] = [
       const mine = accepted.length
         ? await prisma.product.findMany({
             where: { projectId: id, id: { in: accepted.map((x) => x.productId) } },
-            select: { id: true },
+            select: { id: true, name: true, vendorSku: true, description: true, vendorData: true },
           })
         : [];
-      const mineIds = new Set(mine.map((p) => p.id));
-      const writable = accepted.filter((x) => mineIds.has(x.productId));
+      const byId = new Map(mine.map((p) => [p.id, p]));
+
+      // The same gate the batch applies, repeated here on purpose. The
+      // categorise route does exactly this — skip before spending, refuse
+      // again before trusting — because a caller that was told a row is
+      // hopeless can still send a category for it, and a confident guess at
+      // "VIDA-110112" passes every other check in this function.
+      const writable: typeof accepted = [];
       for (const x of accepted) {
-        if (!mineIds.has(x.productId)) {
+        const p = byId.get(x.productId);
+        if (!p) {
           rejected.push({ productId: x.productId, category: x.category, reason: "Not a product of this project" });
+          continue;
         }
+        if (
+          isUnresolvedSkuOnly({
+            name: p.name,
+            sku: p.vendorSku,
+            description: p.description,
+            vendorCategory: vendorCategoryOf(p.vendorData),
+          })
+        ) {
+          rejected.push({
+            productId: x.productId,
+            category: x.category,
+            reason:
+              "Bare vendor code with no title, description or vendor category — nothing to classify from, " +
+              "so this would be a guess. Run Categorize in Mercato to resolve it to a real title first.",
+          });
+          continue;
+        }
+        writable.push(x);
       }
 
       const now = new Date();

@@ -1,4 +1,4 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 import { prisma } from "@/lib/db";
 import {
   adminUserIds,
@@ -15,18 +15,19 @@ import {
   categoryIndex,
   nextSegments,
 } from "@/lib/categorize/taxonomy";
+import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
 
 /**
  * What Claude may do in Mercato, on behalf of one person.
  *
  * Every tool takes an `actor` and routes through the same helpers the web app
- * uses — projectListScope, canReadProject, templateVisibilityOr. Not similar
+ * uses â€” projectListScope, canReadProject, templateVisibilityOr. Not similar
  * rules: the same functions. If a member cannot see a colleague's template in
  * the browser, the tool cannot fetch it either, and neither can drift from
  * the other, because there is only one implementation to drift from.
  *
- * Read-only, deliberately. Write tools are worth having — setting a category
- * across a filtered set, entering the three compliance declarations — but
+ * Read-only, deliberately. Write tools are worth having â€” setting a category
+ * across a filtered set, entering the three compliance declarations â€” but
  * they should be shaped by what people actually reach for, and nobody has
  * reached for anything yet. Adding them later is easy; withdrawing one that
  * turned out to be dangerous is not.
@@ -60,6 +61,22 @@ export type McpTool = {
 const CATEGORIZE_BATCH = 40;
 const CATEGORIZE_BATCH_MAX = 100;
 
+/**
+ * A vendor-supplied category, if the upload carried one.
+ *
+ * Part of what makes a bare SKU classifiable: "VIDA-110112" alone is not,
+ * but the same row with a vendor category of "Outdoor Furniture" is.
+ */
+export function vendorCategoryOf(vendorData: unknown): string | null {
+  if (!vendorData || typeof vendorData !== "object") return null;
+  for (const [k, v] of Object.entries(vendorData as Record<string, unknown>)) {
+    if (!/categor/i.test(k)) continue;
+    const s = v == null ? "" : String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
 /** A few vendor attributes, small enough not to crowd out the taxonomy. */
 function vendorHints(vendorData: unknown): Record<string, string> {
   const out: Record<string, string> = {};
@@ -91,7 +108,7 @@ export const TOOLS: McpTool[] = [
       includeTaxonomy: z
         .boolean()
         .optional()
-        .describe("Default true. Pass false once you have the list — it does not change between batches."),
+        .describe("Default true. Pass false once you have the list â€” it does not change between batches."),
     },
     async run(actor, a) {
       const id = String(a.projectId);
@@ -118,22 +135,51 @@ export const TOOLS: McpTool[] = [
         projectId: id,
         OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }],
       };
-      const [total, remaining, rows] = await Promise.all([
+      const batchSize = Math.min(Number(a.limit ?? CATEGORIZE_BATCH), CATEGORIZE_BATCH_MAX);
+      const [total, remaining, candidates] = await Promise.all([
         prisma.product.count({ where: { projectId: id } }),
         prisma.product.count({ where: uncategorised }),
+        // Over-fetch, because rows with nothing to classify are dropped below
+        // and a batch of 40 should still come back with 40 usable products.
         prisma.product.findMany({
           where: uncategorised,
           select: { id: true, name: true, brand: true, vendorSku: true, description: true, vendorData: true },
           orderBy: { id: "asc" },
-          take: Math.min(Number(a.limit ?? CATEGORIZE_BATCH), CATEGORIZE_BATCH_MAX),
+          take: batchSize * 5,
         }),
       ]);
 
+      // Rows whose name is still a raw vendor code, with no description and no
+      // vendor category, carry nothing to classify FROM. The categorise route
+      // already skips them twice over â€” before spending an AI call and again
+      // before trusting an answer that slipped through â€” and its comment says
+      // every caller must agree on which rows are hopeless. This is the third
+      // caller, so it uses the same function rather than its own judgement.
+      //
+      // Handing "VIDA-110112" to a model and asking for a category does not
+      // get an honest refusal; it gets a confident guess that passes taxonomy
+      // validation because the path it invents is real. That is the one
+      // failure this whole tool was built to prevent, arriving by a different
+      // door.
+      const usable = [];
+      let unclassifiable = 0;
+      for (const p of candidates) {
+        const bare = isUnresolvedSkuOnly({
+          name: p.name,
+          sku: p.vendorSku,
+          description: p.description,
+          vendorCategory: vendorCategoryOf(p.vendorData),
+        });
+        if (bare) { unclassifiable++; continue; }
+        if (usable.length < batchSize) usable.push(p);
+      }
+      const rows = usable;
+
       // Big taxonomies are drilled into a level at a time. Walmart's 5,242
       // paths would otherwise crowd out the products they are meant to
-      // classify — and truncating the list would mean offering a choice that
+      // classify â€” and truncating the list would mean offering a choice that
       // silently excludes the right answer.
-      // The list is identical on every call, and Best Buy's is 1,450 paths —
+      // The list is identical on every call, and Best Buy's is 1,450 paths â€”
       // roughly 90KB. Repeating that down a hundred batches is most of the
       // conversation spent re-reading something that has not changed.
       const want = a.includeTaxonomy !== false;
@@ -150,9 +196,36 @@ export const TOOLS: McpTool[] = [
             note: "Too large to list. Call again with categoryPrefix set to one of these to see the next level, until you reach full paths.",
           };
 
+      // Nothing usable in the whole window: say what to do instead of
+      // returning an empty list that reads like "finished".
+      if (rows.length === 0 && remaining > 0) {
+        return ok({
+          project: { id: project.id, name: project.name, marketplace: project.marketplace },
+          progress: { total, categorised: total - remaining, remaining },
+          products: [],
+          needsEnrichmentFirst: unclassifiable,
+          error:
+            `Every one of the next ${unclassifiable} products is a bare vendor code with no title, ` +
+            "description or vendor category â€” there is nothing to classify from, and any category " +
+            "chosen would be invented. Run Categorize in Mercato first: it resolves these codes to " +
+            "real titles from the vendor catalogue and from other projects carrying the same SKUs. " +
+            "Then come back.",
+        });
+      }
+
       return ok({
         project: { id: project.id, name: project.name, marketplace: project.marketplace },
         progress: { total, categorised: total - remaining, remaining },
+        ...(unclassifiable
+          ? {
+              skipped: {
+                count: unclassifiable,
+                reason:
+                  "Bare vendor codes with nothing to classify from. Not included, and they will be " +
+                  "refused if submitted. Run Categorize in Mercato to resolve them to real titles first.",
+              },
+            }
+          : {}),
         taxonomy,
         products: rows.map((p) => ({
           productId: p.id,
@@ -163,7 +236,7 @@ export const TOOLS: McpTool[] = [
           attributes: vendorHints(p.vendorData),
         })),
         instructions:
-          "Pick one path per product, copied EXACTLY from the list above — anything not in it is refused, " +
+          "Pick one path per product, copied EXACTLY from the list above â€” anything not in it is refused, " +
           "and a shortened path would quietly route the product into the wrong export file. " +
           "Include a confidence 0-1; use a low one rather than guessing, and those rows stay flagged for review. " +
           "Then call submit_categorization and request the next batch.",
@@ -282,7 +355,7 @@ export const TOOLS: McpTool[] = [
       missingField: z
         .enum(["upc", "brand", "category", "image", "price"])
         .optional()
-        .describe("Only products where this is empty — for chasing export gaps"),
+        .describe("Only products where this is empty â€” for chasing export gaps"),
       limit: z.number().int().min(1).max(MAX_ROWS).optional(),
     },
     async run(actor, a) {
@@ -352,7 +425,7 @@ export const TOOLS: McpTool[] = [
         { field: "brand", where: { OR: [{ brand: null }, { brand: "" }] },
           why: "From the vendor sheet or the catalogue lookup." },
         { field: "category", where: { OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }] },
-          why: "Not matched to a marketplace category — excluded from every template file." },
+          why: "Not matched to a marketplace category â€” excluded from every template file." },
         { field: "image", where: { OR: [{ imageUrl: null }, { imageUrl: "" }] },
           why: "A catalogue photograph or none. Never generated." },
       ];
@@ -375,7 +448,7 @@ export const TOOLS: McpTool[] = [
           "Contains embedded battery",
         ],
         alwaysManualNote:
-          "Seller declarations. No catalogue carries them and the model is barred from guessing — they need a stated value.",
+          "Seller declarations. No catalogue carries them and the model is barred from guessing â€” they need a stated value.",
       });
     },
   },
@@ -415,7 +488,7 @@ export const TOOLS: McpTool[] = [
     name: "usage_summary",
     title: "AI and API spend",
     description:
-      "What the paid services cost over a window, by service and feature. Admins only — it covers the whole account.",
+      "What the paid services cost over a window, by service and feature. Admins only â€” it covers the whole account.",
     schema: { days: z.number().int().min(1).max(90).optional().describe("Default 30") },
     async run(actor, a) {
       // Spend is an account-wide figure and cannot be meaningfully scoped to
@@ -468,7 +541,7 @@ export const TOOLS: McpTool[] = [
         teamId: actor.teamId,
         visibleProjects: projects,
         isSuperAdmin: admins.includes(actor.id),
-        note: "Every tool is scoped to this account — the same as what you see signed in.",
+        note: "Every tool is scoped to this account â€” the same as what you see signed in.",
       });
     },
   },
