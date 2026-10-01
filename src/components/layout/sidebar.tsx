@@ -10,6 +10,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Plug,
+  Sparkles,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,10 @@ const adminNav = [
   { href: "/admin/users", label: "Users", icon: Users },
   { href: "/admin/templates", label: "Templates", icon: FileText },
   { href: "/admin/usage", label: "Usage & credits", icon: Activity },
+  // Separate from "Usage & credits" on purpose: that page is about money
+  // spent with Kimi, Keepa and Synccentric. This one is about people — who
+  // connected Claude, what they did with it, and what it changed.
+  { href: "/admin/mcp-usage", label: "Claude usage", icon: Sparkles },
   connectNav,
 ];
 

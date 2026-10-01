@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { projectIdFromArgs, recordCall, rowsFromResult } from "@/lib/mcp/usage";
 import { flags, mcpWriteTools, writeToolEnabled } from "@/lib/flags";
 import { actorForToken } from "@/lib/mcp/tokens";
 import { TOOLS } from "@/lib/mcp/tools";
@@ -146,14 +147,37 @@ export async function POST(req: NextRequest) {
     const tool = availableTools().find((t) => t.name === name);
     if (!tool) return failure(id, -32602, `No such tool: ${name}`);
 
+    // Recorded for every call, success or failure, and written AFTER the
+    // response so the audit trail never costs the caller a millisecond.
+    // after() rather than a bare promise: on a serverless instance a
+    // fire-and-forget write is frozen with the response and simply lost.
+    const startedAt = Date.now();
+    const session = req.headers.get("mcp-session-id");
+    const log = (ok: boolean, rows: number | null, error?: string) =>
+      after(() =>
+        recordCall({
+          userId: auth.actor.id,
+          tokenId: auth.tokenId,
+          sessionId: session,
+          tool: name,
+          projectId: projectIdFromArgs(args),
+          ok,
+          error,
+          durationMs: Date.now() - startedAt,
+          rows,
+        }),
+      );
+
     try {
       const out = await tool.run(auth.actor, args);
+      log(true, rowsFromResult(out.content?.[0]?.text));
       return result(id, out);
     } catch (e) {
       // Reported as a tool result rather than a protocol error: the call was
       // well-formed and the model should see what went wrong and adapt, not
       // be told the transport broke.
       console.error(`[mcp] ${name} failed for ${auth.email}:`, e);
+      log(false, null, (e as Error).message);
       return result(id, {
         content: [{ type: "text", text: `Tool failed: ${(e as Error).message}` }],
         isError: true,

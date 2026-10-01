@@ -503,6 +503,42 @@ model BalanceSnapshot {
 /// Only the hash is stored. The token itself is shown once, at creation, and
 /// is unrecoverable afterwards — a database copy must not be a set of live
 /// credentials, which matters here because backups now leave the server.
+/// One tool call over MCP.
+///
+/// Two jobs. It is the audit trail — these tools can change a live catalogue
+/// and nothing else records who did what, when, through which token. And it
+/// is the usage record: who is actually using Claude against Mercato, how
+/// long their sessions run, and which projects they work on.
+///
+/// What it deliberately does NOT hold is the conversation. Mercato sees the
+/// calls Claude makes, never what anyone typed or what Claude replied — that
+/// lives in Claude, not here. The tool trail says what a session was ABOUT;
+/// it is not a transcript, and nobody should be told otherwise.
+model McpCall {
+  id      String @id @default(cuid())
+  userId  String
+  /// Which token, so one laptop's activity can be told from another's — and
+  /// so a leaked token's whole history is visible after it is revoked.
+  tokenId String
+  /// From the Mcp-Session-Id header when the client sends one. Null otherwise,
+  /// and the usage screen falls back to grouping by gaps in time.
+  sessionId String?
+  tool      String
+  /// The project the call concerned, where the tool takes one.
+  projectId String?
+  ok        Boolean @default(true)
+  error     String?
+  durationMs Int    @default(0)
+  /// Rows a write tool changed. Null for reads — which is also how the two
+  /// are told apart without trusting a name prefix.
+  rows      Int?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([tokenId])
+}
+
 model McpToken {
   id         String    @id @default(cuid())
   userId     String

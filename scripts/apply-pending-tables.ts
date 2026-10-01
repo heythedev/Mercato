@@ -21,6 +21,28 @@ import { prisma } from "../src/lib/db";
 
 const TABLES: { name: string; column?: string; statements: string[] }[] = [
   {
+    name: "McpCall",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "McpCall" (
+         "id" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "tokenId" TEXT NOT NULL,
+         "sessionId" TEXT,
+         "tool" TEXT NOT NULL,
+         "projectId" TEXT,
+         "ok" BOOLEAN NOT NULL DEFAULT true,
+         "error" TEXT,
+         "durationMs" INTEGER NOT NULL DEFAULT 0,
+         "rows" INTEGER,
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "McpCall_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "McpCall_userId_createdAt_idx" ON "McpCall"("userId", "createdAt")`,
+      `CREATE INDEX IF NOT EXISTS "McpCall_createdAt_idx" ON "McpCall"("createdAt")`,
+      `CREATE INDEX IF NOT EXISTS "McpCall_tokenId_idx" ON "McpCall"("tokenId")`,
+    ],
+  },
+  {
     name: "ServiceUsage",
     statements: [
       `CREATE TABLE IF NOT EXISTS "ServiceUsage" (
