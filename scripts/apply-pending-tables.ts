@@ -21,6 +21,88 @@ import { prisma } from "../src/lib/db";
 
 const TABLES: { name: string; column?: string; statements: string[] }[] = [
   {
+    name: "OAuthClient",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "OAuthClient" (
+         "id" TEXT NOT NULL,
+         "name" TEXT NOT NULL,
+         "redirectUris" TEXT[],
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         "disabledAt" TIMESTAMP(3),
+         CONSTRAINT "OAuthClient_pkey" PRIMARY KEY ("id")
+       )`,
+    ],
+  },
+  {
+    name: "OAuthCode",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "OAuthCode" (
+         "codeHash" TEXT NOT NULL,
+         "clientId" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "redirectUri" TEXT NOT NULL,
+         "scope" TEXT NOT NULL,
+         "codeChallenge" TEXT NOT NULL,
+         "resource" TEXT,
+         "expiresAt" TIMESTAMP(3) NOT NULL,
+         "usedAt" TIMESTAMP(3),
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "OAuthCode_pkey" PRIMARY KEY ("codeHash")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "OAuthCode_expiresAt_idx" ON "OAuthCode"("expiresAt")`,
+      `DO $$ BEGIN
+         ALTER TABLE "OAuthCode" ADD CONSTRAINT "OAuthCode_clientId_fkey"
+           FOREIGN KEY ("clientId") REFERENCES "OAuthClient"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
+    name: "OAuthGrant",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "OAuthGrant" (
+         "id" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "clientId" TEXT NOT NULL,
+         "scope" TEXT NOT NULL,
+         "refreshHash" TEXT,
+         "refreshExpiresAt" TIMESTAMP(3),
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         "lastUsedAt" TIMESTAMP(3),
+         "revokedAt" TIMESTAMP(3),
+         CONSTRAINT "OAuthGrant_pkey" PRIMARY KEY ("id")
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "OAuthGrant_refreshHash_key" ON "OAuthGrant"("refreshHash")`,
+      `CREATE INDEX IF NOT EXISTS "OAuthGrant_userId_idx" ON "OAuthGrant"("userId")`,
+      `CREATE INDEX IF NOT EXISTS "OAuthGrant_clientId_idx" ON "OAuthGrant"("clientId")`,
+      `DO $$ BEGIN
+         ALTER TABLE "OAuthGrant" ADD CONSTRAINT "OAuthGrant_userId_fkey"
+           FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE "OAuthGrant" ADD CONSTRAINT "OAuthGrant_clientId_fkey"
+           FOREIGN KEY ("clientId") REFERENCES "OAuthClient"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
+    name: "OAuthToken",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "OAuthToken" (
+         "tokenHash" TEXT NOT NULL,
+         "grantId" TEXT NOT NULL,
+         "expiresAt" TIMESTAMP(3) NOT NULL,
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "OAuthToken_pkey" PRIMARY KEY ("tokenHash")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "OAuthToken_grantId_idx" ON "OAuthToken"("grantId")`,
+      `CREATE INDEX IF NOT EXISTS "OAuthToken_expiresAt_idx" ON "OAuthToken"("expiresAt")`,
+      `DO $$ BEGIN
+         ALTER TABLE "OAuthToken" ADD CONSTRAINT "OAuthToken_grantId_fkey"
+           FOREIGN KEY ("grantId") REFERENCES "OAuthGrant"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
     name: "McpCall",
     statements: [
       `CREATE TABLE IF NOT EXISTS "McpCall" (

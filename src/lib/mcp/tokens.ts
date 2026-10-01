@@ -1,6 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { actorOf, type Actor } from "@/lib/authz";
+import { ACCESS_PREFIX } from "@/lib/oauth/core";
+import { actorForAccessToken } from "@/lib/oauth/store";
 
 /**
  * Personal access tokens for the MCP endpoint.
@@ -57,9 +59,19 @@ export async function issueToken(userId: string, name: string): Promise<IssuedTo
  */
 export async function actorForToken(
   raw: string | null | undefined,
-): Promise<{ actor: Actor; tokenId: string; email: string } | null> {
+): Promise<{ actor: Actor; tokenId: string; email: string; scope?: string } | null> {
   if (!raw) return null;
   const token = raw.replace(/^Bearer\s+/i, "").trim();
+
+  // An OAuth access token is resolved by its own path. Checked FIRST, and by
+  // an exact prefix, because `mrc_a_…` also starts with `mrc_` — falling
+  // through to the personal-token lookup would hash it, miss, and report a
+  // valid credential as invalid.
+  if (token.startsWith(ACCESS_PREFIX)) {
+    const g = await actorForAccessToken(token);
+    return g ? { actor: g.actor, tokenId: g.grantId, email: g.email, scope: g.scope } : null;
+  }
+
   if (!token.startsWith(PREFIX)) return null;
 
   const digest = hash(token);

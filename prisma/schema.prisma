@@ -60,6 +60,7 @@ model User {
   projects  Project[]
   templates ExportTemplate[]
   mcpTokens McpToken[]
+  oauthGrants OAuthGrant[]
   team      Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
   @@index([teamId])
@@ -503,6 +504,90 @@ model BalanceSnapshot {
 /// Only the hash is stored. The token itself is shown once, at creation, and
 /// is unrecoverable afterwards — a database copy must not be a set of live
 /// credentials, which matters here because backups now leave the server.
+/// A client that registered itself to ask for access (RFC 7591).
+///
+/// Registration is open, because that is what dynamic client registration
+/// means and what lets claude.ai connect without anybody configuring a client
+/// id by hand. Open registration is safe only because registering grants
+/// NOTHING — the consent screen is the gate, and `name` is shown there as the
+/// client's own unverified claim, since it is attacker-controlled and is
+/// exactly how a phishing connector would try to look like a real one.
+model OAuthClient {
+  id           String   @id @default(cuid())
+  name         String
+  redirectUris String[]
+  createdAt    DateTime @default(now())
+  /// Set to stop a client being used without losing the record of it.
+  disabledAt   DateTime?
+
+  codes  OAuthCode[]
+  grants OAuthGrant[]
+}
+
+/// A one-use authorization code, in flight between the consent screen and the
+/// token endpoint. Stored hashed, like every other credential here.
+model OAuthCode {
+  codeHash      String   @id
+  clientId      String
+  userId        String
+  redirectUri   String
+  scope         String
+  /// PKCE S256 challenge. The verifier never touches the database.
+  codeChallenge String
+  /// RFC 8707 — which server the resulting token may be used at.
+  resource      String?
+  expiresAt     DateTime
+  /// Redemption is single-use. A second attempt means the code leaked, and
+  /// OAuth 2.1 requires the grant it came from to be revoked.
+  usedAt        DateTime?
+  createdAt     DateTime @default(now())
+
+  client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+}
+
+/// Standing permission from one person to one client.
+///
+/// This is what an admin revokes when somebody leaves — the thing personal
+/// tokens could not offer, because only their owner could revoke them.
+model OAuthGrant {
+  id          String    @id @default(cuid())
+  userId      String
+  clientId    String
+  scope       String
+  /// SHA-256 of the refresh token. Null once it has been rotated away.
+  refreshHash String?   @unique
+  refreshExpiresAt DateTime?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client OAuthClient   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  tokens OAuthToken[]
+
+  @@index([userId])
+  @@index([clientId])
+}
+
+/// A live access token. Opaque and looked up, not a JWT.
+///
+/// A signed token needs no database read, but revoking one needs a denylist —
+/// and revocation is the entire point of this work. The MCP endpoint already
+/// does one lookup per call for personal tokens, so this costs nothing new.
+model OAuthToken {
+  tokenHash String   @id
+  grantId   String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  grant OAuthGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+
+  @@index([grantId])
+  @@index([expiresAt])
+}
+
 /// One tool call over MCP.
 ///
 /// Two jobs. It is the audit trail — these tools can change a live catalogue

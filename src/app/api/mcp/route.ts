@@ -114,8 +114,14 @@ export async function POST(req: NextRequest) {
 
   const auth = await actorForToken(req.headers.get("authorization"));
   if (!auth) {
-    // 401 with WWW-Authenticate so a client can say something better than
-    // "it didn't work" — the token is missing, revoked, or not ours.
+    // The WWW-Authenticate header is not decoration: RFC 9728 makes it the
+    // way a client discovers that this resource has an authorization server
+    // at all, and the MCP spec requires clients to parse it. Without
+    // resource_metadata here, a browser client has no route to the OAuth
+    // flow and can only report that it could not connect.
+    const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "";
+    const proto = req.headers.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
+    const metadata = `${proto}://${host}/.well-known/oauth-protected-resource`;
     return NextResponse.json(
       {
         jsonrpc: "2.0",
@@ -123,10 +129,13 @@ export async function POST(req: NextRequest) {
         error: {
           code: -32001,
           message:
-            "No valid Mercato token. Create one under Settings → Connect to Claude and send it as: Authorization: Bearer mrc_…",
+            "No valid Mercato token. Sign in when prompted, or create a token under Settings → Connect to Claude and send it as: Authorization: Bearer mrc_…",
         },
       },
-      { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="mercato"' } },
+      {
+        status: 401,
+        headers: { "WWW-Authenticate": `Bearer realm="mercato", resource_metadata="${metadata}"` },
+      },
     );
   }
 
