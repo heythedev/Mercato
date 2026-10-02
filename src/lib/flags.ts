@@ -4,8 +4,15 @@
  *
  * Each flag names the thing it governs, says what happens when it is off, and
  * states its default. Read at call time rather than captured at module load,
- * so changing one in the platform's settings takes effect on the next request
- * instead of needing a deploy to notice.
+ * so nothing here is frozen into a bundle at build time.
+ *
+ * That is NOT the same as taking effect immediately on Vercel, and this
+ * comment used to imply it did. Vercel injects environment variables into a
+ * deployment when that deployment is created: changing one in the dashboard
+ * leaves the running functions with the old value until you redeploy. The
+ * value of reading at call time is that a redeploy is enough — no code
+ * change, no rebuild of anything but the deployment itself — not that the
+ * change lands on the next request.
  *
  * The defaults follow one rule: anything that only READS is on, anything that
  * WRITES is off until somebody decides otherwise. A feature nobody has asked
