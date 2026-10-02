@@ -442,10 +442,35 @@ export const WRITE_TOOLS: McpTool[] = [
       const remaining = await prisma.product.count({
         where: { projectId: id, OR: [{ marketplaceCategory: null }, { marketplaceCategory: "Uncategorized" }] },
       });
-      // Mirrors what a finished batch run leaves behind, so a project
-      // categorised this way looks the same to every other screen.
-      if (remaining === 0 && written > 0) {
-        await prisma.project.update({ where: { id }, data: { status: "categorized" } }).catch(() => {});
+
+      // Leave the project looking exactly as Mercato's own run leaves it, so
+      // opening the app after categorising here shows the same thing as
+      // categorising there.
+      //
+      // Finished: status and categorizeCompletedAt together. The timestamp is
+      // what the Categorize step reads to say the run is done — setting the
+      // status alone left a project that said "categorized" with no
+      // completion to show for it.
+      //
+      // Part-way: the status is deliberately NOT moved to "categorizing".
+      // Mercato's own partial stop reverts it for a reason its code states —
+      // "nothing is ever stuck categorizing if the client vanishes" — and a
+      // conversation that stops halfway is exactly that client vanishing.
+      // The per-product counts the screen shows come from the products
+      // themselves and are already correct, so the work IS visible either
+      // way; only the word is held back until it is true.
+      if (written > 0) {
+        await prisma.project
+          .update({
+            where: { id },
+            data:
+              remaining === 0
+                ? { status: "categorized", categorizeCompletedAt: new Date() }
+                : // Touch it so the project sorts as recently worked on and
+                  // "last activity" is honest about what just happened.
+                  { updatedAt: new Date() },
+          })
+          .catch(() => {});
       }
 
       return ok({
