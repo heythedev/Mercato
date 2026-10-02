@@ -16,6 +16,9 @@ import {
   nextSegments,
 } from "@/lib/categorize/taxonomy";
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
+import { toUnfilledReport } from "@/lib/export/job-store";
+import { loadProductAttributes, storedAttribute } from "@/lib/export/product-attributes";
+import { defaultKey } from "@/lib/export/defaults";
 
 /**
  * What Claude may do in Mercato, on behalf of one person.
@@ -521,6 +524,102 @@ export const TOOLS: McpTool[] = [
           tokensOut: n(r.output),
           shareOfTokens: `${Math.round(((n(r.input) + n(r.output)) / totalTokens) * 100)}%`,
         })),
+      });
+    },
+  },
+
+  {
+    name: "next_export_gaps",
+    title: "Required cells the export could not fill",
+    description:
+      "Products whose required template columns shipped empty, with each product's own data to answer from " +
+      "and the values already in use for that column. Answer with submit_export_values and the next export " +
+      "fills those cells WITHOUT any AI call — Mercato reads stored values before it asks a model.",
+    schema: {
+      projectId: z.string(),
+      column: z.string().optional().describe("One column only, e.g. Material"),
+      limit: z.number().optional(),
+    },
+    async run(actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canReadProject(actor, project)) return ok({ error: "Not visible to you" });
+
+      // Which columns actually shipped empty — recorded by the last export
+      // rather than guessed, so this reflects a real run of the real filler.
+      const job = await prisma.exportJob.findFirst({
+        where: { projectId: id, status: "done" },
+        orderBy: { updatedAt: "desc" },
+        select: { unfilledRequired: true, updatedAt: true },
+      });
+      const report = toUnfilledReport(job?.unfilledRequired);
+      let columns = report.columns.map((c) => c.label);
+      if (a.column) {
+        const want = defaultKey(String(a.column));
+        columns = columns.filter((c) => defaultKey(c) === want);
+      }
+      if (!columns.length) {
+        return ok({
+          error: job
+            ? "That export reported no unfilled required columns."
+            : "No finished export yet — run one first, and it will record what it could not fill.",
+        });
+      }
+
+      const products = await prisma.product.findMany({
+        where: { projectId: id, marketplaceCategory: { not: null }, NOT: { marketplaceCategory: "Uncategorized" } },
+        select: { id: true, name: true, description: true, brand: true, vendorSku: true, vendorData: true, marketplaceCategory: true },
+        orderBy: { id: "asc" },
+        take: 500,
+      });
+      const stored = await loadProductAttributes(products.map((p) => p.id));
+
+      // The vocabulary already in use for each column, across this
+      // marketplace. Not the template's own dropdown — that lives inside the
+      // workbook — but real values Mercato has accepted before, which is a
+      // far better prompt than nothing and keeps answers consistent with
+      // what is already in the catalogue.
+      const inUse = new Map<string, Set<string>>();
+      for (const [, attrs] of stored) {
+        for (const [k, v] of attrs) {
+          if (!inUse.has(k)) inUse.set(k, new Set());
+          if (inUse.get(k)!.size < 40) inUse.get(k)!.add(v);
+        }
+      }
+
+      const gaps: unknown[] = [];
+      const cap = Math.min(Number(a.limit ?? 25), 60);
+      for (const p of products) {
+        if (gaps.length >= cap) break;
+        const attrs = stored.get(p.id);
+        const missing = columns.filter((c) => !storedAttribute(attrs, c));
+        if (!missing.length) continue;
+        gaps.push({
+          productId: p.id,
+          name: p.name,
+          brand: p.brand,
+          sku: p.vendorSku,
+          category: p.marketplaceCategory,
+          description: p.description ? p.description.slice(0, 400) : null,
+          vendorData: vendorHints(p.vendorData),
+          needs: missing,
+        });
+      }
+
+      return ok({
+        project: { id: project.id, name: project.name, marketplace: project.marketplace },
+        reportedBy: job ? `the export finished ${job.updatedAt.toISOString()}` : null,
+        columnsStillEmpty: report.columns,
+        valuesAlreadyInUse: Object.fromEntries([...inUse].map(([k, v]) => [k, [...v]])),
+        products: gaps,
+        instructions:
+          "Answer only from each product's own name, description and vendor data. If a product does not state " +
+          "a value, leave it out — a seat height invented for a mattress becomes a fact on a storefront. " +
+          "Prefer a value already in use for that column. Then call submit_export_values.",
       });
     },
   },
