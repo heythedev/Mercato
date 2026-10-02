@@ -526,6 +526,166 @@ export const TOOLS: McpTool[] = [
   },
 
   {
+    name: "job_status",
+    title: "What is running",
+    description:
+      "Where a project is in the pipeline: whether categorisation, verification or an export is running, how " +
+      "far through, and what is left. Call this after starting a run rather than guessing.",
+    schema: { projectId: z.string() },
+    async run(actor, a) {
+      const id = String(a.projectId);
+      const p = await prisma.project.findUnique({
+        where: { id },
+        select: {
+          id: true, name: true, marketplace: true, status: true, userId: true, teamId: true,
+          categorizeCompletedAt: true, verifyCompletedAt: true, updatedAt: true,
+        },
+      });
+      if (!p) return ok({ error: "No such project" });
+      if (!canReadProject(actor, p)) return ok({ error: "Not visible to you" });
+
+      const [total, categorised, verified, job] = await Promise.all([
+        prisma.product.count({ where: { projectId: id } }),
+        prisma.product.count({
+          where: { projectId: id, marketplaceCategory: { not: null }, NOT: { marketplaceCategory: "Uncategorized" } },
+        }),
+        prisma.product.count({ where: { projectId: id, verifyStatus: { not: null } } }),
+        prisma.exportJob.findFirst({
+          where: { projectId: id },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true, status: true, phase: true, pendingGroups: true, totalGroups: true, updatedAt: true },
+        }),
+      ]);
+
+      const pending = ((job?.pendingGroups as string[] | null) ?? []).length;
+      return ok({
+        project: { id: p.id, name: p.name, marketplace: p.marketplace },
+        // The project's own status word is what every screen shows, so it is
+        // the one answer to "is something running".
+        status: p.status,
+        running: ["categorizing", "verifying", "exporting"].includes(p.status),
+        products: { total, categorised, uncategorised: total - categorised, verified },
+        categorizeFinishedAt: p.categorizeCompletedAt,
+        verifyFinishedAt: p.verifyCompletedAt,
+        export: job
+          ? {
+              jobId: job.id,
+              status: job.status,
+              phase: job.phase,
+              filesLeft: pending,
+              filesTotal: job.totalGroups ?? 0,
+              updatedAt: job.updatedAt,
+            }
+          : null,
+        lastActivity: p.updatedAt,
+      });
+    },
+  },
+
+  {
+    name: "verification_issues",
+    title: "What verification flagged",
+    description:
+      "Products whose verdict is not a clean match, with the stored value against the live marketplace value " +
+      "for each field that differs. Use it to triage mismatches instead of opening them one by one.",
+    schema: {
+      projectId: z.string(),
+      verdict: z
+        .enum(["warning", "mismatch", "not_found", "discontinued"])
+        .optional()
+        .describe("Only this verdict; omit for all of them"),
+      limit: z.number().optional(),
+    },
+    async run(actor, a) {
+      const id = String(a.projectId);
+      const p = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
+      });
+      if (!p) return ok({ error: "No such project" });
+      if (!canReadProject(actor, p)) return ok({ error: "Not visible to you" });
+
+      const verdicts = a.verdict ? [String(a.verdict)] : ["warning", "mismatch", "not_found", "discontinued"];
+      const [counts, rows] = await Promise.all([
+        prisma.product.groupBy({
+          by: ["verifyStatus"],
+          where: { projectId: id, verifyStatus: { not: null } },
+          _count: { _all: true },
+        }),
+        prisma.product.findMany({
+          where: { projectId: id, verifyStatus: { in: verdicts } },
+          select: { id: true, name: true, vendorSku: true, upc: true, asin: true, verifyStatus: true, verifyFields: true },
+          take: Math.min(Number(a.limit ?? 40), MAX_ROWS),
+          orderBy: { id: "asc" },
+        }),
+      ]);
+
+      return ok({
+        project: p.name,
+        byVerdict: Object.fromEntries(counts.map((c) => [c.verifyStatus ?? "unverified", c._count._all])),
+        products: rows.map((r) => ({
+          productId: r.id,
+          name: r.name,
+          sku: r.vendorSku,
+          barcode: r.upc,
+          asin: r.asin,
+          verdict: r.verifyStatus,
+          // Only the fields that disagree — a verdict with twenty matching
+          // fields attached is a verdict nobody reads.
+          //
+          // Filtered on SEVERITY, not on `match`. The two are independent in
+          // the stored data and the important rows prove it: a product whose
+          // brand reads "R1 Concepts" against a live "Dynamic Friction"
+          // carries match=true with severity=warning. Filtering on match
+          // alone dropped exactly the disagreements worth looking at.
+          differences: Array.isArray(r.verifyFields)
+            ? (r.verifyFields as Record<string, unknown>[])
+                .filter((f) => f && (f.severity !== "ok" || f.match === false))
+                .map((f) => ({
+                  field: f.label ?? f.field,
+                  ours: String(f.stored ?? "").slice(0, 160),
+                  live: String(f.live ?? "").slice(0, 160),
+                  severity: f.severity,
+                  note: f.note,
+                }))
+            : [],
+        })),
+        note:
+          "A difference is not automatically a fault — a colour named differently, or a pack size written another " +
+          "way, is the common case. Say which look like real problems and reverify_product can re-check one.",
+      });
+    },
+  },
+
+  {
+    name: "start_new_project",
+    title: "Start a new project",
+    description:
+      "Where to create a project. Mercato needs the vendor spreadsheet to create one, and a spreadsheet cannot " +
+      "travel through this connection — so this returns the link to do it in Mercato, with what to expect.",
+    schema: { marketplace: z.string().optional() },
+    async run(actor, a) {
+      void actor;
+      const mp = String(a.marketplace ?? "").trim();
+      return ok({
+        // Honest rather than useless: Claude cannot carry a file, so the one
+        // helpful thing is to say exactly where to go and what happens next,
+        // instead of reporting that it has no tool and stopping.
+        openInMercato: "/projects/new",
+        ...(mp ? { marketplace: mp } : {}),
+        why: "A project is created from the vendor file itself, and a spreadsheet would be megabytes of encoded text through this conversation.",
+        thenWhatIcanDo: [
+          "job_status — follow categorisation, verification or an export",
+          "next_categorization_batch + submit_categorization — categorise it with me",
+          "run_categorization / run_verification / run_export — start Mercato's own runs",
+          "export_readiness — which required columns would ship empty",
+          "verification_issues — triage what verification flagged",
+        ],
+      });
+    },
+  },
+
+  {
     name: "whoami",
     title: "Who am I",
     description: "The Mercato account this connection acts as, and what it can reach.",

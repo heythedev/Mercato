@@ -112,6 +112,87 @@ export const WRITE_TOOLS: McpTool[] = [
   },
 
   {
+    name: "run_verification",
+    title: "Run Mercato's verification",
+    description:
+      "Start Mercato's own verification on a project — fetches each product's live marketplace listing and " +
+      "compares title, images, description and dimensions. The same run the Verify button starts. Long runs " +
+      "come back partial; call again to continue. Only projects you own. Spends Mercato's AI and lookup credit.",
+    schema: { projectId: z.string() },
+    async run(actor: Actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only verify projects you own." });
+      }
+
+      // Verification is the most expensive thing Mercato does — measured at
+      // 92% of all AI tokens spent — so the ceiling matters more here than
+      // anywhere else.
+      const left = await runQuotaRemaining(actor.id, ["run_verification"]);
+      if (left <= 0) {
+        return ok({ error: `You have started ${RUNS_PER_DAY} verifications in the last 24 hours, which is the limit.` });
+      }
+
+      const res = await invokeAsUser(actor.id, `/api/projects/${encodeURIComponent(id)}/verify`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const b = res.body as { error?: string };
+        return ok({ error: b?.error ?? `Mercato refused the run (HTTP ${res.status})` });
+      }
+      return ok({
+        ...(res.body as object),
+        note: "Use job_status to follow it, then verification_issues to see what it flagged.",
+      });
+    },
+  },
+
+  {
+    name: "reverify_product",
+    title: "Re-check one product",
+    description:
+      "Re-fetch one product's live listing and compare again — for a single row whose verdict looks wrong. " +
+      "Only projects you own.",
+    schema: {
+      projectId: z.string(),
+      productId: z.string().describe("From find_products or verification_issues"),
+    },
+    async run(actor: Actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canOperateProject(actor, project)) {
+        return ok({ error: "You can only change projects you own." });
+      }
+      // One product of THIS project — the same check submit_categorization
+      // makes, for the same reason.
+      const owned = await prisma.product.findFirst({
+        where: { id: String(a.productId), projectId: id },
+        select: { id: true },
+      });
+      if (!owned) return ok({ error: "Not a product of this project" });
+
+      const res = await invokeAsUser(actor.id, `/api/projects/${encodeURIComponent(id)}/verify/product`, {
+        method: "POST",
+        body: { productId: String(a.productId) },
+      });
+      if (!res.ok) {
+        const b = res.body as { error?: string };
+        return ok({ error: b?.error ?? `Mercato refused it (HTTP ${res.status})` });
+      }
+      return ok(res.body);
+    },
+  },
+
+  {
     name: "run_export",
     title: "Run Mercato's export",
     description:
