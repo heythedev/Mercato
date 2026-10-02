@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse, after } from "next/server";
+﻿import { NextRequest, NextResponse, after } from "next/server";
 import { projectIdFromArgs, recordCall, rowsFromResult } from "@/lib/mcp/usage";
 import { flags, mcpWriteTools, writeToolEnabled } from "@/lib/flags";
+import { grantsScope } from "@/lib/oauth/core";
 import { actorForToken } from "@/lib/mcp/tokens";
 import { TOOLS } from "@/lib/mcp/tools";
 import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
@@ -10,14 +11,24 @@ import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
  *
  * Read tools always; write tools only when MCP_WRITE_ENABLED says so. They are
  * withheld from tools/list as well as refused on call, so a model cannot
- * discover a tool it is not allowed to use and keep trying — an error it can
+ * discover a tool it is not allowed to use and keep trying â€” an error it can
  * see is an error it will work around.
  */
-function availableTools() {
-  // Per tool, not all-or-nothing: enabling category assignment should not also
-  // enable clearing fields or setting a default that governs every future
-  // export. MCP_WRITE_ENABLED takes a list — see mcpWriteTools().
-  return [...TOOLS, ...WRITE_TOOLS.filter((t) => writeToolEnabled(t.name))];
+function availableTools(scope?: string) {
+  // Two gates, and both have to hold.
+  //
+  // The deployment decides which write tools exist at all â€” per tool, not
+  // all-or-nothing, so enabling category assignment does not also enable
+  // clearing fields or setting an export default.
+  //
+  // The GRANT then decides whether this caller may use them. Without that
+  // second check the consent screen is a lie: somebody approves "see your
+  // projects", an admin later switches write tools on, and that read-only
+  // grant silently gains the ability to change a catalogue. A personal token
+  // has no scope and is the person entirely â€” it predates scopes and is
+  // minted by its own owner â€” so an absent scope means full access.
+  const mayWrite = scope === undefined || grantsScope(scope, "mercato:write");
+  return [...TOOLS, ...WRITE_TOOLS.filter((t) => writeToolEnabled(t.name) && mayWrite)];
 }
 
 /**
@@ -25,7 +36,7 @@ function availableTools() {
  *
  * One hosted server rather than a thing each person installs. That choice is
  * about identity, not convenience: a local server needs a token in a config
- * file on every laptop, and whoever holds it acts as its owner — which would
+ * file on every laptop, and whoever holds it acts as its owner â€” which would
  * hand a member their colleagues' private templates and a team admin another
  * team's projects, quietly undoing authz.ts through the one door left open.
  *
@@ -33,7 +44,7 @@ function availableTools() {
  * person, and the tools call the same scope helpers the web app calls. What
  * Claude can reach is exactly what its owner can reach signed in.
  *
- * Speaks JSON-RPC over POST — the Streamable HTTP transport — implemented
+ * Speaks JSON-RPC over POST â€” the Streamable HTTP transport â€” implemented
  * directly rather than through the SDK's server class, because that expects
  * a long-lived Node process and this is a serverless function that exists for
  * the length of one request. The protocol surface a client needs is small:
@@ -47,7 +58,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 
 /**
  * CORS, because a connector added in the browser is a browser making the
- * request — and without these it never arrives at all. The symptom is
+ * request â€” and without these it never arrives at all. The symptom is
  * "Couldn't reach mercato", which reads like the server being down rather
  * than the response being discarded by the browser after a successful round
  * trip.
@@ -58,7 +69,7 @@ const PROTOCOL_VERSION = "2025-06-18";
  *
  * Expose-Headers is the one that is easy to miss. WWW-Authenticate carries
  * the pointer to the OAuth metadata, and a header a browser cannot READ is a
- * header that may as well be absent — the client would see a bare 401 with
+ * header that may as well be absent â€” the client would see a bare 401 with
  * no way to discover there is an authorization server at all.
  */
 const CORS: Record<string, string> = {
@@ -133,7 +144,7 @@ export async function POST(req: NextRequest) {
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "mercato", version: "1.0.0" },
       instructions:
-        "Mercato — multi-marketplace product listing. Tools are scoped to the account whose token you are using: " +
+        "Mercato â€” multi-marketplace product listing. Tools are scoped to the account whose token you are using: " +
         "you see exactly what that person sees signed in, and nothing else. Read-only. " +
         "Start with whoami to confirm which account, then list_projects.",
     });
@@ -157,7 +168,7 @@ export async function POST(req: NextRequest) {
         error: {
           code: -32001,
           message:
-            "No valid Mercato token. Sign in when prompted, or create a token under Settings → Connect to Claude and send it as: Authorization: Bearer mrc_…",
+            "No valid Mercato token. Sign in when prompted, or create a token under Settings â†’ Connect to Claude and send it as: Authorization: Bearer mrc_â€¦",
         },
       },
       {
@@ -172,7 +183,7 @@ export async function POST(req: NextRequest) {
 
   if (method === "tools/list") {
     return result(id, {
-      tools: availableTools().map((t) => ({
+      tools: availableTools(auth.scope).map((t) => ({
         name: t.name,
         title: t.title,
         description: t.description,
@@ -184,7 +195,7 @@ export async function POST(req: NextRequest) {
   if (method === "tools/call") {
     const name = String((params as { name?: string })?.name ?? "");
     const args = ((params as { arguments?: Record<string, unknown> })?.arguments ?? {}) as Record<string, unknown>;
-    const tool = availableTools().find((t) => t.name === name);
+    const tool = availableTools(auth.scope).find((t) => t.name === name);
     if (!tool) return failure(id, -32602, `No such tool: ${name}`);
 
     // Recorded for every call, success or failure, and written AFTER the
@@ -235,9 +246,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "MCP is disabled on this deployment" }, { status: 404 });
   }
 
-  // A client opening the Streamable HTTP server→client channel asks for
-  // text/event-stream. This server has no SSE stream to give — every reply is
-  // the response to a POST — and the spec is explicit that a server which
+  // A client opening the Streamable HTTP serverâ†’client channel asks for
+  // text/event-stream. This server has no SSE stream to give â€” every reply is
+  // the response to a POST â€” and the spec is explicit that a server which
   // does not offer one MUST answer 405 here. Returning a friendly JSON blob
   // instead leaves a strict client holding a document where it expected a
   // stream, and what it reports is "couldn't reach the server".
@@ -254,7 +265,7 @@ export async function GET(req: NextRequest) {
       transport: "streamable-http (POST, JSON-RPC 2.0)",
       tools: availableTools().map((t) => t.name),
       writeToolsEnabled: mcpWriteTools(),
-      auth: "Authorization: Bearer mrc_… — or add this URL as a connector and sign in",
+      auth: "Authorization: Bearer mrc_â€¦ â€” or add this URL as a connector and sign in",
     },
     { headers: CORS },
   );
