@@ -1,4 +1,5 @@
 ﻿import { NextRequest, NextResponse, after } from "next/server";
+import { z } from "zod";
 import { projectIdFromArgs, recordCall, rowsFromResult } from "@/lib/mcp/usage";
 import { flags, mcpWriteTools, writeToolEnabled } from "@/lib/flags";
 import { grantsScope } from "@/lib/oauth/core";
@@ -92,30 +93,31 @@ const result = (id: RpcRequest["id"], value: unknown) =>
 const failure = (id: RpcRequest["id"], code: number, message: string, status = 200) =>
   NextResponse.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }, { status, headers: CORS });
 
-/** Zod shapes are convenient to declare and useless to a client; JSON Schema
- *  is what the protocol asks for. Only the shapes these tools actually use. */
-function toJsonSchema(shape: Record<string, unknown>): Record<string, unknown> {
-  const properties: Record<string, unknown> = {};
-  const required: string[] = [];
-
-  for (const [key, def] of Object.entries(shape)) {
-    const d = def as { _def?: { typeName?: string; description?: string; values?: string[] }; isOptional?: () => boolean; description?: string };
-    const inner = (d as { _def?: { innerType?: unknown } })._def?.innerType as typeof d | undefined;
-    const target = inner ?? d;
-    const name = (target as { _def?: { typeName?: string } })._def?.typeName;
-
-    let type = "string";
-    let extra: Record<string, unknown> = {};
-    if (name === "ZodNumber") type = "number";
-    else if (name === "ZodBoolean") type = "boolean";
-    else if (name === "ZodEnum") {
-      extra = { enum: (target as { _def: { values: string[] } })._def.values };
-    }
-
-    properties[key] = { type, ...extra, ...(d.description ? { description: d.description } : {}) };
-    if (typeof d.isOptional === "function" && !d.isOptional()) required.push(key);
-  }
-  return { type: "object", properties, ...(required.length ? { required } : {}) };
+/**
+ * Zod shapes are convenient to declare and useless to a client; JSON Schema
+ * is what the protocol asks for.
+ *
+ * This was hand-rolled, and it was wrong in a way that produced no error
+ * anywhere. It branched on `_def.typeName`, which is Zod 3; this project is
+ * on Zod 4, where the field is `_def.type`. So the lookup returned undefined
+ * every time and EVERY argument fell through to the default — "string".
+ * Sixteen of them across eleven tools: every number, every boolean, every
+ * enum, and the one array.
+ *
+ * Mostly that was survivable, because a client sending "40" for a number
+ * still works once String() gets hold of it. For submit_categorization it
+ * was fatal: the client was told `assignments` is a string, sent a string,
+ * and the handler's Array.isArray check dropped it — so the tool was
+ * unusable by any real client from the day it shipped. My own test called
+ * the endpoint directly with a proper array and passed, because it exercised
+ * the handler and never the contract the handler is published under.
+ *
+ * Zod 4 ships its own converter. Using it removes the class of bug entirely:
+ * there is no longer a second description of these types to drift from the
+ * first.
+ */
+function toJsonSchema(shape: z.ZodRawShape): Record<string, unknown> {
+  return z.toJSONSchema(z.object(shape), { io: "input" }) as Record<string, unknown>;
 }
 
 export async function POST(req: NextRequest) {
@@ -187,7 +189,7 @@ export async function POST(req: NextRequest) {
         name: t.name,
         title: t.title,
         description: t.description,
-        inputSchema: toJsonSchema(t.schema as Record<string, unknown>),
+        inputSchema: toJsonSchema(t.schema),
       })),
     });
   }
