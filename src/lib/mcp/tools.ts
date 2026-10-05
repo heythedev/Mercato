@@ -736,10 +736,20 @@ export const TOOLS: McpTool[] = [
         reportedBy: job ? `the export finished ${job.updatedAt.toISOString()}` : null,
         columnsStillEmpty: report.columns,
         scopedByTemplate: matrices.length > 0,
+        // The columns that accept only a fixed list, and what that list is.
+        // Recorded by the export itself, so these are the values it will
+        // take verbatim — anything else is dropped on the way into the file.
+        allowedValues: Object.fromEntries(
+          Object.entries(report.dropdowns ?? {}).filter(([label]) =>
+            columns.some((c) => defaultKey(c) === defaultKey(label)),
+          ),
+        ),
         valuesAlreadyInUse: Object.fromEntries([...inUse].map(([k, v]) => [k, [...v]])),
         products: gaps,
         instructions:
-          "Each product is asked only for the columns ITS OWN category requires. Answer only from that product's "
+          "Each product is asked only for the columns ITS OWN category requires. Where a column appears in "
+          + "allowedValues it takes ONE OF THOSE STRINGS EXACTLY — anything else is refused, so pick from the "
+          + "list or leave it out. Answer only from that product's "
           + "name, description and vendor data. If a product does not state " +
           "a value, leave it out — a seat height invented for a mattress becomes a fact on a storefront. " +
           "Prefer a value already in use for that column. Then call submit_export_values.",

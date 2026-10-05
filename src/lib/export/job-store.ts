@@ -59,6 +59,13 @@ export type UnfilledReport = {
    * must require this to be true rather than trusting the default.
    */
   recorded: boolean;
+  /**
+   * Dropdown-constrained columns and the options they accept, by label.
+   * Kept so a caller asked to SUPPLY one of these values can be shown the
+   * choices — a column with a dataValidation list takes one of its own
+   * options verbatim, so an answer written blind is dropped or coerced.
+   */
+  dropdowns?: Record<string, string[]>;
 };
 
 /** Older rows stored a bare array, before the AI-availability flag existed. */
@@ -67,7 +74,12 @@ export function toUnfilledReport(raw: unknown): UnfilledReport {
     return { columns: raw as UnfilledColumn[], aiUnavailable: false, recorded: false };
   }
   const o = (raw ?? {}) as Partial<UnfilledReport>;
-  return { columns: o.columns ?? [], aiUnavailable: !!o.aiUnavailable, recorded: Array.isArray(o.columns) };
+  return {
+    columns: o.columns ?? [],
+    aiUnavailable: !!o.aiUnavailable,
+    recorded: Array.isArray(o.columns),
+    dropdowns: o.dropdowns ?? {},
+  };
 }
 
 /** What one slice of a sliced export found while it was building. */
@@ -75,6 +87,8 @@ export type SliceOutcome = {
   missingTemplateCategories: string[];
   unfilled: UnfilledColumn[];
   aiUnavailable: boolean;
+  /** Dropdown options this slice's templates accept, by column label. */
+  dropdowns?: Record<string, string[]>;
 };
 
 /**
@@ -109,6 +123,10 @@ export function mergeSliceOutcome(
       columns: [...rows].sort((a, b) => b[1] - a[1]).map(([label, n]) => ({ label, rows: n })),
       aiUnavailable: prev.unfilledRequired.aiUnavailable || slice.aiUnavailable,
       recorded: true,
+      // A union: each slice sees only the templates its own categories use,
+      // so a column's options arrive with whichever slice happened to carry
+      // it. First writer wins — the same column cannot hold two lists.
+      dropdowns: { ...(slice.dropdowns ?? {}), ...(prev.unfilledRequired.dropdowns ?? {}) },
     },
   };
 }

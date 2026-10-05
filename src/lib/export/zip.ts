@@ -439,7 +439,10 @@ export async function generateCategoryZip(
   defaultTemplateId?: string,
   /** The project's team, so its own export defaults win over the global ones. */
   teamId?: string | null,
-): Promise<{ zip: Buffer; missingTemplateCategories: string[]; complianceIssues: ComplianceIssue[] }> {
+): Promise<{ zip: Buffer; missingTemplateCategories: string[]; complianceIssues: ComplianceIssue[];
+  /** Dropdown-constrained columns and the options they accept, by label. */
+  dropdownOptions: Record<string, string[]> }> {
+  const dropdownOptions = new Map<string, string[]>();
   console.log(`[export] generateCategoryZip called: ${products.length} products, ${templates.length} templates, marketplace=${marketplace}`);
 
   // Admin-set values for required columns nothing else can answer (compliance
@@ -818,7 +821,7 @@ export async function generateCategoryZip(
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
       const fileIssues: ComplianceIssue[] = [];
-      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults, storedAttrs, toPersist);
+      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults, storedAttrs, toPersist, dropdownOptions);
       zipOut.file(`${fileName}.xlsx`, buffer);
       for (const issue of fileIssues) complianceRows.push({ ...issue, file: `${fileName}.xlsx` });
     } else {
@@ -873,7 +876,12 @@ export async function generateCategoryZip(
   // Returned rather than written into the ZIP: callers (and tests) can still see
   // exactly which cells went unfilled without the client finding a defect report
   // in their download.
-  return { zip: zipBuffer, missingTemplateCategories, complianceIssues: complianceRows };
+  return {
+    zip: zipBuffer,
+    missingTemplateCategories,
+    complianceIssues: complianceRows,
+    dropdownOptions: Object.fromEntries(dropdownOptions),
+  };
 }
 
 // Pick the best-matching template for a category using word-overlap scoring.
@@ -1416,6 +1424,16 @@ async function fillTemplateXlsx(
   storedAttrs: Map<string, Map<string, string>> = new Map(),
   /** Collects newly resolved values, for the caller to persist after the run. */
   toPersist: { productId: string; attribute: string; value: string; source: AttributeSource }[] = [],
+  /**
+   * Collects the option list of every dropdown-constrained column, keyed by
+   * its label. A caller that wants somebody to SUPPLY one of these values
+   * has to be able to show them the choices: a column carrying a
+   * dataValidation list takes one of its own options verbatim and nothing
+   * else, so an answer written blind is dropped or, worse, coerced to the
+   * nearest option. Recorded here rather than re-derived, so what a caller
+   * is offered is exactly what this export would accept.
+   */
+  dropdownOptions?: Map<string, string[]>,
 ): Promise<Buffer> {
   console.log(`[export] fillTemplateXlsx called: ${products.length} products, fileData=${fileData?.length ?? 0} bytes, marketplace=${marketplace}`);
   const tplZip = await JSZip.loadAsync(fileData);
@@ -2070,6 +2088,18 @@ async function fillTemplateXlsx(
         const mathisPaths = paths.map(p => "Mathis Home/" + p.split(" > ").map(s => s.trim()).join("/"));
         if (mathisPaths.length) dropdowns.set(catEntry.letter, mathisPaths);
       } catch { /* CSV unavailable — leave column without forced dropdown */ }
+    }
+  }
+
+  // Hand the option lists back, keyed by the label a caller would know the
+  // column by. Done here because this is the point where every encoding has
+  // been parsed and the ReferenceData recovery has run.
+  if (dropdownOptions) {
+    for (const { col, letter } of colEntries) {
+      const opts = dropdowns.get(letter);
+      if (!opts?.length) continue;
+      const label = String(col.label ?? colLetterToHeader.get(letter) ?? col.key ?? "").trim();
+      if (label && !dropdownOptions.has(label)) dropdownOptions.set(label, opts);
     }
   }
 

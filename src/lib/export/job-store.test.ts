@@ -9,7 +9,7 @@ describe("reading an export's unfilled-column report", () => {
   it("keeps the columns and the AI verdict", () => {
     expect(
       toUnfilledReport({ columns: [{ label: "Prop 65", rows: 41 }], aiUnavailable: false }),
-    ).toEqual({ columns: [{ label: "Prop 65", rows: 41 }], aiUnavailable: false, recorded: true });
+    ).toEqual({ columns: [{ label: "Prop 65", rows: 41 }], aiUnavailable: false, recorded: true, dropdowns: {} });
   });
 
   it("marks a bare array as carrying no verdict", () => {
@@ -30,7 +30,7 @@ describe("reading an export's unfilled-column report", () => {
     // This value comes out of a JSONB column, so it is whatever was written —
     // a poll that throws here would break the export screen after a successful run.
     for (const junk of [null, undefined, 0, "", "nonsense", true]) {
-      expect(toUnfilledReport(junk)).toEqual({ columns: [], aiUnavailable: false, recorded: false });
+      expect(toUnfilledReport(junk)).toEqual({ columns: [], aiUnavailable: false, recorded: false, dropdowns: {} });
     }
   });
 

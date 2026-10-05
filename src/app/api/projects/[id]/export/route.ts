@@ -658,6 +658,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // kept, so the export screen can offer to set a default for each instead
       // of the gap living only in a server log.
       let unfilledColumns: { label: string; rows: number }[] = [];
+      // The option lists the templates actually accept, so the gap report can
+      // show them to whoever is asked to supply a value.
+      let dropdownOptions: Record<string, string[]> = {};
       // Whether the AI could be reached at all. An empty required cell means
       // two very different things depending on this: "nothing can answer this
       // column" (offer a default) or "the AI had no credit so nothing tried"
@@ -709,6 +712,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           parts.push(result.zip);
           missingTemplateCategories = result.missingTemplateCategories;
           unfilledColumns = unfilledByColumn(result.complianceIssues);
+        dropdownOptions = { ...dropdownOptions, ...result.dropdownOptions };
+          dropdownOptions = { ...dropdownOptions, ...result.dropdownOptions };
         }
 
         if (split.uncovered.length) {
@@ -740,6 +745,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
         unfilledColumns = unfilledByColumn(result.complianceIssues);
+        dropdownOptions = { ...dropdownOptions, ...result.dropdownOptions };
       } else if (usesCategoryExport) {
         // Without templates: split by AI-assigned category using flat columns
         zipBuffer = await generateFlatCategoryZip(products, projectMeta.marketplace) as Buffer;
@@ -757,6 +763,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         zipBuffer = result.zip;
         missingTemplateCategories = result.missingTemplateCategories;
         unfilledColumns = unfilledByColumn(result.complianceIssues);
+        dropdownOptions = { ...dropdownOptions, ...result.dropdownOptions };
       } else {
         zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
       }
@@ -788,6 +795,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           missingTemplateCategories,
           unfilled: unfilledColumns,
           aiUnavailable,
+          dropdowns: dropdownOptions,
         });
         await markGroupsDone(jobId, sliceGroups);
         return;
@@ -805,7 +813,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         extension: payload.extension,
         contentType: payload.contentType,
         missingTemplateCategories,
-        unfilledRequired: { columns: unfilledColumns, aiUnavailable, recorded: true },
+        unfilledRequired: { columns: unfilledColumns, aiUnavailable, recorded: true, dropdowns: dropdownOptions },
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
+import { toUnfilledReport } from "@/lib/export/job-store";
 import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
 import { saveProductAttributes } from "@/lib/export/product-attributes";
@@ -238,6 +239,27 @@ export const WRITE_TOOLS: McpTool[] = [
         ).map((p) => p.id),
       );
 
+      // What the template will actually accept for each dropdown column, as
+      // recorded by the last export. Such a column takes ONE OF ITS OWN
+      // OPTIONS verbatim; the export's matcher otherwise falls back to word
+      // overlap, which is how a parrot "Play Stand" was written as "Play Pen".
+      // Refusing here, with the choices, beats storing something that quietly
+      // becomes a different fact in the file.
+      const lastExport = await prisma.exportJob.findFirst({
+        where: { projectId: id, status: "done" },
+        orderBy: { updatedAt: "desc" },
+        select: { unfilledRequired: true },
+      });
+      const allowed = new Map<string, string[]>();
+      for (const [label, opts] of Object.entries(toUnfilledReport(lastExport?.unfilledRequired).dropdowns ?? {})) {
+        allowed.set(defaultKey(label), opts);
+      }
+      // Punctuation-, case- and accent-insensitive, matching the export's own
+      // FIRST pass only. Deliberately not its word-overlap pass: that is the
+      // step that substitutes a near miss, and a near miss is what we refuse.
+      const collapse = (x: string) =>
+        x.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
       const accepted: { productId: string; attribute: string; value: string; source: "ai" }[] = [];
       const rejected: { productId: string; column: string; reason: string }[] = [];
       for (const r of rows) {
@@ -253,6 +275,26 @@ export const WRITE_TOOLS: McpTool[] = [
         // mark the cell answered while leaving it blank, which is worse than
         // leaving it visibly missing.
         if (!value) { rejected.push({ productId, column, reason: "Empty value â€” leave the entry out instead" }); continue; }
+
+        // A dropdown column: take an option verbatim, or refuse and name the
+        // choices. Stored canonically so the export writes it straight through.
+        const opts = allowed.get(defaultKey(column));
+        if (opts?.length) {
+          const hit = opts.find((x) => collapse(x) === collapse(value));
+          if (!hit) {
+            rejected.push({
+              productId,
+              column,
+              reason:
+                `"${value}" is not one of this column's options. Pick one exactly, or leave it out: `
+                + opts.slice(0, 40).join(" | ")
+                + (opts.length > 40 ? ` ...and ${opts.length - 40} more` : ""),
+            });
+            continue;
+          }
+          accepted.push({ productId, attribute: column, value: hit, source: "ai" });
+          continue;
+        }
         accepted.push({ productId, attribute: column, value, source: "ai" });
       }
 
