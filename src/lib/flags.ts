@@ -26,43 +26,6 @@ function on(name: string, fallback: boolean): boolean {
   return !["false", "0", "off", "no"].includes(raw.trim().toLowerCase());
 }
 
-const OFF = ["false", "0", "off", "no"];
-const ALL = ["true", "1", "on", "yes", "all"];
-
-/**
- * Which write tools are allowed: none, all, or a named few.
- *
- * A single on/off switch forced a choice nobody should have to make — turning
- * on category assignment also turned on clearing fields and setting a default
- * that governs every future export. The sensible rollout is one tool at a
- * time, so the variable takes a list:
- *
- *   MCP_WRITE_ENABLED=false                          nothing
- *   MCP_WRITE_ENABLED=true                           everything
- *   MCP_WRITE_ENABLED=submit_categorization,rename_project   those two
- *
- * Unknown names are kept rather than dropped. A typo then disables the tool
- * it was meant to enable, which someone notices; silently matching nothing
- * while reporting success is how a half-configured rollout looks healthy.
- */
-export function mcpWriteTools(): "none" | "all" | string[] {
-  const raw = process.env.MCP_WRITE_ENABLED;
-  if (raw == null || raw.trim() === "") return "none";
-  const v = raw.trim().toLowerCase();
-  if (OFF.includes(v)) return "none";
-  if (ALL.includes(v)) return "all";
-  const names = v.split(",").map((s) => s.trim()).filter(Boolean);
-  return names.length ? names : "none";
-}
-
-/** Whether one named write tool may be listed and called. */
-export function writeToolEnabled(name: string): boolean {
-  const allowed = mcpWriteTools();
-  if (allowed === "none") return false;
-  if (allowed === "all") return true;
-  return allowed.includes(name.toLowerCase());
-}
-
 export const flags = {
   /**
    * The MCP endpoint at /api/mcp.
@@ -79,17 +42,19 @@ export const flags = {
    * Write tools over MCP: setting a category, entering a compliance default,
    * starting a run.
    *
-   * Off: they are not listed and are refused if called anyway, so a model
-   * cannot discover them and try.
+   * This is the kill switch, not the decision. WHICH write tools a person's
+   * Claude may use is that person's choice, made on Settings → Connect to
+   * Claude and stored on their account (User.mcpWriteTools) — so writes are
+   * still off until somebody decides otherwise, and the somebody is the one
+   * whose catalogue it is.
    *
-   * Default OFF. Letting a language model change a live catalogue is a
-   * decision a person should make deliberately, on a day they choose, having
-   * read what the tools do — not one that arrives with a deploy.
+   * Off: no write tool is listed or callable for anyone, whatever they chose.
+   * Their choices are kept, and come back when it is switched on again.
    *
-   * True when ANY write tool is enabled. To enable them one at a time, see
-   * mcpWriteTools() — MCP_WRITE_ENABLED also accepts a comma-separated list.
+   * Default ON. An old comma-separated list of tool names also reads as on:
+   * the per-tool decision moved to each account.
    */
-  mcpWrite: () => mcpWriteTools() !== "none",
+  mcpWrite: () => on("MCP_WRITE_ENABLED", true),
 
   /**
    * Holding a run the AI balance cannot cover.

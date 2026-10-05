@@ -44,7 +44,9 @@ export type InvokeResult = { ok: boolean; status: number; body: unknown };
 export async function invokeAsUser(
   userId: string,
   path: string,
-  init?: { method?: string; body?: unknown },
+  // FormData passes through untouched, because an upload IS multipart and
+  // re-encoding it would mean parsing a spreadsheet here just to hand it on.
+  init?: { method?: string; body?: unknown; formData?: FormData },
 ): Promise<InvokeResult> {
   const secret = process.env.AUTH_SECRET;
   if (!secret) {
@@ -67,13 +69,16 @@ export async function invokeAsUser(
     maxAge: SESSION_TTL_S,
   });
 
+  // Content-Type is deliberately NOT set for FormData: fetch generates the
+  // multipart boundary itself, and supplying one without the boundary makes
+  // the body unparseable at the other end.
   const res = await fetch(`${await originFromRequest()}${path}`, {
     method: init?.method ?? "POST",
     headers: {
-      "content-type": "application/json",
+      ...(init?.formData ? {} : { "content-type": "application/json" }),
       cookie: `${cookieName()}=${token}`,
     },
-    body: init?.body === undefined ? "{}" : JSON.stringify(init.body),
+    body: init?.formData ?? (init?.body === undefined ? "{}" : JSON.stringify(init.body)),
   });
 
   const text = await res.text();

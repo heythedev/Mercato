@@ -1,35 +1,36 @@
 ﻿import { NextRequest, NextResponse, after } from "next/server";
 import { z } from "zod";
 import { projectIdFromArgs, recordCall, rowsFromResult } from "@/lib/mcp/usage";
-import { flags, mcpWriteTools, writeToolEnabled } from "@/lib/flags";
+import { flags } from "@/lib/flags";
 import { grantsScope } from "@/lib/oauth/core";
 import { actorForToken } from "@/lib/mcp/tokens";
 import { TOOLS } from "@/lib/mcp/tools";
-import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
+import { WRITE_TOOLS, writeToolsFor } from "@/lib/mcp/write-tools";
 
 /**
  * The tools this request may use.
  *
- * Read tools always; write tools only when MCP_WRITE_ENABLED says so. They are
- * withheld from tools/list as well as refused on call, so a model cannot
- * discover a tool it is not allowed to use and keep trying â€” an error it can
- * see is an error it will work around.
+ * Read tools always; write tools only those the token's owner has switched on
+ * for themselves. They are withheld from tools/list as well as refused on
+ * call, so a model cannot discover a tool it is not allowed to use and keep
+ * trying — an error it can see is an error it will work around.
  */
-function availableTools(scope?: string) {
+async function availableTools(userId: string, scope?: string) {
   // Two gates, and both have to hold.
   //
-  // The deployment decides which write tools exist at all â€” per tool, not
+  // The PERSON decides which write tools exist for them — per tool, not
   // all-or-nothing, so enabling category assignment does not also enable
-  // clearing fields or setting an export default.
+  // clearing fields or setting an export default. writeToolsFor also honours
+  // MCP_WRITE_ENABLED=off, the deployment's kill switch.
   //
   // The GRANT then decides whether this caller may use them. Without that
   // second check the consent screen is a lie: somebody approves "see your
-  // projects", an admin later switches write tools on, and that read-only
+  // projects", later ticks write tools for their terminal, and that read-only
   // grant silently gains the ability to change a catalogue. A personal token
-  // has no scope and is the person entirely â€” it predates scopes and is
-  // minted by its own owner â€” so an absent scope means full access.
+  // has no scope and is the person entirely — it predates scopes and is
+  // minted by its own owner — so an absent scope means full access.
   const mayWrite = scope === undefined || grantsScope(scope, "mercato:write");
-  return [...TOOLS, ...WRITE_TOOLS.filter((t) => writeToolEnabled(t.name) && mayWrite)];
+  return mayWrite ? [...TOOLS, ...(await writeToolsFor(userId))] : TOOLS;
 }
 
 /**
@@ -147,7 +148,8 @@ export async function POST(req: NextRequest) {
       serverInfo: { name: "mercato", version: "1.0.0" },
       instructions:
         "Mercato â€” multi-marketplace product listing. Tools are scoped to the account whose token you are using: " +
-        "you see exactly what that person sees signed in, and nothing else. Read-only. " +
+        "you see exactly what that person sees signed in, and nothing else. " +
+        "Read-only unless that person has switched write tools on for themselves; those that are on appear in tools/list. " +
         "Start with whoami to confirm which account, then list_projects.",
     });
   }
@@ -185,7 +187,7 @@ export async function POST(req: NextRequest) {
 
   if (method === "tools/list") {
     return result(id, {
-      tools: availableTools(auth.scope).map((t) => ({
+      tools: (await availableTools(auth.actor.id, auth.scope)).map((t) => ({
         name: t.name,
         title: t.title,
         description: t.description,
@@ -197,7 +199,7 @@ export async function POST(req: NextRequest) {
   if (method === "tools/call") {
     const name = String((params as { name?: string })?.name ?? "");
     const args = ((params as { arguments?: Record<string, unknown> })?.arguments ?? {}) as Record<string, unknown>;
-    const tool = availableTools(auth.scope).find((t) => t.name === name);
+    const tool = (await availableTools(auth.actor.id, auth.scope)).find((t) => t.name === name);
     if (!tool) return failure(id, -32602, `No such tool: ${name}`);
 
     // Recorded for every call, success or failure, and written AFTER the
@@ -265,8 +267,9 @@ export async function GET(req: NextRequest) {
     {
       name: "mercato-mcp",
       transport: "streamable-http (POST, JSON-RPC 2.0)",
-      tools: availableTools().map((t) => t.name),
-      writeToolsEnabled: mcpWriteTools(),
+      tools: TOOLS.map((t) => t.name),
+      // Each person switches these on for themselves under Connect to Claude.
+      writeTools: flags.mcpWrite() ? WRITE_TOOLS.map((t) => t.name) : "switched off on this deployment",
       auth: "Authorization: Bearer mrc_â€¦ â€” or add this URL as a connector and sign in",
     },
     { headers: CORS },

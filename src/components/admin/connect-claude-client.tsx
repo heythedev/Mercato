@@ -80,21 +80,49 @@ export function ConnectClaudeClient({
   baseUrl,
   initialTokens,
   enabled,
-  writeEnabled,
+  writeSwitchOn,
+  writeTools,
+  initialChosen,
 }: {
   email: string;
   baseUrl: string;
   initialTokens: Token[];
   /** MCP_ENABLED. Off: say so plainly rather than issue tokens that cannot work. */
   enabled: boolean;
-  /** MCP_WRITE_ENABLED. Off by default — writes are a deliberate decision. */
-  writeEnabled: boolean;
+  /** MCP_WRITE_ENABLED, the deployment's kill switch. Off: no one's write tools work. */
+  writeSwitchOn: boolean;
+  /** Every write tool there is, for this person to choose from. */
+  writeTools: { name: string; title: string }[];
+  /** The ones this person has switched on for their own Claude. */
+  initialChosen: string[];
 }) {
   const [tokens, setTokens] = useState<Token[]>(initialTokens);
   const [route, setRoute] = useState<"browser" | "terminal">("browser");
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [fresh, setFresh] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<string[]>(initialChosen);
+  const [saving, setSaving] = useState(false);
+
+  // Saves the whole list rather than one toggle, so two quick clicks cannot
+  // land out of order and leave the server holding a state nobody saw.
+  async function saveChosen(next: string[]) {
+    const before = chosen;
+    setChosen(next);
+    setSaving(true);
+    try {
+      const r = await fetch("/api/mcp/write-tools", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tools: next }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setChosen(before); toast.error(d.error ?? "Could not save"); return; }
+      setChosen(d.tools ?? next);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const load = useCallback(async () => {
     const r = await fetch("/api/mcp/tokens", { cache: "no-store" });
@@ -256,7 +284,12 @@ export function ConnectClaudeClient({
             </li>
           ))}
         </ul>
-        {writeEnabled ? (
+        {!writeSwitchOn ? (
+          <Notice tone="critical" className="mt-4" title="Write tools are switched off on this deployment">
+            Claude can look but change nothing, whatever is ticked below. Your choices are kept for
+            when it is switched back on.
+          </Notice>
+        ) : chosen.length > 0 ? (
           <Notice tone="warning" className="mt-4" title="Write tools are on">
             Claude can also change things. Bulk changes show you what they would touch and write
             nothing until you confirm, and nothing can be done that you could not do yourself.
@@ -266,6 +299,58 @@ export function ConnectClaudeClient({
             Claude can look at anything you can look at, and change nothing.
           </Notice>
         )}
+      </Card>
+
+      {/* ── what Claude may change ─────────────────────────────────── */}
+      <Card className="mb-6">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-base font-semibold">What Claude may change</h2>
+          <div className="flex gap-1 text-xs">
+            <button
+              onClick={() => void saveChosen(writeTools.map((t) => t.name))}
+              disabled={saving || chosen.length === writeTools.length}
+              className="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-40"
+            >
+              All
+            </button>
+            <button
+              onClick={() => void saveChosen([])}
+              disabled={saving || chosen.length === 0}
+              className="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-40"
+            >
+              None
+            </button>
+          </div>
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          For your account only. Unticking stops a tool on Claude&apos;s next call; a newly ticked
+          one appears once Claude reconnects (run <code className="text-xs">/mcp</code> in a
+          terminal, or start a new chat).
+        </p>
+        <ul className="mt-4 grid gap-2 sm:grid-cols-2">
+          {writeTools.map((t) => {
+            const on = chosen.includes(t.name);
+            return (
+              <li key={t.name}>
+                <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border px-3 py-2 text-sm hover:bg-muted/40">
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={saving}
+                    onChange={() =>
+                      void saveChosen(on ? chosen.filter((n) => n !== t.name) : [...chosen, t.name])
+                    }
+                    className="mt-0.5"
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-medium leading-snug">{t.title}</span>
+                    <code className="text-[11px] text-muted-foreground">{t.name}</code>
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
       </Card>
 
       {/* ── tokens ─────────────────────────────────────────────────── */}

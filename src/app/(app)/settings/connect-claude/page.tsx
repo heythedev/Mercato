@@ -2,6 +2,8 @@ import { headers } from "next/headers";
 import { requireUser } from "@/lib/auth-helpers";
 import { listTokens } from "@/lib/mcp/tokens";
 import { flags } from "@/lib/flags";
+import { prisma } from "@/lib/db";
+import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
 import { ConnectClaudeClient } from "@/components/admin/connect-claude-client";
 
 export const dynamic = "force-dynamic";
@@ -30,13 +32,18 @@ export default async function ConnectClaudePage() {
   const proto = h.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const baseUrl = host ? `${proto}://${host}` : "";
 
-  const tokens = await listTokens(user.id);
+  const [tokens, account] = await Promise.all([
+    listTokens(user.id),
+    prisma.user.findUnique({ where: { id: user.id }, select: { mcpWriteTools: true } }),
+  ]);
 
   return (
     <div className="px-6 py-8">
       <ConnectClaudeClient
         enabled={flags.mcp()}
-        writeEnabled={flags.mcpWrite()}
+        writeSwitchOn={flags.mcpWrite()}
+        writeTools={WRITE_TOOLS.map((t) => ({ name: t.name, title: t.title }))}
+        initialChosen={account?.mcpWriteTools ?? []}
         email={(user as { email?: string }).email ?? "your account"}
         baseUrl={baseUrl}
         initialTokens={tokens.map((t) => ({

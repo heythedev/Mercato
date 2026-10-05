@@ -1,4 +1,4 @@
-﻿import { z } from "zod";
+import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
@@ -9,16 +9,26 @@ import {
   type ProposedAssignment,
 } from "@/lib/categorize/taxonomy";
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
+import { flags } from "@/lib/flags";
 import { RUNS_PER_DAY, invokeAsUser, runQuotaRemaining } from "./invoke";
+import { hashSecret, newSecret } from "@/lib/oauth/core";
+import { baseUrl } from "@/lib/oauth/metadata";
+import { toTileId } from "@/lib/marketplaces/catalog";
+
+/** Long enough to find the file and run the command; short enough that a
+ *  link left in a log is not a standing invitation. */
+const UPLOAD_TICKET_TTL_MS = 30 * 60 * 1000;
 import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
 
 /**
- * Tools that change things, behind MCP_WRITE_ENABLED and off by default.
+ * Tools that change things, off for each person until they switch them on.
  *
  * Letting a language model edit a live catalogue is a decision a person makes
- * deliberately, having read what these do â€” not one that arrives with a
- * deploy. So the flag is off, the tools are not even listed until it is on,
- * and each of them is built to be reversible or to refuse.
+ * deliberately, having read what these do — not one that arrives with a
+ * deploy. So each account starts read-only, a tool is not even listed until
+ * its owner has chosen it on Settings → Connect to Claude, MCP_WRITE_ENABLED
+ * can still switch all of them off at once, and each of them is built to be
+ * reversible or to refuse.
  *
  * Three rules hold throughout:
  *
@@ -108,6 +118,70 @@ export const WRITE_TOOLS: McpTool[] = [
           b?.partial === true
             ? "The run hit its time budget. Call again with the resumeFrom above to continue."
             : "Finished. Check export_readiness before exporting.",
+      });
+    },
+  },
+
+  {
+    name: "create_project_upload",
+    title: "Start a project and get somewhere to send the file",
+    description:
+      "Issue a one-time link for uploading a vendor spreadsheet. The project is created from the file when it " +
+      "arrives, by Mercato, exactly as the New Project button does. Use this instead of asking the person to " +
+      "go and do it — if you can reach the file, upload it yourself with the command returned.",
+    schema: {
+      name: z.string().describe("What to call the project"),
+      marketplace: z.string().describe("mathis, walmart, bestbuy, amazon_us, temu, sears"),
+      isNewListing: z
+        .boolean()
+        .optional()
+        .describe("Walmart only: a new listing, with no live page to verify against"),
+    },
+    async run(actor: Actor, a) {
+      const name = String(a.name ?? "").trim();
+      const marketplace = String(a.marketplace ?? "").trim().toLowerCase();
+      if (!name) return ok({ error: "A project name is required" });
+      if (!marketplace) return ok({ error: "A marketplace is required" });
+
+      // The same allow-list the creation route enforces, checked here too so
+      // the refusal arrives before somebody uploads a file for nothing.
+      const account = await prisma.user.findUnique({
+        where: { id: actor.id },
+        select: { role: true, allowedMarketplaces: true },
+      });
+      if (!account) return ok({ error: "Account not found" });
+      const allowed = isAnyAdmin(actor) || account.allowedMarketplaces.includes(toTileId(marketplace));
+      if (!allowed) {
+        return ok({ error: `You do not have access to create ${marketplace} projects.` });
+      }
+
+      const token = newSecret("mrc_u_");
+      const expiresAt = new Date(Date.now() + UPLOAD_TICKET_TTL_MS);
+      await prisma.uploadTicket.create({
+        data: {
+          tokenHash: hashSecret(token),
+          userId: actor.id,
+          name,
+          marketplace,
+          isNewListing: a.isNewListing === true && marketplace === "walmart",
+          expiresAt,
+        },
+      });
+
+      const base = await baseUrl();
+      const uploadUrl = `${base}/api/projects/upload?t=${token}`;
+      return ok({
+        uploadUrl,
+        expiresAt,
+        project: { name, marketplace },
+        // A ready-to-run command, because the useful version of this is
+        // Claude uploading the file itself rather than reading the URL out
+        // to somebody. The bytes go from the machine holding them straight
+        // to Mercato and never through the conversation.
+        curl: `curl -F "file=@/path/to/your-file.xlsx" "${uploadUrl}"`,
+        note:
+          "Single use, and it expires. Replace the path and run it where the spreadsheet is — the project " +
+          "is created from the file when it arrives. Treat the link as a password: it creates a project as you.",
       });
     },
   },
@@ -654,3 +728,18 @@ export const WRITE_TOOLS: McpTool[] = [
   },
 
 ];
+
+/**
+ * The write tools this person's Claude may use right now: the ones they chose,
+ * while the deployment switch is on.
+ *
+ * Read per request rather than carried in the token, so unticking a tool stops
+ * it on the next call — the person should not have to revoke a token to take
+ * back a permission.
+ */
+export async function writeToolsFor(userId: string): Promise<McpTool[]> {
+  if (!flags.mcpWrite()) return [];
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { mcpWriteTools: true } });
+  const chosen = new Set(user?.mcpWriteTools ?? []);
+  return WRITE_TOOLS.filter((t) => chosen.has(t.name));
+}

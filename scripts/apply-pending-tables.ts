@@ -21,6 +21,28 @@ import { prisma } from "../src/lib/db";
 
 const TABLES: { name: string; column?: string; statements: string[] }[] = [
   {
+    name: "UploadTicket",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "UploadTicket" (
+         "tokenHash" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "name" TEXT NOT NULL,
+         "marketplace" TEXT NOT NULL,
+         "isNewListing" BOOLEAN NOT NULL DEFAULT false,
+         "expiresAt" TIMESTAMP(3) NOT NULL,
+         "usedAt" TIMESTAMP(3),
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "UploadTicket_pkey" PRIMARY KEY ("tokenHash")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "UploadTicket_userId_idx" ON "UploadTicket"("userId")`,
+      `CREATE INDEX IF NOT EXISTS "UploadTicket_expiresAt_idx" ON "UploadTicket"("expiresAt")`,
+      `DO $$ BEGIN
+         ALTER TABLE "UploadTicket" ADD CONSTRAINT "UploadTicket_userId_fkey"
+           FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
     name: "OAuthClient",
     statements: [
       `CREATE TABLE IF NOT EXISTS "OAuthClient" (
@@ -263,6 +285,16 @@ const TABLES: { name: string; column?: string; statements: string[] }[] = [
        )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS "Team_slug_key" ON "Team"("slug")`,
       `CREATE INDEX IF NOT EXISTS "Team_slug_idx" ON "Team"("slug")`,
+    ],
+  },
+  {
+    // Which MCP write tools each person has switched on for themselves. Empty
+    // for every existing row, which is read-only — nobody's Claude gains a
+    // write it was not given by its owner.
+    name: "User",
+    column: "mcpWriteTools",
+    statements: [
+      `ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "mcpWriteTools" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]`,
     ],
   },
   {

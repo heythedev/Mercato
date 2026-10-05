@@ -1,4 +1,4 @@
-﻿import NextAuth from "next-auth";
+import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 import { flags } from "@/lib/flags";
 
@@ -32,6 +32,12 @@ export const proxy = auth((req) => {
   // The page carries its own redirect which preserves every parameter and
   // comes back to finish the authorization; it just has to be allowed to run.
   const isOauthConsent = nextUrl.pathname === "/oauth/authorize";
+  // The ticketed upload. Authenticated by a one-time ticket in the query, not
+  // by a session — whoever runs it may have no browser at all, which is the
+  // whole reason it exists. Redirecting it to /login would answer a file
+  // upload with an HTML page and a 200, the same failure that made /api/mcp
+  // look unreachable.
+  const isTicketUpload = nextUrl.pathname === "/api/projects/upload";
   // The design-system page: static markup, hardcoded sample data, no query and
   // no session. It exists to be openable when the database is not â€” which is
   // exactly when it is most needed, and exactly when signing in cannot work,
@@ -39,7 +45,7 @@ export const proxy = auth((req) => {
   // only; UI_PREVIEW_ENABLED shows it on a deployment while reviewing.
   const isUiPreview = flags.uiPreview() && nextUrl.pathname.startsWith("/ui-preview");
 
-  if (isApiAuth || isUiPreview || isMcp || isOauthDiscovery || isOauthEndpoint || isOauthConsent) return;
+  if (isApiAuth || isUiPreview || isMcp || isOauthDiscovery || isOauthEndpoint || isOauthConsent || isTicketUpload) return;
   if (isAuthPage || isLanding) {
     // Public pages â€” but signed-in users go straight to the app.
     if (isLoggedIn) return Response.redirect(new URL("/projects", nextUrl));

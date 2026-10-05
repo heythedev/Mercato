@@ -6,12 +6,12 @@ datasource db {
   provider = "postgresql"
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A group of people who share projects, templates and export defaults.
 ///
 /// Mercato started single-tenant: every row belonged to one user and an admin
-/// saw everything. A team sits between those — its members share work, and a
+/// saw everything. A team sits between those â€” its members share work, and a
 /// team_admin administers only their own team.
 ///
 /// Nullable everywhere it is referenced, on purpose. Rows that predate teams,
@@ -44,7 +44,7 @@ model User {
   image               String?
   password            String?
   /// "user" | "team_admin" | "admin".
-  /// "admin" is the super admin and predates teams — it is deliberately NOT
+  /// "admin" is the super admin and predates teams â€” it is deliberately NOT
   /// renamed, so no existing row has to be migrated.
   role                String    @default("user")
   /// Null for rows that predate teams, and for the super admin.
@@ -52,6 +52,10 @@ model User {
   // Marketplace ids a non-admin user may create projects for. Empty = none
   // allowed (explicit allow-list). Admins ignore this and see all.
   allowedMarketplaces String[]  @default([])
+  /// MCP write tools this person has switched on for their own Claude, by tool
+  /// name. Empty = read-only, the default. MCP_WRITE_ENABLED=off still shuts
+  /// every one of them off for everybody.
+  mcpWriteTools       String[]  @default([])
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
@@ -61,6 +65,7 @@ model User {
   templates ExportTemplate[]
   mcpTokens McpToken[]
   oauthGrants OAuthGrant[]
+  uploadTickets UploadTicket[]
   team      Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
   @@index([teamId])
@@ -102,7 +107,7 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
-// ── Core ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Core â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 model Project {
   id           String  @id @default(cuid())
@@ -181,16 +186,16 @@ model Product {
   @@index([projectId, verifiedAt, id])
 }
 
-// ── Keepa cache (Amazon only) ─────────────────────────────────────────────────
+// â”€â”€ Keepa cache (Amazon only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Keepa bills per product token, so every lookup we can answer locally is money
-// saved. Two tables because the two halves age very differently: a barcode→ASIN
+// saved. Two tables because the two halves age very differently: a barcodeâ†’ASIN
 // binding is effectively permanent, while product data goes stale.
 
-/// Barcode → ASIN resolution, keyed by canonical GTIN-14 (see lib/barcode.ts).
+/// Barcode â†’ ASIN resolution, keyed by canonical GTIN-14 (see lib/barcode.ts).
 ///
 /// This is the expensive half. A code that misses the batch lookup currently
 /// costs a rescue call plus up to ~10 keyword-search calls, so remembering the
-/// answer — including "there is no answer" — is where most of the savings are.
+/// answer â€” including "there is no answer" â€” is where most of the savings are.
 model KeepaCodeLookup {
   code      String // canonical GTIN-14
   domain    Int // Keepa domain id (1 = amazon.com)
@@ -206,7 +211,7 @@ model KeepaCodeLookup {
   @@index([fetchedAt])
 }
 
-/// ASIN → raw Keepa product payload.
+/// ASIN â†’ raw Keepa product payload.
 ///
 /// Stores the raw KeepaProduct, not the normalized shape: normalizeProduct() is
 /// a pure function, so keeping it outside the cache boundary means normalization
@@ -225,12 +230,12 @@ model KeepaProductCache {
   @@index([fetchedAt])
 }
 
-// ── Walmart lookup cache ──────────────────────────────────────────────────────
+// â”€â”€ Walmart lookup cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Barcode → resolved Walmart item payload.
+/// Barcode â†’ resolved Walmart item payload.
 ///
 /// Walmart verification costs up to 5 sequential API calls per unresolved
-/// product, so a remembered answer — including a remembered absence — is the
+/// product, so a remembered answer â€” including a remembered absence â€” is the
 /// difference between a 10k run taking minutes and taking an hour. Keyed by
 /// GTIN-14 like the Keepa cache so both normalize the same way.
 ///
@@ -248,7 +253,7 @@ model WalmartItemCache {
   @@index([fetchedAt])
 }
 
-// ── Templates ─────────────────────────────────────────────────────────────────
+// â”€â”€ Templates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 model ExportTemplate {
   id          String   @id @default(cuid())
@@ -261,7 +266,7 @@ model ExportTemplate {
   category    String?
   fileFormat  String   @default("xlsx") // xlsx | csv
   columns     Json // [{ key, label, required }]
-  fileData    Bytes? // raw uploaded template file — used as base workbook on export
+  fileData    Bytes? // raw uploaded template file â€” used as base workbook on export
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -271,37 +276,37 @@ model ExportTemplate {
   @@index([teamId])
 }
 
-// ── Export jobs ───────────────────────────────────────────────────────────────
+// â”€â”€ Export jobs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Durable export-job state. Job progress AND the finished ZIP live here rather
 // than in a server instance's memory: on a serverless deployment a status poll
 // can land on any instance, and the instance that built the ZIP can be frozen
 // or recycled at any moment. Rows are pruned by createJob after 48h.
 model ExportJob {
-  id                        String   @id // `${projectId}_${startedAtMs}` — minted by the export POST
+  id                        String   @id // `${projectId}_${startedAtMs}` â€” minted by the export POST
   projectId                 String
-  userId                    String // owner — polls from other users are refused
+  userId                    String // owner â€” polls from other users are refused
   status                    String   @default("processing") // processing | done | error
-  phase                     String? // human-readable progress ("Building spreadsheet files…")
+  phase                     String? // human-readable progress ("Building spreadsheet filesâ€¦")
   error                     String?
   zip                       Bytes? // finished payload (ZIP or bare spreadsheet), set when done
   extension                 String? // zip | xlsx | csv
   contentType               String?
-  missingTemplateCategories Json? // string[] — Temu categories with no matching template
-  /// string[] — output groups still to be written. An export is built one slice
+  missingTemplateCategories Json? // string[] â€” Temu categories with no matching template
+  /// string[] â€” output groups still to be written. An export is built one slice
   /// per request because the whole job cannot fit in one serverless
   /// invocation; this is what the next request picks up.
   pendingGroups             Json?
   /// How many groups the job started with, so progress can be reported.
   totalGroups               Int?
-  /// { columns: [{ label, rows }], aiUnavailable } — REQUIRED cells this export
+  /// { columns: [{ label, rows }], aiUnavailable } â€” REQUIRED cells this export
   /// shipped empty, rolled up per column, plus whether the AI was reachable at
   /// all. Kept so the export screen can offer to set a default for a genuinely
-  /// unanswerable column — and can refuse to offer one when the cells are empty
+  /// unanswerable column â€” and can refuse to offer one when the cells are empty
   /// merely because the AI had no credit.
   unfilledRequired          Json?
   createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @default(now()) // heartbeat — bumped on every phase/touch
+  updatedAt                 DateTime @default(now()) // heartbeat â€” bumped on every phase/touch
 
   files ExportJobFile[]
 
@@ -331,9 +336,9 @@ model ExportJobFile {
   @@index([jobId])
 }
 
-// ── Paid-service usage ────────────────────────────────────────────────────────
+// â”€â”€ Paid-service usage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// One row per billable third-party call — Kimi (AI), Keepa and Synccentric.
+/// One row per billable third-party call â€” Kimi (AI), Keepa and Synccentric.
 ///
 /// Exists because none of the three tells you afterwards what a balance was
 /// spent on. Kimi exposes a current balance and no usage history at all (probed:
@@ -354,7 +359,7 @@ model ServiceUsage {
 
   /// kimi | keepa | synccentric
   service String
-  /// Model id for kimi (kimi-k2.6, …); null for the metered data providers.
+  /// Model id for kimi (kimi-k2.6, â€¦); null for the metered data providers.
   model   String?
   /// What the call was FOR: categorize, verify_image, export_dropdown for AI;
   /// the endpoint (product, search, query) for Keepa and Synccentric.
@@ -364,10 +369,10 @@ model ServiceUsage {
   projectId String?
   userId    String?
 
-  /// Kimi only — the provider's own token counts.
+  /// Kimi only â€” the provider's own token counts.
   inputTokens  Int @default(0)
   outputTokens Int @default(0)
-  /// Metered providers — Keepa tokens consumed, Synccentric searches used.
+  /// Metered providers â€” Keepa tokens consumed, Synccentric searches used.
   /// Zero for AI rows, whose cost is in the token columns above.
   units        Int @default(0)
 
@@ -384,7 +389,7 @@ model ServiceUsage {
   @@index([projectId])
 }
 
-// ── Export defaults ───────────────────────────────────────────────────────────
+// â”€â”€ Export defaults â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Admin-set values for required export columns that no data source can answer.
 ///
@@ -392,7 +397,7 @@ model ServiceUsage {
 /// 65 warning type and the PFAS declaration are legal statements about how the
 /// seller trades, identical on every row, and neither the vendor file, the
 /// marketplace catalog nor a model may invent them. Measured on the live Best
-/// Buy project they were 64 of 462 empty required cells — the single largest
+/// Buy project they were 64 of 462 empty required cells â€” the single largest
 /// group after feature bullets.
 ///
 /// Held per marketplace and per attribute, keyed on the NORMALIZED column key so
@@ -427,7 +432,7 @@ model ExportDefault {
   @@index([teamId])
 }
 
-// ── Resolved product attributes ───────────────────────────────────────────────
+// â”€â”€ Resolved product attributes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// One resolved value for one product attribute, kept so it is paid for once.
 ///
@@ -435,7 +440,7 @@ model ExportDefault {
 /// or by the AI fill layer. Both were recomputed on EVERY export: the same
 /// feature bullet, the same material, re-asked and re-charged each time a file
 /// was regenerated. Worse, a Best Buy export of a real catalog cannot finish
-/// that work inside one request — the template writing alone measured 208s
+/// that work inside one request â€” the template writing alone measured 208s
 /// against a 300s ceiling, so the AI budget expired before a single batch ran
 /// and the cells shipped empty however much credit was available.
 ///
@@ -452,7 +457,7 @@ model ProductAttribute {
   productId String
   attribute String
   value     String
-  /// catalog | ai — where the value came from, so a cheaper source can later
+  /// catalog | ai â€” where the value came from, so a cheaper source can later
   /// overwrite a more expensive guess but never the reverse.
   source    String
   createdAt DateTime @default(now())
@@ -464,7 +469,7 @@ model ProductAttribute {
   @@index([productId])
 }
 
-// ── Balance snapshots ─────────────────────────────────────────────────────────
+// â”€â”€ Balance snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Point-in-time reading of a provider's remaining balance.
 ///
@@ -472,7 +477,7 @@ model ProductAttribute {
 /// has to be kept in step with the provider's pricing page by hand, and cached
 /// input tokens bill at a different rate from fresh ones, which no token total
 /// distinguishes. The balance is the provider's own arithmetic and needs no
-/// rate at all — the drop between two readings IS the money spent.
+/// rate at all â€” the drop between two readings IS the money spent.
 ///
 /// Snapshots are taken whenever the balance is fetched (the sidebar widget, the
 /// pre-flight availability check), throttled so a busy screen cannot fill the
@@ -481,7 +486,7 @@ model ProductAttribute {
 /// recharge mid-window cannot hide the spend around it.
 model BalanceSnapshot {
   id           String   @id @default(cuid())
-  /// kimi — the only provider that reports a money balance; Keepa and
+  /// kimi â€” the only provider that reports a money balance; Keepa and
   /// Synccentric report quotas, which the usage table already measures exactly.
   service      String
   /// Cents, to keep the arithmetic exact. Negative when the account is overdrawn.
@@ -495,21 +500,53 @@ model BalanceSnapshot {
 /// as a SPECIFIC person rather than as the application.
 ///
 /// That distinction is the whole design. A single shared secret would make
-/// every caller equally powerful and quietly undo the scoping in authz.ts —
+/// every caller equally powerful and quietly undo the scoping in authz.ts â€”
 /// a member would see their colleagues' templates, a team admin another
 /// team's projects. A token belongs to one user, and every MCP tool builds
 /// its actor from that user, so Claude can see exactly what its owner can
 /// see in the browser and nothing more.
 ///
 /// Only the hash is stored. The token itself is shown once, at creation, and
-/// is unrecoverable afterwards — a database copy must not be a set of live
+/// is unrecoverable afterwards â€” a database copy must not be a set of live
 /// credentials, which matters here because backups now leave the server.
+/// Permission to upload ONE vendor file, once, soon.
+///
+/// A spreadsheet cannot travel through an MCP tool call: the argument is JSON
+/// that the model writes, so a 500KB workbook would have to be emitted as
+/// ~670KB of base64 character by character â€” and an .xlsx is a zip, so one
+/// wrong character corrupts the archive rather than degrading it. The file
+/// has to go from the machine that holds it straight to Mercato, never
+/// through the model.
+///
+/// So Mercato issues a ticket instead. The URL that carries it IS a
+/// credential â€” it creates a project as the person who asked for it â€” which
+/// is why it is single-use, short-lived, and why the project's name and
+/// marketplace are fixed HERE rather than read from whoever uploads: a
+/// leaked ticket must not become a way to put arbitrary data anywhere.
+model UploadTicket {
+  tokenHash   String    @id
+  userId      String
+  name        String
+  marketplace String
+  /// Walmart new-listing projects skip verification; fixed at issue time for
+  /// the same reason the name is.
+  isNewListing Boolean  @default(false)
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 /// A client that registered itself to ask for access (RFC 7591).
 ///
 /// Registration is open, because that is what dynamic client registration
 /// means and what lets claude.ai connect without anybody configuring a client
 /// id by hand. Open registration is safe only because registering grants
-/// NOTHING — the consent screen is the gate, and `name` is shown there as the
+/// NOTHING â€” the consent screen is the gate, and `name` is shown there as the
 /// client's own unverified claim, since it is attacker-controlled and is
 /// exactly how a phishing connector would try to look like a real one.
 model OAuthClient {
@@ -534,7 +571,7 @@ model OAuthCode {
   scope         String
   /// PKCE S256 challenge. The verifier never touches the database.
   codeChallenge String
-  /// RFC 8707 — which server the resulting token may be used at.
+  /// RFC 8707 â€” which server the resulting token may be used at.
   resource      String?
   expiresAt     DateTime
   /// Redemption is single-use. A second attempt means the code leaked, and
@@ -549,7 +586,7 @@ model OAuthCode {
 
 /// Standing permission from one person to one client.
 ///
-/// This is what an admin revokes when somebody leaves — the thing personal
+/// This is what an admin revokes when somebody leaves â€” the thing personal
 /// tokens could not offer, because only their owner could revoke them.
 model OAuthGrant {
   id          String    @id @default(cuid())
@@ -573,7 +610,7 @@ model OAuthGrant {
 
 /// A live access token. Opaque and looked up, not a JWT.
 ///
-/// A signed token needs no database read, but revoking one needs a denylist —
+/// A signed token needs no database read, but revoking one needs a denylist â€”
 /// and revocation is the entire point of this work. The MCP endpoint already
 /// does one lookup per call for personal tokens, so this costs nothing new.
 model OAuthToken {
@@ -590,19 +627,19 @@ model OAuthToken {
 
 /// One tool call over MCP.
 ///
-/// Two jobs. It is the audit trail — these tools can change a live catalogue
+/// Two jobs. It is the audit trail â€” these tools can change a live catalogue
 /// and nothing else records who did what, when, through which token. And it
 /// is the usage record: who is actually using Claude against Mercato, how
 /// long their sessions run, and which projects they work on.
 ///
 /// What it deliberately does NOT hold is the conversation. Mercato sees the
-/// calls Claude makes, never what anyone typed or what Claude replied — that
+/// calls Claude makes, never what anyone typed or what Claude replied â€” that
 /// lives in Claude, not here. The tool trail says what a session was ABOUT;
 /// it is not a transcript, and nobody should be told otherwise.
 model McpCall {
   id      String @id @default(cuid())
   userId  String
-  /// Which token, so one laptop's activity can be told from another's — and
+  /// Which token, so one laptop's activity can be told from another's â€” and
   /// so a leaked token's whole history is visible after it is revoked.
   tokenId String
   /// From the Mcp-Session-Id header when the client sends one. Null otherwise,
@@ -614,7 +651,7 @@ model McpCall {
   ok        Boolean @default(true)
   error     String?
   durationMs Int    @default(0)
-  /// Rows a write tool changed. Null for reads — which is also how the two
+  /// Rows a write tool changed. Null for reads â€” which is also how the two
   /// are told apart without trusting a name prefix.
   rows      Int?
   createdAt DateTime @default(now())
@@ -631,7 +668,7 @@ model McpToken {
   tokenHash  String    @unique
   /// First few characters, for telling two tokens apart in the UI.
   prefix     String
-  /// What the person called it — "My laptop", "Claude desktop".
+  /// What the person called it â€” "My laptop", "Claude desktop".
   name       String
   createdAt  DateTime  @default(now())
   /// Updated on use, so an unused token is visible as such and can be culled.
