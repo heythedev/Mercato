@@ -661,6 +661,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // The option lists the templates actually accept, so the gap report can
       // show them to whoever is asked to supply a value.
       let dropdownOptions: Record<string, string[]> = {};
+  // The Buffer-returning generators (Walmart's single-template path, and the
+  // fallback) report through an out-param rather than a return value, so the
+  // same collector reaches every marketplace, not only the category path.
+  const dropdownSink = new Map<string, string[]>();
       // Whether the AI could be reached at all. An empty required cell means
       // two very different things depending on this: "nothing can answer this
       // column" (offer a default) or "the AI had no credit so nothing tried"
@@ -676,7 +680,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // a manually chosen template instead of auto-matching by category.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink) as Buffer;
       } else if (isBestBuy) {
         // ── Best Buy: uploaded templates win per CATEGORY, Mirakl fills the rest ──
         //
@@ -754,7 +758,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // No category-splitting needed since a single template covers the whole catalogue.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink) as Buffer;
       } else if (!allTemplates.length) {
         // No templates → flat export (one file, standard columns)
         zipBuffer = await generateFlatExport(products, projectMeta.marketplace) as Buffer;
@@ -765,7 +769,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         unfilledColumns = unfilledByColumn(result.complianceIssues);
         dropdownOptions = { ...dropdownOptions, ...result.dropdownOptions };
       } else {
-        zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace) as Buffer;
+        zipBuffer = await generateExportZip(products, allTemplates as unknown as ExportTemplate[], projectMeta.marketplace, dropdownSink) as Buffer;
       }
 
       if (sliceGroups) {
@@ -795,7 +799,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           missingTemplateCategories,
           unfilled: unfilledColumns,
           aiUnavailable,
-          dropdowns: dropdownOptions,
+          dropdowns: { ...Object.fromEntries(dropdownSink), ...dropdownOptions },
         });
         await markGroupsDone(jobId, sliceGroups);
         return;
@@ -813,7 +817,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         extension: payload.extension,
         contentType: payload.contentType,
         missingTemplateCategories,
-        unfilledRequired: { columns: unfilledColumns, aiUnavailable, recorded: true, dropdowns: dropdownOptions },
+        unfilledRequired: {
+          columns: unfilledColumns,
+          aiUnavailable,
+          recorded: true,
+          dropdowns: { ...Object.fromEntries(dropdownSink), ...dropdownOptions },
+        },
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

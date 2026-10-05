@@ -1260,6 +1260,13 @@ export async function generateSingleTemplateExport(
   template: TemplateRow,
   marketplace: string,
   fileData?: Buffer | null,
+  /**
+   * Collects the dropdown columns and their options, as fillTemplateXlsx
+   * reports them. Optional, so existing callers are unaffected; supplied by
+   * the export route so EVERY marketplace records what its template accepts,
+   * not only the ones routed through generateCategoryZip.
+   */
+  dropdownOptions?: Map<string, string[]>,
 ): Promise<Buffer> {
   const zip = new JSZip();
   const eligible = eligibleProducts(products, marketplace);
@@ -1277,7 +1284,8 @@ export async function generateSingleTemplateExport(
     zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns));
   } else if (fileData) {
     // Preserve original template formatting, dropdowns, validations
-    const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace, undefined, await loadExportDefaults(marketplace).catch(() => new Map()));
+    const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace, undefined,
+      await loadExportDefaults(marketplace).catch(() => new Map()), new Map(), [], dropdownOptions);
     zip.file(`${fileName}.xlsx`, buffer);
   } else {
     const buffer = await createXlsxFromScratch(withCategoryFallback, columns, template.name);
@@ -1293,6 +1301,8 @@ export async function generateExportZip(
   products: Product[],
   templates: ExportTemplate[],
   marketplace = "amazon",
+  /** As generateSingleTemplateExport — the options this template accepts. */
+  dropdownOptions?: Map<string, string[]>,
 ): Promise<Buffer> {
   const zip = new JSZip();
   const eligible = eligibleProducts(products, marketplace);
@@ -1309,7 +1319,8 @@ export async function generateExportZip(
     if (template.fileFormat === "csv") {
       zip.file(`${fileName}.csv`, generateCsv(filtered, columns));
     } else if (fileData) {
-      const buffer = await fillTemplateXlsx(filtered, columns, fileData, marketplace, undefined, await loadExportDefaults(marketplace).catch(() => new Map()));
+      const buffer = await fillTemplateXlsx(filtered, columns, fileData, marketplace, undefined,
+        await loadExportDefaults(marketplace).catch(() => new Map()), new Map(), [], dropdownOptions);
       zip.file(`${fileName}.xlsx`, buffer);
     } else {
       const buffer = await createXlsxFromScratch(filtered, columns, template.name);
