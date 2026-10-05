@@ -18,6 +18,9 @@ import {
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
 import { toUnfilledReport } from "@/lib/export/job-store";
 import { templateRequirements, type TemplateRequirements } from "@/lib/export/zip";
+import { buildDownloadName } from "@/lib/export/filename";
+import { hashSecret, newSecret } from "@/lib/oauth/core";
+import { baseUrl } from "@/lib/oauth/metadata";
 import { loadProductAttributes, storedAttribute } from "@/lib/export/product-attributes";
 import { defaultKey } from "@/lib/export/defaults";
 
@@ -94,6 +97,10 @@ function vendorHints(vendorData: unknown): Record<string, string> {
   }
   return out;
 }
+
+/** Long enough to click, or to run a curl; short enough that a link left in
+ *  a transcript stops working before it matters. */
+const DOWNLOAD_TICKET_TTL_MS = 15 * 60 * 1000;
 
 export const TOOLS: McpTool[] = [
   {
@@ -525,6 +532,84 @@ export const TOOLS: McpTool[] = [
           tokensOut: n(r.output),
           shareOfTokens: `${Math.round(((n(r.input) + n(r.output)) / totalTokens) * 100)}%`,
         })),
+      });
+    },
+  },
+
+  {
+    name: "get_export_download",
+    title: "A link to download the finished export",
+    description:
+      "A short-lived link for the project's most recent finished export. Give the person the link, or "
+      + "fetch it yourself with the curl command. The file never passes through the conversation.",
+    schema: {
+      projectId: z.string(),
+    },
+    async run(actor, a) {
+      const id = String(a.projectId);
+      const project = await prisma.project.findUnique({
+        where: { id },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
+      });
+      if (!project) return ok({ error: "No such project" });
+      if (!canReadProject(actor, project)) return ok({ error: "Not visible to you" });
+
+      const job = await prisma.exportJob.findFirst({
+        where: { projectId: id, status: "done" },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, extension: true, updatedAt: true, unfilledRequired: true },
+      });
+      if (!job) {
+        return ok({ error: "No finished export for this project yet. Run one first with run_export." });
+      }
+
+      // Only the length is wanted, but Postgres has to hand over the column
+      // to give it. Worth one read: a link to a payload that has been swept
+      // away is worse than saying so now.
+      const row = await prisma.exportJob.findUnique({ where: { id: job.id }, select: { zip: true } });
+      const size = row?.zip ? (row.zip as unknown as Uint8Array).byteLength : 0;
+      if (!size) return ok({ error: "That export's payload is gone — run the export again." });
+
+      const token = newSecret("mrc_d_");
+      const expiresAt = new Date(Date.now() + DOWNLOAD_TICKET_TTL_MS);
+      // Clear this person’s dead tickets on the way past, so the table
+      // does not grow a row per request for ever. Bounded to their own.
+      await prisma.downloadTicket.deleteMany({
+        where: { userId: actor.id, expiresAt: { lt: new Date() } },
+      }).catch(() => {});
+      await prisma.downloadTicket.create({
+        data: { tokenHash: hashSecret(token), userId: actor.id, jobId: job.id, expiresAt },
+      });
+
+      const base = await baseUrl();
+      const url = `${base}/api/exports/download?t=${token}`;
+      const filename = buildDownloadName({
+        projectName: project.name,
+        marketplace: project.marketplace,
+        extension: job.extension ?? "zip",
+      });
+      const report = toUnfilledReport(job.unfilledRequired);
+
+      return ok({
+        url,
+        filename,
+        sizeBytes: size,
+        exportFinished: job.updatedAt,
+        expiresAt,
+        curl: `curl -L -o "${filename}" "${url}"`,
+        // Said here because somebody is about to decide whether to paste this
+        // link somewhere, and that choice depends on knowing what it is.
+        note:
+          "Treat the link as a password: anyone holding it can fetch this export until it expires. "
+          + "It is good for a few downloads and then stops.",
+        ...(report.columns.length
+          ? {
+              warning:
+                `${report.columns.length} required column(s) shipped empty in this export`
+                + (report.aiUnavailable ? " — the AI account was unreachable when it ran" : "")
+                + ". Call next_export_gaps to see which, and submit_export_values to fill them.",
+            }
+          : {}),
       });
     },
   },

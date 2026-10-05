@@ -21,6 +21,27 @@ import { prisma } from "../src/lib/db";
 
 const TABLES: { name: string; column?: string; statements: string[] }[] = [
   {
+    name: "DownloadTicket",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS "DownloadTicket" (
+         "tokenHash" TEXT NOT NULL,
+         "userId" TEXT NOT NULL,
+         "jobId" TEXT NOT NULL,
+         "uses" INTEGER NOT NULL DEFAULT 0,
+         "maxUses" INTEGER NOT NULL DEFAULT 5,
+         "expiresAt" TIMESTAMP(3) NOT NULL,
+         "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         CONSTRAINT "DownloadTicket_pkey" PRIMARY KEY ("tokenHash")
+       )`,
+      `CREATE INDEX IF NOT EXISTS "DownloadTicket_userId_idx" ON "DownloadTicket"("userId")`,
+      `CREATE INDEX IF NOT EXISTS "DownloadTicket_expiresAt_idx" ON "DownloadTicket"("expiresAt")`,
+      `DO $$ BEGIN
+         ALTER TABLE "DownloadTicket" ADD CONSTRAINT "DownloadTicket_userId_fkey"
+           FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
     name: "UploadTicket",
     statements: [
       `CREATE TABLE IF NOT EXISTS "UploadTicket" (

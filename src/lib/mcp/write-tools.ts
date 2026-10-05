@@ -157,6 +157,11 @@ export const WRITE_TOOLS: McpTool[] = [
 
       const token = newSecret("mrc_u_");
       const expiresAt = new Date(Date.now() + UPLOAD_TICKET_TTL_MS);
+      // Clear this person’s dead tickets on the way past, so the table
+      // does not grow a row per request for ever. Bounded to their own.
+      await prisma.uploadTicket.deleteMany({
+        where: { userId: actor.id, expiresAt: { lt: new Date() } },
+      }).catch(() => {});
       await prisma.uploadTicket.create({
         data: {
           tokenHash: hashSecret(token),

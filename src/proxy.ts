@@ -38,6 +38,10 @@ export const proxy = auth((req) => {
   // upload with an HTML page and a 200, the same failure that made /api/mcp
   // look unreachable.
   const isTicketUpload = nextUrl.pathname === "/api/projects/upload";
+  // The ticketed export download, for the same reason as the upload: the
+  // ticket IS the credential, and a redirect to /login would answer a file
+  // request with an HTML page and a 200.
+  const isTicketDownload = nextUrl.pathname === "/api/exports/download";
   // The design-system page: static markup, hardcoded sample data, no query and
   // no session. It exists to be openable when the database is not â€” which is
   // exactly when it is most needed, and exactly when signing in cannot work,
@@ -45,7 +49,7 @@ export const proxy = auth((req) => {
   // only; UI_PREVIEW_ENABLED shows it on a deployment while reviewing.
   const isUiPreview = flags.uiPreview() && nextUrl.pathname.startsWith("/ui-preview");
 
-  if (isApiAuth || isUiPreview || isMcp || isOauthDiscovery || isOauthEndpoint || isOauthConsent || isTicketUpload) return;
+  if (isApiAuth || isUiPreview || isMcp || isOauthDiscovery || isOauthEndpoint || isOauthConsent || isTicketUpload || isTicketDownload) return;
   if (isAuthPage || isLanding) {
     // Public pages â€” but signed-in users go straight to the app.
     if (isLoggedIn) return Response.redirect(new URL("/projects", nextUrl));

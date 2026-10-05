@@ -66,6 +66,7 @@ model User {
   mcpTokens McpToken[]
   oauthGrants OAuthGrant[]
   uploadTickets UploadTicket[]
+  downloadTickets DownloadTicket[]
   team      Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
   @@index([teamId])
@@ -523,6 +524,34 @@ model BalanceSnapshot {
 /// is why it is single-use, short-lived, and why the project's name and
 /// marketplace are fixed HERE rather than read from whoever uploads: a
 /// leaked ticket must not become a way to put arbitrary data anywhere.
+/// A short-lived link for fetching a finished export.
+///
+/// A ZIP cannot travel through a tool call any more than a spreadsheet can:
+/// the result is text the model relays, and a multi-megabyte archive would be
+/// re-emitted byte by byte. So Mercato hands out a link and the bytes go from
+/// here straight to whoever asked, never through the model.
+///
+/// The URL that carries it IS a credential — it fetches the export with no
+/// session — which is why it expires quickly, is capped, and is tied to ONE
+/// job rather than to the project.
+model DownloadTicket {
+  tokenHash String   @id
+  userId    String
+  /// The ExportJob this link may fetch, and nothing else.
+  jobId     String
+  /// Bounded rather than single-use: a browser prefetch or a retried click
+  /// must not burn a link somebody is about to use.
+  uses      Int      @default(0)
+  maxUses   Int      @default(5)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
 model UploadTicket {
   tokenHash   String    @id
   userId      String
