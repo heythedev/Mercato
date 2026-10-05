@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { neverInventColumn } from "@/lib/ai/match-dropdown";
 import { normalizeKey } from "@/lib/export/zip";
 import { defaultKey } from "@/lib/export/defaults";
+import { columnsAnsweredByProduct } from "./tools";
 
 /**
  * The columns no model may answer, checked the way the MCP door checks them.
@@ -42,4 +43,49 @@ describe("columns barred from every model", () => {
       expect(barred(column)).toBe(false);
     },
   );
+});
+
+/**
+ * And the columns nobody should be ASKED for, because the product already
+ * answers them.
+ *
+ * Seeding the gap list from the requirement matrix made the tool work before
+ * an export existed, and in the same move put Name, Brand, Category and Offer
+ * Price back on the list — columns the export fills from the product row and
+ * the vendor sheet without consulting anything. A model asked for the name of
+ * a product it can see the name of will write one.
+ */
+describe("columns the product's own record answers", () => {
+  const product = {
+    name: "Ashley Larkinhurst Sofa",
+    brand: "Ashley",
+    description: "A faux-leather sofa.",
+    marketplaceCategory: "Mathis Home/Furniture/Sofas",
+    price: 799.99,
+    vendorData: { "Assembly Required": "Yes", "Finish Color": "", Width: "89" },
+  };
+
+  const answered = (column: string) => columnsAnsweredByProduct(product).has(normalizeKey(column));
+
+  it.each(["Name", "Product Name", "Brand", "Category", "Short Description", "Offer Price"])(
+    "does not ask for %s",
+    (column) => expect(answered(column)).toBe(true),
+  );
+
+  it("counts a column the vendor sheet filled", () => {
+    expect(answered("Assembly Required")).toBe(true);
+  });
+
+  it("still asks when the vendor sheet left the column blank", () => {
+    expect(answered("Finish Color")).toBe(false);
+  });
+
+  it.each(["Material", "Style", "Wood Type"])("still asks for %s", (column) =>
+    expect(answered(column)).toBe(false),
+  );
+
+  it("asks for everything when the product carries nothing", () => {
+    const bare = { name: "", brand: null, description: null, marketplaceCategory: null, price: null, vendorData: null };
+    expect(columnsAnsweredByProduct(bare).size).toBe(0);
+  });
 });

@@ -99,6 +99,49 @@ function vendorHints(vendorData: unknown): Record<string, string> {
   return out;
 }
 
+/**
+ * Columns the product's OWN record already answers, which nobody should be
+ * asked for.
+ *
+ * The requirement matrix lists every column a category requires, and plenty of
+ * those are data rather than judgement: Name, Brand, Category, Short
+ * Description, Offer Price. The export fills them from the product row and the
+ * vendor file before any model is consulted — but seeding the questions from
+ * the matrix put them straight back on the list, and a model handed a product
+ * called "Ashley Larkinhurst Sofa" and asked for its Name will happily write
+ * one. Measured against the live Mathis project the first time this ran:
+ * twelve columns asked of one product, seven of them already answered.
+ *
+ * Checked per product, because what the vendor file carries varies row by row
+ * — which is the reason the export checks it per row too.
+ */
+export function columnsAnsweredByProduct(p: {
+  name?: string | null;
+  brand?: string | null;
+  description?: string | null;
+  marketplaceCategory?: string | null;
+  price?: number | null;
+  vendorData?: unknown;
+}): Set<string> {
+  const keys = new Set<string>();
+  const add = (value: unknown, ...aliases: string[]) => {
+    const filled = typeof value === "string" ? value.trim() !== "" : value != null;
+    if (filled) for (const a of aliases) keys.add(normalizeKey(a));
+  };
+  add(p.name, "name", "title", "product name", "product title", "item name");
+  add(p.brand, "brand", "brand name", "manufacturer");
+  add(p.marketplaceCategory, "category", "product category");
+  add(p.description, "description", "short description", "long description", "product description");
+  add(p.price, "price", "offer price", "list price", "retail price");
+  // Whatever the vendor sheet carried for this row answers its own column.
+  if (p.vendorData && typeof p.vendorData === "object") {
+    for (const [k, v] of Object.entries(p.vendorData as Record<string, unknown>)) {
+      if (v != null && String(v).trim() !== "") keys.add(normalizeKey(k));
+    }
+  }
+  return keys;
+}
+
 /** Long enough to click, or to run a curl; short enough that a link left in
  *  a transcript stops working before it matters. */
 const DOWNLOAD_TICKET_TTL_MS = 15 * 60 * 1000;
@@ -659,7 +702,7 @@ export const TOOLS: McpTool[] = [
 
       const products = await prisma.product.findMany({
         where: { projectId: id, marketplaceCategory: { not: null }, NOT: { marketplaceCategory: "Uncategorized" } },
-        select: { id: true, name: true, description: true, brand: true, vendorSku: true, vendorData: true, marketplaceCategory: true },
+        select: { id: true, name: true, description: true, brand: true, vendorSku: true, price: true, vendorData: true, marketplaceCategory: true },
         orderBy: { id: "asc" },
         take: 500,
       });
@@ -723,6 +766,7 @@ export const TOOLS: McpTool[] = [
       const forAPerson = (column: string): boolean =>
         neverInventColumn(normalizeKey(column)) || neverInventColumn(defaultKey(column));
 
+
       // The vocabulary already in use for each column, across this
       // marketplace. Not the template's own dropdown — that lives inside the
       // workbook — but real values Mercato has accepted before, which is a
@@ -746,7 +790,8 @@ export const TOOLS: McpTool[] = [
         const wanted = requiredFor(p.marketplaceCategory).filter(
           (c) => !wantOnly || defaultKey(c) === wantOnly,
         );
-        const unanswered = wanted.filter((c) => !storedAttribute(attrs, c));
+        const own = columnsAnsweredByProduct(p);
+        const unanswered = wanted.filter((c) => !storedAttribute(attrs, c) && !own.has(normalizeKey(c)));
         for (const c of unanswered.filter(forAPerson)) {
           personColumns.set(c, (personColumns.get(c) ?? 0) + 1);
         }
