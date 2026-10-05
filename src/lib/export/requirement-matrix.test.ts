@@ -5,6 +5,7 @@ import {
   generateCategoryZip,
   unfilledByColumn,
   weightLbFromText,
+  templateRequirements,
   type TemplateRow,
 } from "./zip";
 
@@ -299,5 +300,54 @@ describe("rolling compliance gaps up per column", () => {
     // tell an admin more rows are affected than there are.
     const dupe = [{ sku: "C-1", name: "x", category: "y", missingRequired: ["PFAS", "PFAS"] }];
     expect(unfilledByColumn(dupe)).toEqual([{ label: "PFAS", rows: 1 }]);
+  });
+});
+
+/**
+ * Asking the template what a category needs, instead of running an export to
+ * find out.
+ *
+ * `requires` answers about a column somebody already named, so the only way to
+ * learn what a category demanded was to export, read back which cells came out
+ * empty, fill them, and export again. At $0.00 of AI credit the first of those
+ * runs exists purely to generate the question list, and the file it hands the
+ * client is the wrong one. The matrix knew the answer the whole time.
+ */
+describe("requiredColumns — what a category needs, before anything is built", () => {
+  let req: NonNullable<Awaited<ReturnType<typeof templateRequirements>>>;
+
+  beforeAll(async () => {
+    const parsed = await templateRequirements(await buildTemplate(), "mathis");
+    if (!parsed) throw new Error("matrix did not parse");
+    req = parsed;
+  });
+
+  it("lists exactly the REQUIRED columns for a category", () => {
+    expect(req.requiredColumns("Mathis Home/Decor/Vases").sort()).toEqual(
+      ["Category", "Color", "Made in USA", "Name", "Shop SKU"],
+    );
+  });
+
+  it("differs per category, the way the matrix does", () => {
+    const pillows = req.requiredColumns("Mathis Home/Decor/Pillows");
+    // Pillows: Fabric Color is REQUIRED and Color is grey; Vases is the reverse.
+    expect(pillows).toContain("Fabric Color");
+    expect(pillows).not.toContain("Color");
+  });
+
+  it("names columns the way the template labels them, not by field code", () => {
+    const cols = req.requiredColumns("Mathis Home/Decor/Pillows");
+    expect(cols).toContain("Made in USA");
+    expect(cols).not.toContain("MP_MADE_IN_USA");
+  });
+
+  it("agrees with requires(), so the two cannot drift", () => {
+    for (const cat of ["Mathis Home/Decor/Vases", "Mathis Home/Decor/Pillows"]) {
+      for (const col of req.requiredColumns(cat)) expect(req.requires(cat, col)).toBe(true);
+    }
+  });
+
+  it("says nothing about a category the matrix does not cover", () => {
+    expect(req.requiredColumns("Mathis Home/Outdoor/Sheds")).toEqual([]);
   });
 });

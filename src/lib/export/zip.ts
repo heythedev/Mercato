@@ -914,6 +914,15 @@ export type TemplateRequirements = {
   pathFor(rawCategory: string): string;
   /** True when this column is REQUIRED for that category. */
   requires(rawCategory: string, column: string): boolean;
+  /**
+   * Every column this category REQUIRES, labelled as the template spells it.
+   *
+   * `requires` can only answer about a column somebody already named, which
+   * meant the only way to learn what a category needs was to run an export and
+   * read back what came out empty. That is fine as a report and useless as a
+   * plan: it costs a full run, and the file that run produces is the wrong one.
+   */
+  requiredColumns(rawCategory: string): string[];
 };
 
 export async function templateRequirements(
@@ -984,6 +993,20 @@ export async function templateRequirements(
       const cat = pathFor(rawCategory);
       if (!cat) return false;
       return matrix.byAttr.get(normalizeKey(column))?.get(cat) === "REQUIRED";
+    },
+    requiredColumns(rawCategory: string): string[] {
+      const cat = pathFor(rawCategory);
+      if (!cat) return [];
+      // byAttr is keyed by BOTH the field code and the label, each pointing at
+      // the same statuses, so the labels are collected through specByAttr and
+      // deduped — otherwise every column would come back twice, once under a
+      // code no human uses.
+      const out = new Set<string>();
+      for (const [nk, byCat] of matrix.byAttr) {
+        if (byCat.get(cat) !== "REQUIRED") continue;
+        out.add(matrix.specByAttr.get(nk)?.label ?? nk);
+      }
+      return [...out];
     },
   };
 }
@@ -4434,7 +4457,7 @@ function evalIndirectConcat(formula: string): string {
   return parts.map((p) => p.slice(1, -1)).join("");
 }
 
-function normalizeKey(s: string): string {
+export function normalizeKey(s: string): string {
   return s.toLowerCase()
     .replace(/\s*\([^)]*\)\s*/g, "")    // strip parenthetical annotations: (in), (Y/N), (lbs), etc.
     .replace(/#/g, "")                   // strip "#" — "Style #" → "style", "Item #" → "item"

@@ -17,12 +17,13 @@ import {
 } from "@/lib/categorize/taxonomy";
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
 import { toUnfilledReport } from "@/lib/export/job-store";
-import { templateRequirements, type TemplateRequirements } from "@/lib/export/zip";
+import { normalizeKey, templateRequirements, type TemplateRequirements } from "@/lib/export/zip";
 import { buildDownloadName } from "@/lib/export/filename";
 import { hashSecret, newSecret } from "@/lib/oauth/core";
 import { baseUrl } from "@/lib/oauth/metadata";
 import { loadProductAttributes, storedAttribute } from "@/lib/export/product-attributes";
-import { defaultKey } from "@/lib/export/defaults";
+import { defaultFor, defaultKey, loadExportDefaults } from "@/lib/export/defaults";
+import { neverInventColumn } from "@/lib/ai/match-dropdown";
 
 /**
  * What Claude may do in Mercato, on behalf of one person.
@@ -616,11 +617,13 @@ export const TOOLS: McpTool[] = [
 
   {
     name: "next_export_gaps",
-    title: "Required cells the export could not fill",
+    title: "Required cells nothing has answered yet",
     description:
-      "Products whose required template columns shipped empty, with each product's own data to answer from " +
-      "and the values already in use for that column. Answer with submit_export_values and the next export " +
-      "fills those cells WITHOUT any AI call — Mercato reads stored values before it asks a model.",
+      "Products whose required template columns have no value, with each product's own data to answer from " +
+      "and the values already in use for that column. Works BEFORE the first export — the columns come from " +
+      "the template's own requirement matrix — so answer these with submit_export_values and the export runs " +
+      "once and comes out right, with no AI call and no credit needed. Also lists the required columns no " +
+      "model may answer, which need a person.",
     schema: {
       projectId: z.string(),
       column: z.string().optional().describe("One column only, e.g. Material"),
@@ -635,26 +638,24 @@ export const TOOLS: McpTool[] = [
       if (!project) return ok({ error: "No such project" });
       if (!canReadProject(actor, project)) return ok({ error: "Not visible to you" });
 
-      // Which columns actually shipped empty — recorded by the last export
-      // rather than guessed, so this reflects a real run of the real filler.
+      // What the last export could not fill, if there has been one. This is
+      // measured rather than predicted, and it carries the dropdown options,
+      // so it is still read — but it is no longer what DECIDES the questions.
+      //
+      // It used to be. That made an export the only way to discover a gap:
+      // run at $0.00 credit, watch Style, Material and Finish Color ship
+      // blank, read the list back, fill it, run again. Two runs, the first of
+      // them wrong, to answer questions the template could have been asked
+      // directly. The requirement matrix already knows what each category
+      // demands before anything is built.
       const job = await prisma.exportJob.findFirst({
         where: { projectId: id, status: "done" },
         orderBy: { updatedAt: "desc" },
         select: { unfilledRequired: true, updatedAt: true },
       });
       const report = toUnfilledReport(job?.unfilledRequired);
-      let columns = report.columns.map((c) => c.label);
-      if (a.column) {
-        const want = defaultKey(String(a.column));
-        columns = columns.filter((c) => defaultKey(c) === want);
-      }
-      if (!columns.length) {
-        return ok({
-          error: job
-            ? "That export reported no unfilled required columns."
-            : "No finished export yet — run one first, and it will record what it could not fill.",
-        });
-      }
+      const reportedColumns = report.columns.map((c) => c.label);
+      const wantOnly = a.column ? defaultKey(String(a.column)) : null;
 
       const products = await prisma.product.findMany({
         where: { projectId: id, marketplaceCategory: { not: null }, NOT: { marketplaceCategory: "Uncategorized" } },
@@ -691,12 +692,36 @@ export const TOOLS: McpTool[] = [
       }
       // A category is covered by exactly one of these templates in practice, so
       // the first matrix that knows the category is the one that governs it.
-      const requiredFor = (category: string | null, cols: string[]): string[] => {
-        if (!matrices.length || !category) return cols;
+      //
+      // With a matrix the required columns come FROM it, which is what lets
+      // this run before any export. Without one (Walmart, Temu) there is no
+      // opinion to narrow by and the last export's report is all there is —
+      // those marketplaces still need a run first, and are told so.
+      const requiredFor = (category: string | null): string[] => {
+        if (!category) return reportedColumns;
         const owner = matrices.find((m) => m.pathFor(category) !== "");
-        if (!owner) return cols;
-        return cols.filter((c) => owner.requires(category, c));
+        if (!owner) return reportedColumns;
+        const fromMatrix = owner.requiredColumns(category);
+        return fromMatrix.length ? fromMatrix : reportedColumns.filter((c) => owner.requires(category, c));
       };
+
+      /**
+       * Columns a model must not answer, split out rather than dropped.
+       *
+       * These are the same columns Mercato's own fill refuses — identifiers,
+       * measurements, and the seller's declarations — and the reason is the
+       * reason: a guessed barcode attaches the listing to somebody else's
+       * product, a guessed Proposition 65 answer is a false legal statement
+       * published under the client's name. Claude guessing them instead of
+       * Kimi guessing them is the same wrong answer from a different model.
+       *
+       * They are still REQUIRED, so staying silent about them just moves the
+       * blank cell somewhere nobody is looking. They come back as work for a
+       * person: a declaration is stated once with set_export_default, and a
+       * measurement comes from the catalogue lookup or not at all.
+       */
+      const forAPerson = (column: string): boolean =>
+        neverInventColumn(normalizeKey(column)) || neverInventColumn(defaultKey(column));
 
       // The vocabulary already in use for each column, across this
       // marketplace. Not the template's own dropdown — that lives inside the
@@ -713,11 +738,20 @@ export const TOOLS: McpTool[] = [
 
       const gaps: unknown[] = [];
       const cap = Math.min(Number(a.limit ?? 25), 60);
+      // Counted across the whole catalogue, not just the page of products
+      // handed back, so "who needs a person" is a total and not a sample.
+      const personColumns = new Map<string, number>();
       for (const p of products) {
-        if (gaps.length >= cap) break;
         const attrs = stored.get(p.id);
-        const wanted = requiredFor(p.marketplaceCategory, columns);
-        const missing = wanted.filter((c) => !storedAttribute(attrs, c));
+        const wanted = requiredFor(p.marketplaceCategory).filter(
+          (c) => !wantOnly || defaultKey(c) === wantOnly,
+        );
+        const unanswered = wanted.filter((c) => !storedAttribute(attrs, c));
+        for (const c of unanswered.filter(forAPerson)) {
+          personColumns.set(c, (personColumns.get(c) ?? 0) + 1);
+        }
+        if (gaps.length >= cap) continue;
+        const missing = unanswered.filter((c) => !forAPerson(c));
         if (!missing.length) continue;
         gaps.push({
           productId: p.id,
@@ -731,21 +765,52 @@ export const TOOLS: McpTool[] = [
         });
       }
 
+      // Which declarations already have a stated value, so a person is only
+      // asked for what is actually outstanding.
+      const defaults = await loadExportDefaults(project.marketplace, actor.teamId).catch(
+        () => new Map<string, string>(),
+      );
+      const needsAPerson = [...personColumns]
+        .map(([column, rows]) => ({ column, rows, currentDefault: defaultFor(defaults, column) || null }))
+        .filter((c) => !c.currentDefault)
+        .sort((a2, b2) => b2.rows - a2.rows);
+
+      if (!gaps.length && !needsAPerson.length) {
+        return ok({
+          project: { id: project.id, name: project.name, marketplace: project.marketplace },
+          products: [],
+          note:
+            matrices.length || job
+              ? "Every required column for these products is already answered. Run the export."
+              : "No requirement matrix for this marketplace and no finished export yet — run one first and "
+                + "it will record what it could not fill.",
+        });
+      }
+
       return ok({
         project: { id: project.id, name: project.name, marketplace: project.marketplace },
+        // Derived from the templates themselves when they carry a matrix, so
+        // this answers before the first export rather than after it.
+        source: matrices.length ? "template requirement matrix" : "the last finished export",
         reportedBy: job ? `the export finished ${job.updatedAt.toISOString()}` : null,
         columnsStillEmpty: report.columns,
         scopedByTemplate: matrices.length > 0,
         // The columns that accept only a fixed list, and what that list is.
         // Recorded by the export itself, so these are the values it will
         // take verbatim — anything else is dropped on the way into the file.
-        allowedValues: Object.fromEntries(
-          Object.entries(report.dropdowns ?? {}).filter(([label]) =>
-            columns.some((c) => defaultKey(c) === defaultKey(label)),
-          ),
-        ),
+        allowedValues: report.dropdowns ?? {},
         valuesAlreadyInUse: Object.fromEntries([...inUse].map(([k, v]) => [k, [...v]])),
         products: gaps,
+        // Required, outstanding, and barred from every model — Mercato's and
+        // yours alike. Do not answer these in submit_export_values; it refuses
+        // them for the same reason the export does.
+        needsAPerson,
+        needsAPersonNote: needsAPerson.length
+          ? "Required columns no model may answer. A declaration (Proposition 65, PFAS, battery) is the "
+            + "seller's own statement — ask the person, then store it once with set_export_default and it "
+            + "applies to every export for this marketplace. A measurement or identifier comes from the "
+            + "vendor file or the catalogue lookup, or it stays empty."
+          : undefined,
         instructions:
           "Each product is asked only for the columns ITS OWN category requires. Where a column appears in "
           + "allowedValues it takes ONE OF THOSE STRINGS EXACTLY — anything else is refused, so pick from the "

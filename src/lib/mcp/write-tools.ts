@@ -4,6 +4,8 @@ import { toUnfilledReport } from "@/lib/export/job-store";
 import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
 import { saveProductAttributes } from "@/lib/export/product-attributes";
+import { neverInventColumn } from "@/lib/ai/match-dropdown";
+import { normalizeKey } from "@/lib/export/zip";
 import {
   categoryIndex,
   resolveAssignments,
@@ -276,6 +278,27 @@ export const WRITE_TOOLS: McpTool[] = [
         // leaving it visibly missing.
         if (!value) { rejected.push({ productId, column, reason: "Empty value — leave the entry out instead" }); continue; }
 
+        // The same bar Mercato's own fill applies before it queues a column
+        // for a model, applied to this door too. It was missing here, and the
+        // omission undid the guard entirely: the export refuses to let Kimi
+        // answer Proposition 65, PFAS, a battery declaration, a dimension or a
+        // barcode, then reads whatever is in ProductAttribute and writes it
+        // into the file — so a value arriving through MCP reached the cell
+        // that no model was allowed to fill. A guessed declaration is a false
+        // legal statement published under the client's name whichever model
+        // guessed it.
+        if (neverInventColumn(normalizeKey(column)) || neverInventColumn(defaultKey(column))) {
+          rejected.push({
+            productId,
+            column,
+            reason:
+              "No model may answer this column. A declaration (Proposition 65, PFAS, battery) is the seller's "
+              + "own statement — ask them, then set it once with set_export_default. A measurement, barcode or "
+              + "image URL comes from the vendor file or the catalogue lookup, or the cell stays empty.",
+          });
+          continue;
+        }
+
         // A dropdown column: take an option verbatim, or refuse and name the
         // choices. Stored canonically so the export writes it straight through.
         const opts = allowed.get(defaultKey(column));
@@ -440,6 +463,21 @@ export const WRITE_TOOLS: McpTool[] = [
 
       const b = res.body as { jobId?: string; done?: boolean; remaining?: number; total?: number; mode?: string };
       const done = b?.mode === "background" ? undefined : b?.done === true;
+
+      // What came out empty, handed back with the result rather than left for
+      // somebody to go and ask for. A finished export that quietly shipped
+      // blank required cells looks exactly like one that did not, and the
+      // model driving this has no reason to go looking — so the loop only
+      // closed when a person noticed the file was wrong.
+      let unfilled: { column: string; rows: number }[] | undefined;
+      if (done && b?.jobId) {
+        const finished = await prisma.exportJob
+          .findUnique({ where: { id: String(b.jobId) }, select: { unfilledRequired: true } })
+          .catch(() => null);
+        const cols = toUnfilledReport(finished?.unfilledRequired).columns;
+        if (cols.length) unfilled = cols.map((c) => ({ column: c.label, rows: c.rows }));
+      }
+
       return ok({
         jobId: b?.jobId,
         mode: b?.mode,
@@ -448,10 +486,15 @@ export const WRITE_TOOLS: McpTool[] = [
         // The finished file is a spreadsheet, and a spreadsheet does not
         // belong in a conversation — base64 of a real catalogue is megabytes
         // of noise. Mercato serves it; this says where.
+        ...(unfilled ? { requiredColumnsStillEmpty: unfilled } : {}),
         note:
           done === false
             ? "Not finished. Call again with this jobId to build the next part."
-            : "Open the project's Export step in Mercato to download it.",
+            : unfilled
+              ? "Built, but the columns above shipped empty. Call next_export_gaps to see what is missing and "
+                + "why, answer what you can with submit_export_values, and run the export again — the stored "
+                + "answers need no AI call."
+              : "Open the project's Export step in Mercato to download it.",
       });
     },
   },
@@ -777,6 +820,40 @@ export const WRITE_TOOLS: McpTool[] = [
 ];
 
 /**
+ * Stored instead of a list of names, meaning "all of them, including any added
+ * later".
+ *
+ * An account starts on this. The first shape of the per-account choice stored
+ * an empty list and read it as read-only, which revoked, in one deploy, a
+ * capability every account already had — there was no previous per-account
+ * choice to carry forward, so the new default WAS the whole decision. Writes
+ * had been on since the endpoint shipped, governed by MCP_WRITE_ENABLED.
+ *
+ * A literal list of today's eleven names would have the same failure one tool
+ * later: the twelfth would be off for everybody until each person noticed a
+ * checkbox they never saw appear. The sentinel says what "All" actually means
+ * to the person who ticked it.
+ *
+ * MCP_WRITE_ENABLED=off still shuts every one of them off for everyone, and
+ * unticking a tool stores the explicit remainder, so a deliberate choice is
+ * never widened by a later release.
+ */
+export const ALL_WRITE_TOOLS = "*";
+
+/**
+ * Tool names a stored choice comes to, with the sentinel expanded and anything
+ * unrecognised dropped — a name that matches no tool is stale or forged, and
+ * keeping it would only switch on a tool of that name if one were ever added.
+ */
+export function resolveWriteChoice(
+  stored: readonly string[],
+  known: readonly string[] = WRITE_TOOLS.map((t) => t.name),
+): string[] {
+  if (stored.includes(ALL_WRITE_TOOLS)) return [...known];
+  return stored.filter((n) => known.includes(n));
+}
+
+/**
  * The write tools this person's Claude may use right now: the ones they chose,
  * while the deployment switch is on.
  *
@@ -787,6 +864,8 @@ export const WRITE_TOOLS: McpTool[] = [
 export async function writeToolsFor(userId: string): Promise<McpTool[]> {
   if (!flags.mcpWrite()) return [];
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { mcpWriteTools: true } });
-  const chosen = new Set(user?.mcpWriteTools ?? []);
+  // No row is no person, which is not the same as a person who chose nothing —
+  // so it stays empty rather than inheriting the all-tools default.
+  const chosen = new Set(resolveWriteChoice(user?.mcpWriteTools ?? []));
   return WRITE_TOOLS.filter((t) => chosen.has(t.name));
 }

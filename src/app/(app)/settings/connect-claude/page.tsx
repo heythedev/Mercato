@@ -3,7 +3,7 @@ import { requireUser } from "@/lib/auth-helpers";
 import { listTokens } from "@/lib/mcp/tokens";
 import { flags } from "@/lib/flags";
 import { prisma } from "@/lib/db";
-import { WRITE_TOOLS } from "@/lib/mcp/write-tools";
+import { WRITE_TOOLS, resolveWriteChoice } from "@/lib/mcp/write-tools";
 import { ConnectClaudeClient } from "@/components/admin/connect-claude-client";
 
 export const dynamic = "force-dynamic";
@@ -43,7 +43,7 @@ export default async function ConnectClaudePage() {
         enabled={flags.mcp()}
         writeSwitchOn={flags.mcpWrite()}
         writeTools={WRITE_TOOLS.map((t) => ({ name: t.name, title: t.title }))}
-        initialChosen={account?.mcpWriteTools ?? []}
+        initialChosen={resolveWriteChoice(account?.mcpWriteTools ?? [])}
         email={(user as { email?: string }).email ?? "your account"}
         baseUrl={baseUrl}
         initialTokens={tokens.map((t) => ({

@@ -52,10 +52,11 @@ model User {
   // Marketplace ids a non-admin user may create projects for. Empty = none
   // allowed (explicit allow-list). Admins ignore this and see all.
   allowedMarketplaces String[]  @default([])
-  /// MCP write tools this person has switched on for their own Claude, by tool
-  /// name. Empty = read-only, the default. MCP_WRITE_ENABLED=off still shuts
-  /// every one of them off for everybody.
-  mcpWriteTools       String[]  @default([])
+  /// MCP write tools this person's own Claude may use, by tool name. ["*"] is
+  /// the default and means all of them, including any added later; an explicit
+  /// list is a narrower choice they made; empty means they switched them all
+  /// off. MCP_WRITE_ENABLED=off still shuts every one of them off for everybody.
+  mcpWriteTools       String[]  @default(["*"])
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 

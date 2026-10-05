@@ -309,13 +309,19 @@ const TABLES: { name: string; column?: string; statements: string[] }[] = [
     ],
   },
   {
-    // Which MCP write tools each person has switched on for themselves. Empty
-    // for every existing row, which is read-only — nobody's Claude gains a
-    // write it was not given by its owner.
+    // Which MCP write tools each person's own Claude may use. '*' means all of
+    // them, including any added later, and is where an account starts — the
+    // first version defaulted to empty and read that as read-only, which took
+    // write access away from every account that already had it the moment it
+    // deployed. The second statement moves the default on a database that was
+    // created under the first; existing ROWS are not touched here, because a
+    // deliberate "none" must survive this script being run again (the one-time
+    // backfill is scripts/backfill-mcp-write-tools.ts).
     name: "User",
     column: "mcpWriteTools",
     statements: [
-      `ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "mcpWriteTools" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]`,
+      `ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "mcpWriteTools" TEXT[] NOT NULL DEFAULT ARRAY['*']::TEXT[]`,
+      `ALTER TABLE "User" ALTER COLUMN "mcpWriteTools" SET DEFAULT ARRAY['*']::TEXT[]`,
     ],
   },
   {
