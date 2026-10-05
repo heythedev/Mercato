@@ -28,6 +28,7 @@ type Product = Pick<
   | "vendorData"
   | "liveData"
 >;
+import { hasRequirementMatrix, toTemplateCategoryPath } from "@/lib/marketplaces/profile";
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { loadExportDefaults, defaultFor, settingEnabled, SETTING_KEYS, type ExportDefaults } from "./defaults";
@@ -919,8 +920,10 @@ export async function templateRequirements(
   fileData: Buffer,
   marketplace: string,
 ): Promise<TemplateRequirements | null> {
-  const mk = marketplace.toLowerCase();
-  if (mk !== "mathis" && mk !== "bestbuy") return null;
+  // A trait, not a name: a marketplace added tomorrow whose templates carry a
+  // Columns sheet declares requirementMatrix and works here with no change,
+  // and one that does not is correctly told there is nothing to narrow by.
+  if (!hasRequirementMatrix(marketplace)) return null;
 
   const tplZip = await JSZip.loadAsync(fileData);
 
@@ -946,8 +949,6 @@ export async function templateRequirements(
   const matrix = await cachedRequirementMatrix(fileData, tplZip, sheetNameToPath, ssArr);
   if (!matrix) return null;
 
-  const isMathis = mk === "mathis";
-
   // The matrix spells the department "Décor"; the catalogue spells it
   // "Decor 1" and "Decor 2", because Mathis splits that department across two
   // templates and the template's name leaks into the category path. Exact
@@ -970,13 +971,8 @@ export async function templateRequirements(
   }
 
   const pathFor = (raw: string): string => {
-    const r = String(raw ?? "");
-    const joined = (r.includes(" > ") && !r.includes("/"))
-      ? (isMathis
-          ? "Mathis Home/" + r.split(" > ").map((x) => x.trim()).join("/")
-          : r.split(" > ").map((x) => x.trim()).join("/"))
-      : r;
-    const k = joined.trim().toLowerCase();
+    // The root segment and the separators belong to the profile, not here.
+    const k = toTemplateCategoryPath(marketplace, String(raw ?? "")).trim().toLowerCase();
     if (matrix.categories.has(k)) return k;
     return foldedIndex.get(fold(k)) ?? "";
   };
