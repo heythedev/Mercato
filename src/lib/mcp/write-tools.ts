@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { toUnfilledReport } from "@/lib/export/job-store";
 import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
@@ -20,6 +21,16 @@ import { toTileId } from "@/lib/marketplaces/catalog";
 
 /** Long enough to find the file and run the command; short enough that a
  *  link left in a log is not a standing invitation. */
+/**
+ * How much base64 a tool argument may carry.
+ *
+ * Generous enough for a real vendor sheet — the ones in use here are
+ * 25-91KB, so about 125KB encoded — and short of the size where a model
+ * re-emitting the text becomes slow and expensive. Past it the link is
+ * the right answer, and the refusal says so.
+ */
+const MAX_INLINE_UPLOAD_B64 = 8 * 1024 * 1024;
+
 const UPLOAD_TICKET_TTL_MS = 30 * 60 * 1000;
 import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
 
@@ -189,7 +200,102 @@ export const WRITE_TOOLS: McpTool[] = [
         curl: `curl -F "file=@/path/to/your-file.xlsx" "${uploadUrl}"`,
         note:
           "Single use, and it expires. Replace the path and run it where the spreadsheet is — the project " +
-          "is created from the file when it arrives. Treat the link as a password: it creates a project as you.",
+          "is created from the file when it arrives. Treat the link as a password: it creates a project as you. " +
+          "If you cannot reach this host — a sandbox that blocks outbound requests will answer 403 — use " +
+          "send_project_file instead: it carries the bytes over this connection, which already works.",
+      });
+    },
+  },
+
+  {
+    name: "send_project_file",
+    title: "Create a project by sending the spreadsheet over this connection",
+    description:
+      "Create a project from a vendor spreadsheet sent as base64. Use this when you cannot reach Mercato's " +
+      "host directly — a sandbox with restricted egress answers 403 on the upload link, but this call travels " +
+      "the same connection as every other tool, which already works. Send sha256 of the RAW file bytes; the " +
+      "upload is refused if it does not match.",
+    schema: {
+      name: z.string().describe("What to call the project"),
+      marketplace: z.string().describe("mathis, walmart, bestbuy, amazon_us, temu, sears"),
+      filename: z.string().describe("The file's own name, e.g. vendor-feed.xlsx"),
+      contentBase64: z.string().describe("The file's bytes, base64, no data: prefix and no newlines"),
+      sha256: z.string().describe("sha256 of the RAW bytes, hex — compute it from the file, not from the base64"),
+      isNewListing: z
+        .boolean()
+        .optional()
+        .describe("Walmart only: a new listing, with no live page to verify against"),
+    },
+    async run(actor: Actor, a) {
+      const name = String(a.name ?? "").trim();
+      const marketplace = String(a.marketplace ?? "").trim().toLowerCase();
+      const filename = String(a.filename ?? "").trim() || "upload.xlsx";
+      if (!name) return ok({ error: "A project name is required" });
+      if (!marketplace) return ok({ error: "A marketplace is required" });
+
+      const account = await prisma.user.findUnique({
+        where: { id: actor.id },
+        select: { role: true, allowedMarketplaces: true },
+      });
+      if (!account) return ok({ error: "Account not found" });
+      if (!isAnyAdmin(actor) && !account.allowedMarketplaces.includes(toTileId(marketplace))) {
+        return ok({ error: `You do not have access to create ${marketplace} projects.` });
+      }
+
+      const b64 = String(a.contentBase64 ?? "").replace(/\s+/g, "");
+      if (!b64) return ok({ error: "No file content sent" });
+      if (b64.length > MAX_INLINE_UPLOAD_B64) {
+        return ok({
+          error:
+            `That file is about ${Math.round((b64.length * 0.75) / 1024)}KB, over the `
+            + `${Math.round((MAX_INLINE_UPLOAD_B64 * 0.75) / 1024 / 1024)}MB limit for sending it this way. `
+            + "Use create_project_upload and fetch the link from somewhere that can reach this host.",
+        });
+      }
+
+      let bytes: Buffer;
+      try {
+        bytes = Buffer.from(b64, "base64");
+      } catch {
+        return ok({ error: "contentBase64 is not valid base64" });
+      }
+      if (!bytes.length) return ok({ error: "The decoded file is empty" });
+
+      // The whole reason a spreadsheet was kept out of a tool argument: an
+      // .xlsx is a zip, one wrong character corrupts the archive, and the
+      // damage shows up later as a parse failure nobody can explain. A
+      // checksum turns that into a refusal here.
+      const want = String(a.sha256 ?? "").trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(want)) {
+        return ok({ error: "sha256 must be 64 hex characters, taken from the raw file bytes" });
+      }
+      const got = createHash("sha256").update(bytes).digest("hex");
+      if (got !== want) {
+        return ok({
+          error:
+            "The file did not survive the trip — its checksum does not match. Nothing was created. "
+            + `Expected ${want}, received ${got} over ${bytes.length} bytes. Send it again, or use `
+            + "create_project_upload so the bytes travel directly.",
+        });
+      }
+
+      const form = new FormData();
+      form.set("file", new Blob([new Uint8Array(bytes)]), filename);
+      form.set("name", name);
+      form.set("marketplace", marketplace);
+      if (a.isNewListing === true && marketplace === "walmart") form.set("isNewListing", "true");
+
+      // Mercato's own creation route: the same parse, the same marketplace
+      // check, the same everything the New Project button does.
+      const res = await invokeAsUser(actor.id, "/api/projects", { method: "POST", formData: form });
+      if (!res.ok) {
+        return ok({ error: (res.body as { error?: string })?.error ?? `Upload failed (${res.status})` });
+      }
+      return ok({
+        ...(res.body as object),
+        receivedBytes: bytes.length,
+        checksumVerified: true,
+        note: "Project created. Categorise it next, or run verification first where the marketplace has live pages.",
       });
     },
   },
