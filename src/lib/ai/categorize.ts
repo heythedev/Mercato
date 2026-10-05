@@ -674,14 +674,34 @@ async function categorizeBatch(
   );
 }
 
-async function categorizeBatchWithContext(
+/**
+ * Everything that decides what to ASK the model, and nothing that asks it.
+ *
+ * Split out so the prompt can be rendered and compared without a model
+ * call. Prompt wording is what categorisation accuracy rests on — measured
+ * at 92% against the Mathis catalogue — so any change to how this text is
+ * assembled has to be provable, and with no AI credit the only way to prove
+ * it is to render the string and diff it.
+ *
+ * Pure: same inputs, same text, no network, no clock.
+ */
+export function buildCategorizationPrompt(
   products: Array<ProductInput & { searchContext?: string }>,
   marketplace: string,
   model: string,
   availableCategories?: string[],
   strictMode = false,
   forceNearest = false,
-): Promise<CategorizeResult[]> {
+): {
+  systemPrompt: string;
+  userPrompt: string;
+  /** The marketplace supplies a closed taxonomy, which changes temperature,
+   *  the fallback category and the fuzzy-match floor. */
+  usesTaxonomySheet: boolean;
+  /** Walmart's flat 75-value list needs a looser match floor than long paths. */
+  walmartFlat: boolean;
+  maxOutputTokens: number;
+} {
   // Resolved through the profile so stored variants fold correctly:
   // "amazon_us" is amazon, "Best Buy" is bestbuy. Comparing the raw
   // string six times got that wrong for any marketplace stored under
@@ -1089,6 +1109,20 @@ ${pathHint}
     32000,
     Math.max(1500, products.length * perItemTokens + 500 + reasoningHeadroom),
   );
+
+  return { systemPrompt, userPrompt, usesTaxonomySheet, walmartFlat, maxOutputTokens };
+}
+
+async function categorizeBatchWithContext(
+  products: Array<ProductInput & { searchContext?: string }>,
+  marketplace: string,
+  model: string,
+  availableCategories?: string[],
+  strictMode = false,
+  forceNearest = false,
+): Promise<CategorizeResult[]> {
+  const { systemPrompt, userPrompt, usesTaxonomySheet, walmartFlat, maxOutputTokens } =
+    buildCategorizationPrompt(products, marketplace, model, availableCategories, strictMode, forceNearest);
 
   const messages: ModelMessage[] = [
     { role: "system", content: systemPrompt },
