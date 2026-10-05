@@ -28,7 +28,7 @@ type Product = Pick<
   | "vendorData"
   | "liveData"
 >;
-import { hasRequirementMatrix, toTemplateCategoryPath } from "@/lib/marketplaces/profile";
+import { hasRequirementMatrix, profileFor, toTemplateCategoryPath } from "@/lib/marketplaces/profile";
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { loadExportDefaults, defaultFor, settingEnabled, SETTING_KEYS, type ExportDefaults } from "./defaults";
@@ -1272,7 +1272,7 @@ export async function generateSingleTemplateExport(
   // For Walmart item_match: if a product has no marketplaceCategory, fall back to
   // the template's own category so "Spec Product Type" is never left blank.
   const templateCategory = (template as { category?: string | null }).category ?? null;
-  const withCategoryFallback = templateCategory && marketplace.toLowerCase() === "walmart"
+  const withCategoryFallback = templateCategory && profileFor(marketplace).templateCategoryFallback
     ? eligible.map(p => p.marketplaceCategory ? p : { ...p, marketplaceCategory: templateCategory })
     : eligible;
 
@@ -1860,8 +1860,10 @@ async function fillTemplateXlsx(
   // feed, so they are excluded from the export entirely — the cells keep their
   // template styling but never receive data. Codes and display labels are both
   // matched because stored templates key columns either way.
-  const isMathis = marketplace.toLowerCase() === "mathis";
-  const isBestBuyTpl = marketplace.toLowerCase() === "bestbuy";
+  // Traits, not names. A marketplace added later turns each of these on by
+  // declaring it in its profile; one that declares nothing gets the
+  // behaviour that works everywhere.
+  const mp = profileFor(marketplace);
   const MIRAKL_OFFER_KEYS = new Set([
     // row-2 field codes            // row-1 display labels
     "sku",                          "offersku",
@@ -1884,7 +1886,7 @@ async function fillTemplateXlsx(
     return [e.col.key, e.col.label, header].some((s) =>
       MIRAKL_OFFER_KEYS.has(normalizeKey(String(s ?? ""))));
   };
-  const exportEntries = isMathis
+  const exportEntries = mp.excludesOfferColumns
     ? bandedEntries.filter((e) => !isMiraklOfferEntry(e))
     : bandedEntries;
 
@@ -1904,7 +1906,7 @@ async function fillTemplateXlsx(
   // spans 61 category groups over 22 templates, so this is 61 parses of a sheet
   // with ~950 attributes x up to 100 categories collapsed to 22 — and the parse
   // is pure XML scanning over a multi-megabyte sheet.
-  const reqMatrix = isMathis || isBestBuyTpl
+  const reqMatrix = mp.requirementMatrix
     ? await cachedRequirementMatrix(fileData, tplZip, sheetNameToPath, ssArr)
     : null;
   const letterByNormKey = (nk: string): string | undefined =>
@@ -2040,7 +2042,7 @@ async function fillTemplateXlsx(
   // Matching ReferenceData's header to the column's field code is exact, and on
   // that workbook every one of the 10 REQUIRED value-list columns resolves to
   // its own true list. So: ignore the defined names, join by name.
-  if (!isMathis) {
+  if (!mp.dropdownsByDefinedName) {
     const refPath = sheetNameToPath.get("referencedata");
     if (refPath) {
       try {
@@ -2085,7 +2087,7 @@ async function fillTemplateXlsx(
   // name mismatch, encoding issue, etc.) seed it from the Mathis taxonomy CSV.
   // Only applies to Mathis exports — other marketplaces write category as plain
   // text and don't need a forced dropdown option list.
-  if (isMathis) {
+  if (mp.categoryDropdownFromTaxonomy) {
     const catEntry = colEntries.find(({ col }) =>
       normalizeKey(col.key) === "category" || normalizeKey(col.label) === "category"
     );
@@ -2196,12 +2198,7 @@ async function fillTemplateXlsx(
   // The raw value is never written through to a dropdown column.
 
   // Normalize a path-style value ("A > B") to the slash form Mathis dropdowns use.
-  const toDropdownRaw = (raw: string): string =>
-    (raw.includes(" > ") && !raw.includes("/"))
-      ? (isMathis
-          ? "Mathis Home/" + raw.split(" > ").map(s => s.trim()).join("/")
-          : raw.split(" > ").map(s => s.trim()).join("/"))
-      : raw;
+  const toDropdownRaw = (raw: string): string => toTemplateCategoryPath(marketplace, raw);
 
   // A product's category key in the requirement matrix — the same "Mathis
   // Home/…" path its category cell receives. Memoised per product: identical
@@ -2472,7 +2469,7 @@ async function fillTemplateXlsx(
     // column — an image URL was reaching Digital_Photo_Frames.boxContents.1 on a
     // Wall Art row. Those columns belong to a different product type and Best Buy
     // rejects the row for them, so they stay empty regardless of what resolves.
-    if (isBestBuyTpl && !bestBuyColumnInScope(col.key, p)) return "";
+    if (mp.categoryScopedColumnCodes && !bestBuyColumnInScope(col.key, p)) return "";
     let raw = String(getProductField(p, col.key) ?? "");
     // Stored columns are keyed on whatever the upload read as the header row,
     // which for a Mirakl template is the LABEL ("Height Dimension (Bottom to
@@ -2488,7 +2485,7 @@ async function fillTemplateXlsx(
     // Best Buy: retry through the attribute-code translation when the raw code
     // resolved nothing, so category-prefixed and packaging-dimension columns
     // pick up the Length/Width/Height/Weight the vendor file already carries.
-    if (!raw.trim() && isBestBuyTpl && bestBuyColumnInScope(col.key, p)) {
+    if (!raw.trim() && mp.categoryScopedColumnCodes && bestBuyColumnInScope(col.key, p)) {
       // Plain attribute name first — "Wall_Art.modelNumber" → "modelNumber",
       // which the core map answers from the vendor file's model/mpn columns.
       // Nested codes return null here, so a repeating group can never be
@@ -2518,7 +2515,7 @@ async function fillTemplateXlsx(
     // Mathis dimension columns (DIMH/DIMW/DIMD) must carry bare decimals —
     // catalog scrapes store the PDP text verbatim (`18"`, `7.5'`) and Mirakl
     // rejects any value with a unit mark. Feet convert to inches.
-    if (isMathis && raw.trim()) {
+    if (mp.dimensionsAsDecimal && raw.trim()) {
       const dimKeys = new Set(["dimh", "dimw", "dimd", "heightdimension", "widthdimension", "depthdimension"]);
       const header = colLetterToHeader.get(letter) ?? "";
       if ([col.key, col.label, header].some((s) => dimKeys.has(normalizeKey(String(s ?? ""))))) {

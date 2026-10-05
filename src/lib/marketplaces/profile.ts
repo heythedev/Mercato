@@ -49,6 +49,53 @@ export type MarketplaceProfile = {
    */
   storedSeparator: string;
   templateSeparator: string;
+
+  // ── Export traits ────────────────────────────────────────────────────────
+
+  /**
+   * The template carries offer columns (price, stock, logistics) that must
+   * ship EMPTY. Mathis imports offers separately and rejects a product feed
+   * that fills them, so writing a correct-looking price breaks the upload.
+   */
+  excludesOfferColumns: boolean;
+
+  /**
+   * Dropdown option lists are reached through the workbook's DEFINED NAMES
+   * rather than by joining ReferenceData on the header text.
+   *
+   * Mathis names every list (Validation_<hash>_product_RUG_SHAPE); the others
+   * do not, and for them a defined name can point at a stale range while the
+   * ReferenceData column beside it holds the true list.
+   */
+  dropdownsByDefinedName: boolean;
+
+  /**
+   * Seed the category column's dropdown from Mercato's own taxonomy when the
+   * workbook does not declare one. Only safe where Mercato holds that
+   * marketplace's authoritative category list.
+   */
+  categoryDropdownFromTaxonomy: boolean;
+
+  /**
+   * Column keys are attribute CODES scoped to a category
+   * ("Floor_Tiles.productWidth") rather than human labels, so a column only
+   * applies to products in its own category and is resolved through the
+   * code→field map.
+   */
+  categoryScopedColumnCodes: boolean;
+
+  /**
+   * Dimension cells take a bare decimal. The template rejects any value
+   * carrying a unit mark, so 2' 6" has to become 30.
+   */
+  dimensionsAsDecimal: boolean;
+
+  /**
+   * A product with no category of its own inherits the category the template
+   * declares. Right where one template serves one category; wrong where a
+   * template spans many, which is why it is not the default.
+   */
+  templateCategoryFallback: boolean;
 };
 
 /**
@@ -63,21 +110,35 @@ export const DEFAULT_PROFILE: Omit<MarketplaceProfile, "id"> = {
   requirementMatrix: false,
   storedSeparator: " > ",
   templateSeparator: "/",
+  excludesOfferColumns: false,
+  // Joining ReferenceData by header name is the behaviour that works for
+  // every marketplace but Mathis, so it is what an undeclared one gets.
+  dropdownsByDefinedName: false,
+  categoryDropdownFromTaxonomy: false,
+  categoryScopedColumnCodes: false,
+  dimensionsAsDecimal: false,
+  templateCategoryFallback: false,
 };
 
 const PROFILES: Record<string, Partial<MarketplaceProfile>> = {
-  // Mirakl-built templates, and the two that publish a Columns sheet.
   mathis: {
     requirementMatrix: true,
     categoryRoot: "Mathis Home",
+    excludesOfferColumns: true,
+    dropdownsByDefinedName: true,
+    categoryDropdownFromTaxonomy: true,
+    dimensionsAsDecimal: true,
   },
   bestbuy: {
     requirementMatrix: true,
+    categoryScopedColumnCodes: true,
+  },
+  walmart: {
+    templateCategoryFallback: true,
   },
 
-  // Declared so the list reads as a decision rather than an omission: these
-  // templates were checked and carry no requirement matrix.
-  walmart: {},
+  // Declared with no traits rather than left out, so the list reads as a
+  // decision that was made: these templates were checked and carry none.
   temu: {},
   sears: {},
   amazon: {},
