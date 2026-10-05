@@ -1,12 +1,14 @@
 import { generateText, type ModelMessage } from "ai";
 import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotTemperature } from "@/lib/ai/moonshot";
-import { formatTemuTaxonomyForPrompt, loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
-import { formatMathisTaxonomyForPrompt, loadMathisCategoryPaths } from "@/lib/ai/mathis-taxonomy";
-import { formatWalmartTaxonomyForPrompt, loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
-import { formatBestBuyTaxonomyForPrompt, loadBestBuyCategoryPaths } from "@/lib/ai/bestbuy-taxonomy";
-import { formatSearsTaxonomyForPrompt, loadSearsCategoryPaths } from "@/lib/ai/sears-taxonomy";
-import { formatWayfairTaxonomyForPrompt, loadWayfairCategoryPaths, hasWayfairTaxonomy } from "@/lib/ai/wayfair-taxonomy";
+import { taxonomyFor } from "@/lib/marketplaces/taxonomy-registry";
+import { profileFor } from "@/lib/marketplaces/profile";
+import { formatTemuTaxonomyForPrompt } from "@/lib/ai/temu-taxonomy";
+import { formatMathisTaxonomyForPrompt } from "@/lib/ai/mathis-taxonomy";
+import { formatWalmartTaxonomyForPrompt } from "@/lib/ai/walmart-taxonomy";
+import { formatBestBuyTaxonomyForPrompt } from "@/lib/ai/bestbuy-taxonomy";
+import { formatSearsTaxonomyForPrompt } from "@/lib/ai/sears-taxonomy";
+import { formatWayfairTaxonomyForPrompt } from "@/lib/ai/wayfair-taxonomy";
 import { looksLikeSkuName } from "@/lib/ai/resolve-sku";
 
 // Kimi (Moonshot AI) — OpenAI-compatible API, significantly cheaper than Anthropic.
@@ -280,63 +282,32 @@ export async function categorizeProducts(
   onResults?: (results: CategorizeResult[]) => void | Promise<void>,
 ): Promise<CategorizeResult[]> {
   enterAiFeature("categorize");
-  const mpLower = marketplace.toLowerCase();
-  const isMathis = mpLower === "mathis";
-  const isBestBuyTop = mpLower === "bestbuy";
-  const isTemuTop = mpLower === "temu";
-  const isWalmartTop = mpLower === "walmart";
-  const isSearsTop = mpLower === "sears";
-  const isWayfairTop = mpLower === "wayfair";
 
-  // Temu: full taxonomy from temu_categories.csv
-  if (isTemuTop) {
-    availableCategories = loadTemuCategoryPaths();
+  // Two prompt-level flags the text below still reads. The taxonomy itself
+  // comes from the registry; these are the last name-based bits in this
+  // function and go when the prompt text moves too.
+  const mpId = profileFor(marketplace).id;
+  const isTemuTop = mpId === "temu";
+  const isBestBuyTop = mpId === "bestbuy";
+
+  // One registry entry per marketplace, rather than six near-identical blocks
+  // and a seventh expression naming the same six again. Missing a marketplace
+  // from that seventh was the dangerous case: it loaded a taxonomy but was not
+  // treated as constrained, so the model free-formed categories that do not
+  // exist. Now a marketplace either has a taxonomy or it does not, and one
+  // answer drives both.
+  const taxonomy = taxonomyFor(marketplace);
+  if (taxonomy) {
+    // Checked BEFORE loading: Wayfair's CSV ships empty on purpose and its
+    // loader throws, so the guard has to come first to produce the banner the
+    // route shows rather than a stack trace.
+    const unavailable = taxonomy.unavailableReason?.();
+    if (unavailable) throw new CategorizationServiceError(unavailable, "provider");
+    availableCategories = taxonomy.load();
   }
 
-  // Best Buy: the real Mirakl MARKETPLACE taxonomy from bestbuy_categories.csv
-  // (1,450 leaves across 17 departments — not electronics-only, see the rules below)
-  if (isBestBuyTop) {
-    availableCategories = loadBestBuyCategoryPaths();
-  }
-
-  // Sears: broad-retail taxonomy from sears_categories.csv
-  if (isSearsTop) {
-    availableCategories = loadSearsCategoryPaths();
-  }
-
-  // Mathis works the same way: the full taxonomy sheet (mathis_categories.csv, built from
-  // the official Mirakl export templates / fwd sheets) drives categorization instead of template names.
-  // Top level of each path still matches the Mathis export templates, so export matching works.
-  if (isMathis) {
-    availableCategories = loadMathisCategoryPaths();
-  }
-
-  // Walmart: categorize into the full taxonomy when supplied, else the 75 values
-  // the listing template's Product Category dropdown accepts. Either way the
-  // result is mapped down to a template value at export (mapToTemplateCategory).
-  if (isWalmartTop) {
-    availableCategories = loadWalmartCategoryPaths();
-  }
-
-  // Wayfair: constrained to the real Wayfair class list (wayfair_categories.csv).
-  // The CSV ships empty on purpose — until it is populated from Wayfair's real
-  // taxonomy we must NOT free-form categorize (that would invent categories, the
-  // exact reason the prior integration was reverted). Fail loudly instead so the
-  // route surfaces a clear "Wayfair taxonomy not configured" banner.
-  if (isWayfairTop) {
-    if (!hasWayfairTaxonomy()) {
-      throw new CategorizationServiceError(
-        "Wayfair categorization is not configured yet: wayfair_categories.csv has no " +
-        "class rows. Add Wayfair's real class taxonomy before categorizing Wayfair projects.",
-        "provider",
-      );
-    }
-    availableCategories = loadWayfairCategoryPaths();
-  }
-
-  // Constrained mode = AI must pick from a fixed list (Temu/Best Buy/Sears/Mathis/Walmart/Wayfair taxonomy)
-  const isConstrained =
-    (isMathis || isBestBuyTop || isTemuTop || isWalmartTop || isSearsTop || isWayfairTop) && !!availableCategories?.length;
+  // Constrained = the AI must pick from a fixed list.
+  const isConstrained = !!taxonomy && !!availableCategories?.length;
 
   // Smaller batches for constrained-category marketplaces so the AI reasons carefully per product.
   // These use full taxonomy sheets — keep batches modest so the taxonomy fits with product context.
@@ -376,8 +347,7 @@ export async function categorizeProducts(
   // no finishReason=length). Parallelism, not batch size, is what carries
   // throughput here — 32 batches run at once either way.
   const BATCH = Number(
-    process.env.CATEGORIZE_BATCH_SIZE ??
-      (isBestBuyTop ? 20 : (isTemuTop || isMathis || isWalmartTop) ? 40 : isConstrained ? 40 : 30),
+    process.env.CATEGORIZE_BATCH_SIZE ?? taxonomy?.batchSize ?? (isConstrained ? 40 : 30),
   );
   const PARALLEL = Number(process.env.CATEGORIZE_PARALLELISM ?? 32);
 
@@ -712,13 +682,17 @@ async function categorizeBatchWithContext(
   strictMode = false,
   forceNearest = false,
 ): Promise<CategorizeResult[]> {
-  const mpLower = marketplace.toLowerCase();
-  const isMathis = mpLower === "mathis";
+  // Resolved through the profile so stored variants fold correctly:
+  // "amazon_us" is amazon, "Best Buy" is bestbuy. Comparing the raw
+  // string six times got that wrong for any marketplace stored under
+  // more than one spelling.
+  const mpLower = profileFor(marketplace).id;
   const isTemu = mpLower === "temu";
   const isBestBuy = mpLower === "bestbuy";
   const isWalmart = mpLower === "walmart";
   const isSears = mpLower === "sears";
   const isWayfair = mpLower === "wayfair";
+  const isMathis = mpLower === "mathis";
 
   const list = products.map((p, idx) => {
     let line = `${idx + 1}. "${p.name}"`;
