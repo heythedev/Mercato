@@ -34,7 +34,7 @@ import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
  * Three rules hold throughout:
  *
  *   1. Nothing here can do what the web app forbids. canOperateProject is
- *      owner-only â€” an admin may LOOK at someone's project but not start runs
+ *      owner-only — an admin may LOOK at someone's project but not start runs
  *      or edit rows in it, and that is enforced by the same function the UI
  *      calls, not a copy of its intent.
  *
@@ -44,7 +44,7 @@ import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
  *      misunderstands a filter then costs a sentence, not a catalogue.
  *
  *   3. A change is capped. Beyond MAX_WRITE rows the tool refuses and says to
- *      narrow the filter â€” an instruction that would rewrite 60,000 products
+ *      narrow the filter — an instruction that would rewrite 60,000 products
  *      is more likely a mistake than a plan.
  */
 
@@ -59,7 +59,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "run_categorization",
     title: "Run Mercato's categorisation",
     description:
-      "Start (or continue) Mercato's own categorisation on a project â€” the same run the Categorize button starts, " +
+      "Start (or continue) Mercato's own categorisation on a project — the same run the Categorize button starts, " +
       "with the same taxonomy, reuse and confidence. Long runs come back with done=false and a resumeFrom; call " +
       "again with it until done. Only projects you own. Spends Mercato's AI balance.",
     schema: {
@@ -78,7 +78,7 @@ export const WRITE_TOOLS: McpTool[] = [
         return ok({ error: "You can only run categorisation on projects you own." });
       }
 
-      // Only the first call of a logical run counts against the quota â€”
+      // Only the first call of a logical run counts against the quota —
       // continuing one somebody already started is finishing work, not
       // starting new spend, and refusing halfway would strand the project.
       if (a.resumeFrom == null) {
@@ -91,7 +91,7 @@ export const WRITE_TOOLS: McpTool[] = [
         }
       }
 
-      // Mercato's own endpoint, called the way the browser calls it â€” so the
+      // Mercato's own endpoint, called the way the browser calls it — so the
       // spend guard, the taxonomy, the reuse cache and the resume logic are
       // the ones already in use, not a second copy.
       const res = await invokeAsUser(actor.id, `/api/projects/${encodeURIComponent(id)}/categorize`, {
@@ -206,7 +206,7 @@ export const WRITE_TOOLS: McpTool[] = [
           z.object({
             productId: z.string(),
             column: z.string().describe("Exactly as next_export_gaps named it, e.g. Material"),
-            value: z.string().describe("Answer from the product's own data â€” omit the entry if it does not state one"),
+            value: z.string().describe("Answer from the product's own data — omit the entry if it does not state one"),
           }),
         )
         .describe("One entry per product and column"),
@@ -228,7 +228,7 @@ export const WRITE_TOOLS: McpTool[] = [
         return ok({ error: `${rows.length} values, over the ${MAX_WRITE} limit. Send smaller batches.` });
       }
 
-      // Every id must belong to THIS project â€” the same check every other
+      // Every id must belong to THIS project — the same check every other
       // write here makes, for the same reason.
       const mine = new Set(
         (
@@ -271,10 +271,10 @@ export const WRITE_TOOLS: McpTool[] = [
           continue;
         }
         if (!column) { rejected.push({ productId, column, reason: "No column named" }); continue; }
-        // An empty value is not a fill, it is a gap â€” and writing one would
+        // An empty value is not a fill, it is a gap — and writing one would
         // mark the cell answered while leaving it blank, which is worse than
         // leaving it visibly missing.
-        if (!value) { rejected.push({ productId, column, reason: "Empty value â€” leave the entry out instead" }); continue; }
+        if (!value) { rejected.push({ productId, column, reason: "Empty value — leave the entry out instead" }); continue; }
 
         // A dropdown column: take an option verbatim, or refuse and name the
         // choices. Stored canonically so the export writes it straight through.
@@ -307,7 +307,7 @@ export const WRITE_TOOLS: McpTool[] = [
         rejected,
         note:
           saved > 0
-            ? "Stored. The next export fills these cells from here â€” no AI call, so they work with no credit at all."
+            ? "Stored. The next export fills these cells from here — no AI call, so they work with no credit at all."
             : "Nothing stored.",
       });
     },
@@ -317,7 +317,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "run_verification",
     title: "Run Mercato's verification",
     description:
-      "Start Mercato's own verification on a project â€” fetches each product's live marketplace listing and " +
+      "Start Mercato's own verification on a project — fetches each product's live marketplace listing and " +
       "compares title, images, description and dimensions. The same run the Verify button starts. Long runs " +
       "come back partial; call again to continue. Only projects you own. Spends Mercato's AI and lookup credit.",
     schema: { projectId: z.string() },
@@ -332,8 +332,8 @@ export const WRITE_TOOLS: McpTool[] = [
         return ok({ error: "You can only verify projects you own." });
       }
 
-      // Verification is the most expensive thing Mercato does â€” measured at
-      // 92% of all AI tokens spent â€” so the ceiling matters more here than
+      // Verification is the most expensive thing Mercato does — measured at
+      // 92% of all AI tokens spent — so the ceiling matters more here than
       // anywhere else.
       const left = await runQuotaRemaining(actor.id, ["run_verification"]);
       if (left <= 0) {
@@ -358,7 +358,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "reverify_product",
     title: "Re-check one product",
     description:
-      "Re-fetch one product's live listing and compare again â€” for a single row whose verdict looks wrong. " +
+      "Re-fetch one product's live listing and compare again — for a single row whose verdict looks wrong. " +
       "Only projects you own.",
     schema: {
       projectId: z.string(),
@@ -374,7 +374,7 @@ export const WRITE_TOOLS: McpTool[] = [
       if (!canOperateProject(actor, project)) {
         return ok({ error: "You can only change projects you own." });
       }
-      // One product of THIS project â€” the same check submit_categorization
+      // One product of THIS project — the same check submit_categorization
       // makes, for the same reason.
       const owned = await prisma.product.findFirst({
         where: { id: String(a.productId), projectId: id },
@@ -398,7 +398,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "run_export",
     title: "Run Mercato's export",
     description:
-      "Start (or continue) Mercato's own export â€” the same one the Export button starts, filling your uploaded " +
+      "Start (or continue) Mercato's own export — the same one the Export button starts, filling your uploaded " +
       "templates. A large catalogue comes back with done=false; call again with the jobId until done, then " +
       "download it from Mercato. Only projects you own.",
     schema: {
@@ -424,7 +424,7 @@ export const WRITE_TOOLS: McpTool[] = [
         }
       }
 
-      // The export is already built one slice per request â€” the browser
+      // The export is already built one slice per request — the browser
       // drives exactly this loop. Claude takes the same role, so the slicing,
       // the budget and the job store are the ones already in use.
       const qs = a.jobId ? `?jobId=${encodeURIComponent(String(a.jobId))}` : "";
@@ -446,7 +446,7 @@ export const WRITE_TOOLS: McpTool[] = [
         ...(b?.total != null ? { filesDone: (b.total ?? 0) - (b.remaining ?? 0), filesTotal: b.total } : {}),
         done,
         // The finished file is a spreadsheet, and a spreadsheet does not
-        // belong in a conversation â€” base64 of a real catalogue is megabytes
+        // belong in a conversation — base64 of a real catalogue is megabytes
         // of noise. Mercato serves it; this says where.
         note:
           done === false
@@ -495,14 +495,14 @@ export const WRITE_TOOLS: McpTool[] = [
       // category is the failure this tool exists to prevent.
       const index = categoryIndex(project.marketplace);
       if (!index) {
-        return ok({ error: `No category list for ${project.marketplace} â€” refusing to write unchecked categories.` });
+        return ok({ error: `No category list for ${project.marketplace} — refusing to write unchecked categories.` });
       }
 
       const { accepted, rejected } = resolveAssignments(index, proposals);
 
       // Every id must belong to THIS project. Without it a product id from a
       // project the caller cannot even see could be written through a project
-      // they own â€” the filter, not the id, is what authorisation rests on.
+      // they own — the filter, not the id, is what authorisation rests on.
       const mine = accepted.length
         ? await prisma.product.findMany({
             where: { projectId: id, id: { in: accepted.map((x) => x.productId) } },
@@ -512,8 +512,8 @@ export const WRITE_TOOLS: McpTool[] = [
       const byId = new Map(mine.map((p) => [p.id, p]));
 
       // The same gate the batch applies, repeated here on purpose. The
-      // categorise route does exactly this â€” skip before spending, refuse
-      // again before trusting â€” because a caller that was told a row is
+      // categorise route does exactly this — skip before spending, refuse
+      // again before trusting — because a caller that was told a row is
       // hopeless can still send a category for it, and a confident guess at
       // "VIDA-110112" passes every other check in this function.
       const writable: typeof accepted = [];
@@ -535,7 +535,7 @@ export const WRITE_TOOLS: McpTool[] = [
             productId: x.productId,
             category: x.category,
             reason:
-              "Bare vendor code with no title, description or vendor category â€” nothing to classify from, " +
+              "Bare vendor code with no title, description or vendor category — nothing to classify from, " +
               "so this would be a guess. Run Categorize in Mercato to resolve it to a real title first.",
           });
           continue;
@@ -640,7 +640,7 @@ export const WRITE_TOOLS: McpTool[] = [
       };
 
       const count = await prisma.product.count({ where });
-      if (count === 0) return ok({ matched: 0, note: "Nothing matched â€” no change made." });
+      if (count === 0) return ok({ matched: 0, note: "Nothing matched — no change made." });
       if (count > MAX_WRITE) {
         return ok({
           error: `${count} products matched, over the ${MAX_WRITE} limit. Narrow the filter.`,
@@ -676,7 +676,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "set_export_default",
     title: "Set an export default",
     description:
-      "Set a fixed value for a required column no data source can answer â€” Proposition 65, PFAS, embedded battery. Applies to every export for that marketplace.",
+      "Set a fixed value for a required column no data source can answer — Proposition 65, PFAS, embedded battery. Applies to every export for that marketplace.",
     schema: {
       marketplace: z.string().describe("e.g. bestbuy, mathis"),
       attribute: z.string().describe("Column name or field code, e.g. californiaProposition65Warning.type"),
@@ -686,7 +686,7 @@ export const WRITE_TOOLS: McpTool[] = [
       // A declaration applies to everything a team exports, so this is not a
       // per-project edit and an ordinary member should not make it.
       if (!isAnyAdmin(actor)) {
-        return ok({ error: "Admins only â€” an export default applies to every project." });
+        return ok({ error: "Admins only — an export default applies to every project." });
       }
       const marketplace = String(a.marketplace).toLowerCase();
       const attribute = defaultKey(String(a.attribute));
@@ -736,7 +736,7 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "clear_product_field",
     title: "Clear a wrong value",
     description:
-      "Blank a field that holds something wrong â€” a fabricated barcode, a bad category. Previews by default. An empty cell is correctable; a wrong one ships.",
+      "Blank a field that holds something wrong — a fabricated barcode, a bad category. Previews by default. An empty cell is correctable; a wrong one ships.",
     schema: {
       projectId: z.string(),
       field: z.enum(["upc", "brand", "marketplaceCategory", "imageUrl"]),

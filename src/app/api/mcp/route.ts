@@ -38,7 +38,7 @@ async function availableTools(userId: string, scope?: string) {
  *
  * One hosted server rather than a thing each person installs. That choice is
  * about identity, not convenience: a local server needs a token in a config
- * file on every laptop, and whoever holds it acts as its owner â€” which would
+ * file on every laptop, and whoever holds it acts as its owner — which would
  * hand a member their colleagues' private templates and a team admin another
  * team's projects, quietly undoing authz.ts through the one door left open.
  *
@@ -46,7 +46,7 @@ async function availableTools(userId: string, scope?: string) {
  * person, and the tools call the same scope helpers the web app calls. What
  * Claude can reach is exactly what its owner can reach signed in.
  *
- * Speaks JSON-RPC over POST â€” the Streamable HTTP transport â€” implemented
+ * Speaks JSON-RPC over POST — the Streamable HTTP transport — implemented
  * directly rather than through the SDK's server class, because that expects
  * a long-lived Node process and this is a serverless function that exists for
  * the length of one request. The protocol surface a client needs is small:
@@ -60,7 +60,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 
 /**
  * CORS, because a connector added in the browser is a browser making the
- * request â€” and without these it never arrives at all. The symptom is
+ * request — and without these it never arrives at all. The symptom is
  * "Couldn't reach mercato", which reads like the server being down rather
  * than the response being discarded by the browser after a successful round
  * trip.
@@ -71,7 +71,7 @@ const PROTOCOL_VERSION = "2025-06-18";
  *
  * Expose-Headers is the one that is easy to miss. WWW-Authenticate carries
  * the pointer to the OAuth metadata, and a header a browser cannot READ is a
- * header that may as well be absent â€” the client would see a bare 401 with
+ * header that may as well be absent — the client would see a bare 401 with
  * no way to discover there is an authorization server at all.
  */
 const CORS: Record<string, string> = {
@@ -147,7 +147,7 @@ export async function POST(req: NextRequest) {
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "mercato", version: "1.0.0" },
       instructions:
-        "Mercato â€” multi-marketplace product listing. Tools are scoped to the account whose token you are using: " +
+        "Mercato — multi-marketplace product listing. Tools are scoped to the account whose token you are using: " +
         "you see exactly what that person sees signed in, and nothing else. " +
         "Read-only unless that person has switched write tools on for themselves; those that are on appear in tools/list. " +
         "Start with whoami to confirm which account, then list_projects.",
@@ -172,7 +172,7 @@ export async function POST(req: NextRequest) {
         error: {
           code: -32001,
           message:
-            "No valid Mercato token. Sign in when prompted, or create a token under Settings â†’ Connect to Claude and send it as: Authorization: Bearer mrc_â€¦",
+            "No valid Mercato token. Sign in when prompted, or create a token under Settings → Connect to Claude and send it as: Authorization: Bearer mrc_…",
         },
       },
       {
@@ -250,9 +250,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "MCP is disabled on this deployment" }, { status: 404 });
   }
 
-  // A client opening the Streamable HTTP serverâ†’client channel asks for
-  // text/event-stream. This server has no SSE stream to give â€” every reply is
-  // the response to a POST â€” and the spec is explicit that a server which
+  // A client opening the Streamable HTTP server→client channel asks for
+  // text/event-stream. This server has no SSE stream to give — every reply is
+  // the response to a POST — and the spec is explicit that a server which
   // does not offer one MUST answer 405 here. Returning a friendly JSON blob
   // instead leaves a strict client holding a document where it expected a
   // stream, and what it reports is "couldn't reach the server".
@@ -270,7 +270,7 @@ export async function GET(req: NextRequest) {
       tools: TOOLS.map((t) => t.name),
       // Each person switches these on for themselves under Connect to Claude.
       writeTools: flags.mcpWrite() ? WRITE_TOOLS.map((t) => t.name) : "switched off on this deployment",
-      auth: "Authorization: Bearer mrc_â€¦ â€” or add this URL as a connector and sign in",
+      auth: "Authorization: Bearer mrc_… — or add this URL as a connector and sign in",
     },
     { headers: CORS },
   );
