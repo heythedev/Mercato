@@ -882,6 +882,108 @@ export async function generateCategoryZip(
 // For taxonomy paths like "Furniture > Living Room > Sofas", the department
 // (first segment) is the primary signal — matching export templates by leaf
 // words (e.g. "Kitchen" inside "Organization > Kitchen > …") caused wrong files.
+/**
+ * Which columns a template actually REQUIRES, per category.
+ *
+ * The requirement matrix is the authority on this — it differs per template
+ * AND per category, and a cell it marks NA must stay EMPTY. Everything that
+ * fills a cell already consults it; this makes the same answer available to
+ * callers OUTSIDE the export, so that asking a person (or a model) to supply
+ * a value can be limited to the cells that product's own category wants.
+ *
+ * Without it the only thing available is the export's aggregate of every
+ * unfilled column across every category, which invites a seat height onto a
+ * Halloween backdrop — a cell the template requires to be blank.
+ *
+ * Returns null when the template carries no matrix (Walmart and Temu do not):
+ * no matrix means no opinion, and the caller should not infer one.
+ */
+export type TemplateRequirements = {
+  /** Category paths the matrix has columns for, lowercased. */
+  categories: Set<string>;
+  /** The matrix path a raw product category maps to; "" when not covered. */
+  pathFor(rawCategory: string): string;
+  /** True when this column is REQUIRED for that category. */
+  requires(rawCategory: string, column: string): boolean;
+};
+
+export async function templateRequirements(
+  fileData: Buffer,
+  marketplace: string,
+): Promise<TemplateRequirements | null> {
+  const mk = marketplace.toLowerCase();
+  if (mk !== "mathis" && mk !== "bestbuy") return null;
+
+  const tplZip = await JSZip.loadAsync(fileData);
+
+  // Sheet name -> part path, the same way fillTemplateXlsx resolves it: the
+  // matrix lives on the sheet named "Columns" and is reached only this way.
+  const relsXml = (await tplZip.file("xl/_rels/workbook.xml.rels")?.async("string")) ?? "";
+  const rIdToTarget = new Map<string, string>();
+  for (const m of relsXml.matchAll(/<Relationship\b([^>]+)/gi)) {
+    const id = m[1].match(/\bId="([^"]+)"/i)?.[1];
+    const tgt = m[1].match(/\bTarget="([^"]+)"/i)?.[1];
+    if (id && tgt) rIdToTarget.set(id, tgt.startsWith("xl/") ? tgt : `xl/${tgt}`);
+  }
+  const wbXml = (await tplZip.file("xl/workbook.xml")?.async("string")) ?? "";
+  const sheetNameToPath = new Map<string, string>();
+  for (const m of wbXml.matchAll(/<sheet\b([^>]+)/gi)) {
+    const name = m[1].match(/\bname="([^"]*)"/i)?.[1] ?? "";
+    const rId = m[1].match(/\br:id="([^"]*)"/i)?.[1] ?? "";
+    const path = rIdToTarget.get(rId);
+    if (name && path) sheetNameToPath.set(name.toLowerCase(), path);
+  }
+
+  const { ssArr } = await cachedSharedStrings(fileData, tplZip, "xl/sharedStrings.xml");
+  const matrix = await cachedRequirementMatrix(fileData, tplZip, sheetNameToPath, ssArr);
+  if (!matrix) return null;
+
+  const isMathis = mk === "mathis";
+
+  // The matrix spells the department "Décor"; the catalogue spells it
+  // "Decor 1" and "Decor 2", because Mathis splits that department across two
+  // templates and the template's name leaks into the category path. Exact
+  // matching therefore missed a fifth of the catalogue — 1,183 products whose
+  // columns could not be narrowed at all.
+  //
+  // So: exact match first, and only if that fails, match on a folded form
+  // with accents removed and a bare trailing number dropped from a segment.
+  // The full path still disambiguates, so a Decor 1 category cannot borrow
+  // Decor 2's requirements — both were checked against the live templates.
+  const fold = (s: string): string =>
+    s.normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .split("/").map((seg) => seg.trim().replace(/\s+\d+$/, "")).join("/")
+      .toLowerCase();
+
+  const foldedIndex = new Map<string, string>();
+  for (const c of matrix.categories) {
+    const f = fold(c);
+    if (!foldedIndex.has(f)) foldedIndex.set(f, c);
+  }
+
+  const pathFor = (raw: string): string => {
+    const r = String(raw ?? "");
+    const joined = (r.includes(" > ") && !r.includes("/"))
+      ? (isMathis
+          ? "Mathis Home/" + r.split(" > ").map((x) => x.trim()).join("/")
+          : r.split(" > ").map((x) => x.trim()).join("/"))
+      : r;
+    const k = joined.trim().toLowerCase();
+    if (matrix.categories.has(k)) return k;
+    return foldedIndex.get(fold(k)) ?? "";
+  };
+
+  return {
+    categories: matrix.categories,
+    pathFor,
+    requires(rawCategory: string, column: string): boolean {
+      const cat = pathFor(rawCategory);
+      if (!cat) return false;
+      return matrix.byAttr.get(normalizeKey(column))?.get(cat) === "REQUIRED";
+    },
+  };
+}
+
 export function findBestTemplate<T extends { id: string; name: string; category?: string | null }>(
   category: string,
   templates: T[],

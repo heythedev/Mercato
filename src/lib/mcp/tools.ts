@@ -17,6 +17,7 @@ import {
 } from "@/lib/categorize/taxonomy";
 import { isUnresolvedSkuOnly } from "@/lib/ai/resolve-sku";
 import { toUnfilledReport } from "@/lib/export/job-store";
+import { templateRequirements, type TemplateRequirements } from "@/lib/export/zip";
 import { loadProductAttributes, storedAttribute } from "@/lib/export/product-attributes";
 import { defaultKey } from "@/lib/export/defaults";
 
@@ -578,6 +579,40 @@ export const TOOLS: McpTool[] = [
       });
       const stored = await loadProductAttributes(products.map((p) => p.id));
 
+      // The template's requirement matrix decides which of those columns a
+      // given product actually needs. Without this the list is the union of
+      // every category's unfilled columns, which asks a pet stand for a Bed
+      // Size and a Halloween backdrop for a Seat Height — cells the template
+      // marks not-applicable and the client's import requires EMPTY.
+      //
+      // Templates that carry no matrix (Walmart, Temu) yield nothing here and
+      // the unscoped list stands: no matrix means no opinion, and narrowing
+      // on a guess would hide real gaps.
+      const { adminIds, teamAdminIds } = await templateOwnerIds();
+      const tpls = await prisma.exportTemplate.findMany({
+        where: {
+          marketplace: { equals: project.marketplace, mode: "insensitive" },
+          OR: templateVisibilityOr(actor, adminIds, teamAdminIds),
+        },
+        select: { fileData: true },
+        orderBy: { createdAt: "asc" },
+        take: 40,
+      });
+      const matrices: TemplateRequirements[] = [];
+      for (const t of tpls) {
+        if (!t.fileData) continue;
+        const req = await templateRequirements(t.fileData as Buffer, project.marketplace).catch(() => null);
+        if (req) matrices.push(req);
+      }
+      // A category is covered by exactly one of these templates in practice, so
+      // the first matrix that knows the category is the one that governs it.
+      const requiredFor = (category: string | null, cols: string[]): string[] => {
+        if (!matrices.length || !category) return cols;
+        const owner = matrices.find((m) => m.pathFor(category) !== "");
+        if (!owner) return cols;
+        return cols.filter((c) => owner.requires(category, c));
+      };
+
       // The vocabulary already in use for each column, across this
       // marketplace. Not the template's own dropdown — that lives inside the
       // workbook — but real values Mercato has accepted before, which is a
@@ -596,7 +631,8 @@ export const TOOLS: McpTool[] = [
       for (const p of products) {
         if (gaps.length >= cap) break;
         const attrs = stored.get(p.id);
-        const missing = columns.filter((c) => !storedAttribute(attrs, c));
+        const wanted = requiredFor(p.marketplaceCategory, columns);
+        const missing = wanted.filter((c) => !storedAttribute(attrs, c));
         if (!missing.length) continue;
         gaps.push({
           productId: p.id,
@@ -614,10 +650,12 @@ export const TOOLS: McpTool[] = [
         project: { id: project.id, name: project.name, marketplace: project.marketplace },
         reportedBy: job ? `the export finished ${job.updatedAt.toISOString()}` : null,
         columnsStillEmpty: report.columns,
+        scopedByTemplate: matrices.length > 0,
         valuesAlreadyInUse: Object.fromEntries([...inUse].map(([k, v]) => [k, [...v]])),
         products: gaps,
         instructions:
-          "Answer only from each product's own name, description and vendor data. If a product does not state " +
+          "Each product is asked only for the columns ITS OWN category requires. Answer only from that product's "
+          + "name, description and vendor data. If a product does not state " +
           "a value, leave it out — a seat height invented for a mattress becomes a fact on a storefront. " +
           "Prefer a value already in use for that column. Then call submit_export_values.",
       });
