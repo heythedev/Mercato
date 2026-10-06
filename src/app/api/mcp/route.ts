@@ -54,7 +54,22 @@ async function availableTools(userId: string, scope?: string) {
  */
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+/**
+ * As long as the longest thing a tool can start.
+ *
+ * Most calls here are a database read and answer in milliseconds, so 60s was
+ * ample for them — but run_export drives Mercato's own export route, which
+ * spends up to SLICE_BUDGET_MS (210s) building a slice before it replies, and
+ * sits under a 300s ceiling of its own. A 60s limit here kills the MCP
+ * function while that slice is still being built: the export carries on
+ * server-side and finishes, and the caller is told the request failed. On a
+ * catalogue big enough to need slices at all — the only case where any of
+ * this matters — every call would report a failure for work that succeeded.
+ *
+ * Nothing is held open that was not already running; this is the ceiling, not
+ * a reservation, and a fast tool still returns at once.
+ */
+export const maxDuration = 300;
 
 const PROTOCOL_VERSION = "2025-06-18";
 
