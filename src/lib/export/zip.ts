@@ -546,9 +546,15 @@ export async function generateCategoryZip(
             // whole thing pushed into a field that will reject it.
             f.features.slice(0, 5).forEach((b, n) => {
               const text = b.trim();
-              const title = text.length <= 60
-                ? text
-                : text.slice(0, text.lastIndexOf(" ", 60) > 20 ? text.lastIndexOf(" ", 60) : 60).trim();
+              // Title and description must differ: a catalogue bullet under 60
+              // characters used to be written identically into both, which is
+              // what Best Buy's reviewer reported. The title is the opening
+              // claim, the description the whole bullet.
+              const stop = text.search(/[.;!?]\s/);
+              const opening = (stop > 12 ? text.slice(0, stop) : text).trim();
+              const title = opening.length <= 60
+                ? opening
+                : opening.slice(0, opening.lastIndexOf(" ", 60) > 20 ? opening.lastIndexOf(" ", 60) : 60).trim();
               put(`featureBullets.${n + 1}.title`, title);
               put(`featureBullets.${n + 1}.description`, text.slice(0, 440));
             });
@@ -2492,8 +2498,54 @@ async function fillTemplateXlsx(
     // column — an image URL was reaching Digital_Photo_Frames.boxContents.1 on a
     // Wall Art row. Those columns belong to a different product type and Best Buy
     // rejects the row for them, so they stay empty regardless of what resolves.
-    if (mp.categoryScopedColumnCodes && !bestBuyColumnInScope(col.key, p)) return "";
-    let raw = String(getProductField(p, col.key) ?? "");
+    // The attribute CODE for this column, which is what every Best Buy helper
+    // below reads. The stored column is keyed on whatever the upload took as
+    // its header, and for a Mirakl template that is the human LABEL
+    // ("Trade Item Hierarchy (Configuration of the Supply Chain…)"). Handing a
+    // label to a code parser returns null from all three of them, so the scope
+    // check ruled every category column out of its own category and nothing
+    // was ever filled: nine REQUIRED attributes shipped empty on a tested
+    // Best Buy file while the vendor sheet beside it carried the dimensions.
+    // codeByLetter holds the code row beneath the header, so ask it first.
+    const bbKey = mp.categoryScopedColumnCodes
+      ? (codeByLetter.get(letter) || String(col.key ?? ""))
+      : String(col.key ?? "");
+
+    if (mp.categoryScopedColumnCodes && !bestBuyColumnInScope(bbKey, p)) return "";
+    // For a code-keyed marketplace the CODE is the reliable name and the label
+    // is not: "Trade Item Hierarchy (…): Each: Dimensions: Unit of Measure"
+    // fuzzy-matched its way to a stray "1" from the vendor row, and because
+    // that counted as a value the code lookup below never ran. So the code is
+    // asked first and the label is only the fallback.
+    let raw = "";
+    if (mp.categoryScopedColumnCodes) {
+      const mappedFirst = bestBuyFillKeyForCode(bbKey);
+      if (mappedFirst === "dimensionUnit" || mappedFirst === "weightUnit") {
+        const measured = mappedFirst === "weightUnit"
+          ? String(getProductField(p, "weight") ?? "")
+          : ["length", "width", "height"]
+              .map((k) => String(getProductField(p, k) ?? ""))
+              .find((v) => v.trim() !== "") ?? "";
+        // The template's own dropdown words, not Mirakl's codes: these columns
+        // offer "Centimeters | Feet | Inches | Meters | Millimeters" and
+        // "Grams | Kilograms | Ounces | Pounds", and a value that is not one of
+        // them is dropped or coerced — "INH" came out of the matcher as "1".
+        raw = measured.trim() ? (mappedFirst === "weightUnit" ? "Pounds" : "Inches") : "";
+      } else if (mappedFirst) {
+        raw = String(getProductField(p, mappedFirst) ?? "");
+      } else {
+        // The code itself names a field for the repeating groups the core map
+        // answers directly — "featureBullets.1.title" is a key there, while
+        // the label "Feature Bullets: 1: Title" is not, so asking by label
+        // returned nothing and the REQUIRED title shipped empty.
+        raw = String(getProductField(p, bbKey) ?? "");
+        if (!raw.trim()) {
+          const bareFirst = bestBuyBareAttribute(bbKey);
+          if (bareFirst) raw = String(getProductField(p, bareFirst) ?? "");
+        }
+      }
+    }
+    if (!raw.trim()) raw = String(getProductField(p, col.key) ?? "");
     // Stored columns are keyed on whatever the upload read as the header row,
     // which for a Mirakl template is the LABEL ("Height Dimension (Bottom to
     // Top)"). The row beneath carries the stable field code ("DIMH"), which is
@@ -2508,16 +2560,29 @@ async function fillTemplateXlsx(
     // Best Buy: retry through the attribute-code translation when the raw code
     // resolved nothing, so category-prefixed and packaging-dimension columns
     // pick up the Length/Width/Height/Weight the vendor file already carries.
-    if (!raw.trim() && mp.categoryScopedColumnCodes && bestBuyColumnInScope(col.key, p)) {
+    if (!raw.trim() && mp.categoryScopedColumnCodes && bestBuyColumnInScope(bbKey, p)) {
       // Plain attribute name first — "Wall_Art.modelNumber" → "modelNumber",
       // which the core map answers from the vendor file's model/mpn columns.
       // Nested codes return null here, so a repeating group can never be
       // answered by its last segment.
-      const bare = bestBuyBareAttribute(col.key);
+      const bare = bestBuyBareAttribute(bbKey);
       if (bare) raw = String(getProductField(p, bare) ?? "");
       if (!raw.trim()) {
-        const mapped = bestBuyFillKeyForCode(col.key);
-        if (mapped) raw = String(getProductField(p, mapped) ?? "");
+        const mapped = bestBuyFillKeyForCode(bbKey);
+        if (mapped === "dimensionUnit" || mapped === "weightUnit") {
+          // Only state a unit when the measurement beside it was actually
+          // written. A unit on an empty cell asserts a dimension that is not
+          // there, which is the kind of tidy-looking wrong answer the import
+          // accepts and nobody questions.
+          const measured = mapped === "weightUnit"
+            ? String(getProductField(p, "weight") ?? "")
+            : ["length", "width", "height"]
+                .map((k) => String(getProductField(p, k) ?? ""))
+                .find((v) => v.trim() !== "") ?? "";
+          raw = measured.trim() ? (mapped === "weightUnit" ? "Pounds" : "Inches") : "";
+        } else if (mapped) {
+          raw = String(getProductField(p, mapped) ?? "");
+        }
       }
     }
 
@@ -3693,6 +3758,38 @@ function getProductField(p: Product, key: string): unknown {
   };
   const bulletBody = (v: unknown): string => String(v ?? "").trim().slice(0, 440);
 
+  /**
+   * A bullet's two cells, which Best Buy wants to be two different things.
+   *
+   * Title and description were read from the same source and cut to their own
+   * limits, so a bullet under 60 characters produced the SAME text twice —
+   * QA's "the same content is being populated in both" — and where the only
+   * source was the product name, the title came out empty while the
+   * description held the bare name.
+   *
+   * So the title is the bullet's opening claim and the description is the
+   * whole of it, and the product name joins the title when the title does not
+   * already carry it — Best Buy asks for that, and a title reading "Pack of 3"
+   * says nothing about what is in the pack. Nothing is invented: both cells
+   * are the product's own words, divided.
+   */
+  const bulletPair = (source: unknown, productName: string): { title: string; body: string } => {
+    const text = String(source ?? "").trim();
+    if (!text) return { title: "", body: "" };
+
+    // The first sentence or clause is the claim; the rest is the detail.
+    const firstStop = text.search(/[.;!?]\s/);
+    const opening = (firstStop > 12 ? text.slice(0, firstStop) : text).trim();
+
+    const name = productName.trim();
+    const words = (x: string) => new Set(x.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+    const openingWords = words(opening);
+    const named = name !== "" && [...words(name)].every((w) => openingWords.has(w));
+
+    const wanted = named || !name ? opening : `${name} — ${opening}`;
+    return { title: bulletTitle(wanted), body: bulletBody(text) };
+  };
+
   // Key features / bullet points — vendors store these as HTML <li> lists.
   const featuresRaw = String(
     fromVendor("features", "key_features", "product_features", "bullet_points", "highlights") ?? "",
@@ -3784,16 +3881,18 @@ function getProductField(p: Product, key: string): unknown {
     //
     // Bullet 1 is the REQUIRED one and takes the fallback. Bullets 2-5 do not:
     // repeating the product name into four more cells is padding, not features.
-    "featureBullets.1.title": bulletTitle(
+    "featureBullets.1.title": bulletPair(
       fromVendor("featureBullets.1.title", "bullet_point1", "bullet1", "feature1", "key_feature_1") ?? p.name,
-    ),
-    "featureBullets.1.description": bulletBody(
+      String(p.name ?? ""),
+    ).title,
+    "featureBullets.1.description": bulletPair(
       fromVendor("featureBullets.1.description", "bullet_point1", "bullet1", "feature1", "key_feature_1") ?? p.name,
-    ),
-    "featureBullets.2.title": bulletTitle(fromVendor("featureBullets.2.title", "bullet_point2", "bullet2", "feature2")),
-    "featureBullets.2.description": bulletBody(fromVendor("featureBullets.2.description", "bullet_point2", "bullet2", "feature2")),
-    "featureBullets.3.title": bulletTitle(fromVendor("featureBullets.3.title", "bullet_point3", "bullet3", "feature3")),
-    "featureBullets.3.description": bulletBody(fromVendor("featureBullets.3.description", "bullet_point3", "bullet3", "feature3")),
+      String(p.name ?? ""),
+    ).body,
+    "featureBullets.2.title": bulletPair(fromVendor("featureBullets.2.title", "bullet_point2", "bullet2", "feature2"), String(p.name ?? "")).title,
+    "featureBullets.2.description": bulletPair(fromVendor("featureBullets.2.description", "bullet_point2", "bullet2", "feature2"), String(p.name ?? "")).body,
+    "featureBullets.3.title": bulletPair(fromVendor("featureBullets.3.title", "bullet_point3", "bullet3", "feature3"), String(p.name ?? "")).title,
+    "featureBullets.3.description": bulletPair(fromVendor("featureBullets.3.description", "bullet_point3", "bullet3", "feature3"), String(p.name ?? "")).body,
 
     // Price
     price,

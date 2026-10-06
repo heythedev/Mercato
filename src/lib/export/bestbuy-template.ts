@@ -34,7 +34,10 @@ export type BestBuyColumn = {
 export type BestBuyFillKey =
   | "categoryName" | "categoryLeaf" | "name" | "upc" | "brand" | "description"
   | "imageUrl" | "vendorSku" | "price"
-  | "weight" | "height" | "width" | "depth" | "length" | "color";
+  | "weight" | "height" | "width" | "depth" | "length" | "color"
+  // Units for the packaging block: the unit of the measurement written
+  // beside them, not a property of the product.
+  | "dimensionUnit" | "weightUnit";
 
 /**
  * Mirakl attribute (last dotted segment, lowercased) → the product field we can
@@ -125,7 +128,15 @@ export function bestBuyFillKeyForCode(code: string): BestBuyFillKey | null {
     if (lower.endsWith(".dimensions.width")) return "width";
     if (lower.endsWith(".dimensions.height")) return "height";
     if (lower.endsWith(".weight.amount")) return "weight";
-    return null; // units of measure and the rest: nothing to fill them from
+    // The unit columns used to return null — "nothing to fill them from" —
+    // which is not so. Beside a length we wrote in inches, the unit IS inches;
+    // stating the unit of a number we just wrote is the number's own meaning,
+    // not a guess about the product. Leaving them empty failed Best Buy's
+    // validation on a REQUIRED attribute while the measurement sat in the cell
+    // next door. The caller supplies the unit it actually wrote.
+    if (lower.endsWith(".dimensions.unitofmeasure")) return "dimensionUnit";
+    if (lower.endsWith(".weight.unitofmeasure")) return "weightUnit";
+    return null;
   }
 
   // Still nested after the prefix ⇒ a repeating group, never auto-filled.
