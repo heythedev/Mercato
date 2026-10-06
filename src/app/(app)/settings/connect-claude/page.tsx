@@ -37,6 +37,25 @@ export default async function ConnectClaudePage() {
     prisma.user.findUnique({ where: { id: user.id }, select: { mcpWriteTools: true } }),
   ]);
 
+  // Browser connections, so the list is there on first paint rather than
+  // appearing a moment later — somebody checking which account they connected
+  // should not watch the answer arrive.
+  const grants = await prisma.oAuthGrant.findMany({
+    where: { userId: (user as { id: string }).id, revokedAt: null },
+    select: {
+      id: true, scope: true, createdAt: true, lastUsedAt: true,
+      client: { select: { name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  const connections = grants.map((g) => ({
+    id: g.id,
+    name: g.client?.name ?? "Unknown application",
+    canWrite: g.scope.split(/\s+/).includes("mercato:write"),
+    connectedAt: g.createdAt.toISOString(),
+    lastUsedAt: g.lastUsedAt ? g.lastUsedAt.toISOString() : null,
+  }));
+
   return (
     <div className="px-6 py-8">
       <ConnectClaudeClient
@@ -44,6 +63,7 @@ export default async function ConnectClaudePage() {
         writeSwitchOn={flags.mcpWrite()}
         writeTools={WRITE_TOOLS.map((t) => ({ name: t.name, title: t.title }))}
         initialChosen={resolveWriteChoice(account?.mcpWriteTools ?? [])}
+        initialConnections={connections}
         email={(user as { email?: string }).email ?? "your account"}
         baseUrl={baseUrl}
         initialTokens={tokens.map((t) => ({

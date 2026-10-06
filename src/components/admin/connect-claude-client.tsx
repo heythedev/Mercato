@@ -21,6 +21,16 @@ import { Card, EmptyState, Notice, PageHeader, Pill } from "@/components/ui/prim
  * them rather than in the middle where they interrupt.
  */
 
+/** A browser connection approved on the consent screen. */
+type Connection = {
+  id: string;
+  /** What the application called itself at registration — a claim, not checked. */
+  name: string;
+  canWrite: boolean;
+  connectedAt: string;
+  lastUsedAt: string | null;
+};
+
 type Token = {
   id: string;
   name: string;
@@ -83,6 +93,7 @@ export function ConnectClaudeClient({
   writeSwitchOn,
   writeTools,
   initialChosen,
+  initialConnections,
 }: {
   email: string;
   baseUrl: string;
@@ -95,8 +106,11 @@ export function ConnectClaudeClient({
   writeTools: { name: string; title: string }[];
   /** The ones this person has switched on for their own Claude. */
   initialChosen: string[];
+  /** Browser connections already approved against this account. */
+  initialConnections: Connection[];
 }) {
   const [tokens, setTokens] = useState<Token[]>(initialTokens);
+  const [connections, setConnections] = useState<Connection[]>(initialConnections);
   const [route, setRoute] = useState<"browser" | "terminal">("browser");
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -128,6 +142,22 @@ export function ConnectClaudeClient({
     const r = await fetch("/api/mcp/tokens", { cache: "no-store" });
     if (r.ok) setTokens((await r.json()).tokens ?? []);
   }, []);
+
+  // Browser connections are a separate thing from tokens: approved on the
+  // consent screen rather than minted here, and until now there was no way to
+  // end one. Somebody who approved on a shared machine, against whichever
+  // account the browser was signed into, had to ask for a database edit.
+  const loadConnections = useCallback(async () => {
+    const r = await fetch("/api/mcp/connections", { cache: "no-store" });
+    if (r.ok) setConnections((await r.json()).connections ?? []);
+  }, []);
+
+  async function endConnection(id: string, label: string) {
+    if (!confirm(`Disconnect "${label}"? That Claude stops reaching Mercato immediately.`)) return;
+    const r = await fetch(`/api/mcp/connections?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (r.ok) { toast.success("Disconnected"); await loadConnections(); }
+    else toast.error("Could not disconnect");
+  }
 
   async function create() {
     if (!name.trim()) return;
@@ -352,6 +382,51 @@ export function ConnectClaudeClient({
           })}
         </ul>
       </Card>
+
+      {/* ── browser connections ────────────────────────────────────
+          Approved on the consent screen rather than minted here, and the only
+          place anybody can end one. The account each was approved against is
+          THIS account, which is the thing somebody checks after connecting on
+          a shared machine. */}
+      {connections.length > 0 && (
+        <>
+          <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Connected to {email}
+          </h2>
+          <p className="mb-3 text-[13px] text-muted-foreground">
+            Approved in a browser. Disconnect any you do not recognise — a connection approved while
+            signed in as somebody else belongs to that account, not this one.
+          </p>
+          <div className="mb-6 divide-y divide-border overflow-hidden rounded-xl border border-border">
+            {connections.map((c) => (
+              <div key={c.id} className="flex items-center gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{c.name}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    connected {new Date(c.connectedAt).toLocaleDateString()}
+                    {c.lastUsedAt
+                      ? ` · last used ${new Date(c.lastUsedAt).toLocaleDateString()}`
+                      : " · never used"}
+                  </p>
+                </div>
+                <Pill tone={c.canWrite ? "warning" : "neutral"}>
+                  {c.canWrite ? "can change things" : "read only"}
+                </Pill>
+                <button
+                  onClick={() => void endConnection(c.id, c.name)}
+                  aria-label={`Disconnect ${c.name}`}
+                  className={cn(
+                    "shrink-0 rounded-lg border border-border p-2 text-muted-foreground",
+                    "hover:border-red-300 hover:text-red-600",
+                  )}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {/* ── tokens ─────────────────────────────────────────────────── */}
       {active.length > 0 && (
