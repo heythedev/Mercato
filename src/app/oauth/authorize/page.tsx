@@ -49,6 +49,13 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
     );
   }
 
+  // The host the browser will actually be returned to. Safe to state as a
+  // fact: redirectUriAllowed above matched it EXACTLY against the URIs this
+  // client registered, so it cannot be anywhere else.
+  const returnHost = (() => {
+    try { return new URL(redirectUri).host; } catch { return redirectUri; }
+  })();
+
   const base = await baseUrl();
   const back = (error: string, description: string) => {
     const u = new URL(redirectUri);
@@ -98,12 +105,17 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
           Only what you can see yourself — never another person&apos;s projects.
         </p>
 
-        {/* The name above is whatever the application called itself when it
-            registered. Anyone can register anything, so the person deciding
-            needs to know where that string came from. */}
+        {/* The name is whatever the application called itself when it
+            registered, and anyone can register anything — so it is a claim.
+            The DESTINATION is not: the browser is sent there, and only to a
+            URI registered for this client and matched exactly. Showing the
+            fact beside the claim is what lets somebody tell a routine connect
+            from a page they were sent. Naming only the unverified part made
+            every ordinary connection look like an attack. */}
         <Notice tone="warning" className="mt-5" title="Check you started this">
-          <strong className="text-foreground">{client.name}</strong> is the name this application
-          gave for itself — Mercato has not verified it. If you did not just try to connect
+          This will send you back to <strong className="text-foreground">{returnHost}</strong>, which
+          Mercato checked. The name <strong className="text-foreground">{client.name}</strong> is
+          what the application calls itself and is not verified. If you did not just try to connect
           something, close this page.
         </Notice>
 

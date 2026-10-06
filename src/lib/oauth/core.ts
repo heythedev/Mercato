@@ -110,9 +110,22 @@ export function redirectUriRegistrable(uri: string): boolean {
 export const SCOPES = ["mercato:read", "mercato:write"] as const;
 export type Scope = (typeof SCOPES)[number];
 
+/**
+ * What approving a scope actually allows, in the words of someone deciding.
+ *
+ * The write line has to keep pace with the write tools. It once said "change
+ * categories and clear values", which was true when those were the only two —
+ * but the set now creates projects from an uploaded file and starts
+ * categorisation, verification and export runs, and a run spends real AI
+ * credit. A consent screen that promises less than it grants is not consent,
+ * so this names the costly part rather than leaving it to be discovered on a
+ * bill.
+ */
 export const SCOPE_LABEL: Record<Scope, string> = {
   "mercato:read": "See your projects, products, templates and export readiness",
-  "mercato:write": "Change categories and clear values on projects you own",
+  "mercato:write":
+    "Create projects, change categories and values, and start categorisation, "
+    + "verification and export runs — which spend AI credit — on projects you own",
 };
 
 /**
