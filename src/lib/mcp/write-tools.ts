@@ -878,11 +878,19 @@ export const WRITE_TOOLS: McpTool[] = [
     name: "set_export_default",
     title: "Set an export default",
     description:
-      "Set a fixed value for a required column no data source can answer — Proposition 65, PFAS, embedded battery. Applies to every export for that marketplace.",
+      "Record a value the PERSON gives you for a required column no data source can answer — Proposition 65, "
+      + "PFAS, embedded battery. Ask them; do not decide it. These are legal declarations the seller makes "
+      + "under their own name, they cannot be read off the product or looked up, and the answer applies to "
+      + "every export for that marketplace until someone changes it.",
     schema: {
       marketplace: z.string().describe("e.g. bestbuy, mathis"),
       attribute: z.string().describe("Column name or field code, e.g. californiaProposition65Warning.type"),
-      value: z.string().describe("The value to write. Empty string clears it."),
+      value: z
+        .string()
+        .describe(
+          "Exactly what the person told you to record. Empty string clears it. Never a value you worked out, "
+          + "found by searching, or thought likely.",
+        ),
     },
     async run(actor: Actor, a) {
       // A declaration applies to everything a team exports, so this is not a
@@ -903,12 +911,22 @@ export const WRITE_TOOLS: McpTool[] = [
 
       if (existing) {
         await prisma.exportDefault.update({ where: { id: existing.id }, data: { value } });
-        return ok({ updated: true, marketplace, attribute, from: existing.value, to: value });
+        return ok({
+          updated: true, marketplace, attribute, from: existing.value, to: value,
+          note:
+            `Every ${marketplace} export now declares "${value}" for this column, on every product, until `
+            + "someone changes it. Tell the person what was recorded.",
+        });
       }
       await prisma.exportDefault.create({
         data: { marketplace, attribute, value, teamId: actor.teamId ?? null },
       });
-      return ok({ created: true, marketplace, attribute, value });
+      return ok({
+        created: true, marketplace, attribute, value,
+        note:
+          `Every ${marketplace} export now declares "${value}" for this column, on every product, until `
+          + "someone changes it. Tell the person what was recorded.",
+      });
     },
   },
 
