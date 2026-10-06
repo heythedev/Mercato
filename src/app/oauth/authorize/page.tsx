@@ -73,11 +73,14 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
 
   const session = await auth();
   const userId = (session?.user as { id?: string } | undefined)?.id;
+  // This same request, to come back to after signing in — or after switching
+  // to a different account.
+  const self = new URL(`${base}/oauth/authorize`);
+  for (const [k, v] of Object.entries(sp)) if (typeof v === "string") self.searchParams.set(k, v);
+  const backHere = encodeURIComponent(self.pathname + self.search);
+
   if (!userId) {
-    // Sign in first, then come straight back to this same request.
-    const self = new URL(`${base}/oauth/authorize`);
-    for (const [k, v] of Object.entries(sp)) if (typeof v === "string") self.searchParams.set(k, v);
-    redirect(`/login?callbackUrl=${encodeURIComponent(self.pathname + self.search)}`);
+    redirect(`/login?callbackUrl=${backHere}`);
   }
 
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, name: true } });
@@ -89,8 +92,26 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Pr
         <h1 className="mt-2 text-xl font-semibold leading-tight">
           Connect <span className="break-words">{client.name}</span> to your account?
         </h1>
+        {/* The account this would connect, and a way out of it.
+            A browser can hold a Mercato session for somebody else — a shared
+            machine, or an admin signed in earlier to look at something — and
+            the Chrome profile in the corner says nothing about which. Naming
+            the account was never enough on its own: somebody who notices it is
+            wrong has nowhere to go but back, and losing the request means
+            starting the connect again from Claude. So the way to switch is
+            here, and it returns to this same request. */}
         <p className="mt-2 text-sm text-muted-foreground">
-          Signed in as <strong className="text-foreground">{user?.email ?? "your account"}</strong>.
+          Signed in as <strong className="text-foreground">{user?.email ?? "your account"}</strong>.{" "}
+          <a
+            href={`/api/auth/signout?callbackUrl=${encodeURIComponent(`/login?callbackUrl=${backHere}`)}`}
+            className="font-medium text-foreground underline underline-offset-2"
+          >
+            Not you?
+          </a>
+        </p>
+        <p className="mt-1 text-[13px] text-muted-foreground">
+          Claude will be connected to this account, not to whichever Google profile the browser is
+          using.
         </p>
 
         <p className="mt-5 text-sm font-medium">It will be able to:</p>
