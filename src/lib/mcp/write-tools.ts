@@ -2,7 +2,13 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { toUnfilledReport } from "@/lib/export/job-store";
-import { canOperateProject, isAnyAdmin, type Actor } from "@/lib/authz";
+import {
+  canOperateProject,
+  isAnyAdmin,
+  templateOwnerIds,
+  templateVisibilityOr,
+  type Actor,
+} from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
 import { saveProductAttributes } from "@/lib/export/product-attributes";
 import { neverInventColumn } from "@/lib/ai/match-dropdown";
@@ -528,18 +534,26 @@ export const WRITE_TOOLS: McpTool[] = [
     title: "Run Mercato's export",
     description:
       "Start (or continue) Mercato's own export — the same one the Export button starts, filling your uploaded " +
+      "templates. Where the project has more than one template this ASKS which to use rather than choosing. " +
       "templates. A large catalogue comes back with done=false; call again with the jobId until done, then " +
       "download it from Mercato. Only projects you own.",
     schema: {
       projectId: z.string(),
       jobId: z.string().optional().describe("Echo back from a previous partial result to continue"),
-      autoMatch: z.boolean().optional().describe("Match each category to its closest template (default true)"),
+      templateId: z
+        .string()
+        .optional()
+        .describe("Write every product into this one template. Ask the person which, if more than one fits."),
+      autoMatch: z
+        .boolean()
+        .optional()
+        .describe("Match each category to its closest template. Say true to choose this deliberately."),
     },
     async run(actor: Actor, a) {
       const id = String(a.projectId);
       const project = await prisma.project.findUnique({
         where: { id },
-        select: { id: true, name: true, userId: true, teamId: true },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
       });
       if (!project) return ok({ error: "No such project" });
       if (!canOperateProject(actor, project)) {
@@ -556,11 +570,50 @@ export const WRITE_TOOLS: McpTool[] = [
       // The export is already built one slice per request — the browser
       // drives exactly this loop. Claude takes the same role, so the slicing,
       // the budget and the job store are the ones already in use.
+      // Which template to write into is the person's decision when there is
+      // more than one, and the export screen asks them. Through a tool there
+      // is nobody to ask, so it used to auto-match in silence — the caller
+      // never learned a choice existed, and a Walmart project with a listing
+      // template and a tag template got whichever scored higher.
+      //
+      // So: a named template is used, an explicit autoMatch is honoured, and
+      // anything else with more than one candidate comes back asking. Only on
+      // a fresh run — a continuation is already committed to its templates.
+      const templateId = a.templateId ? String(a.templateId) : undefined;
+      if (!a.jobId && !templateId && a.autoMatch === undefined) {
+        const { adminIds, teamAdminIds } = await templateOwnerIds();
+        const choices = await prisma.exportTemplate.findMany({
+          where: {
+            marketplace: { equals: project.marketplace, mode: "insensitive" },
+            OR: templateVisibilityOr(actor, adminIds, teamAdminIds),
+          },
+          select: { id: true, name: true, category: true },
+          orderBy: { createdAt: "asc" },
+          take: 40,
+        });
+        if (choices.length > 1) {
+          return ok({
+            needsChoice: true,
+            question: `This project has ${choices.length} templates. Which should the export use?`,
+            templates: choices.map((t) => ({ id: t.id, name: t.name, category: t.category })),
+            instructions:
+              "Ask the person which template they want, then call run_export again with that templateId. "
+              + "If they would rather each category went to its closest match, call again with autoMatch: true. "
+              + "Do not choose for them: the template decides the columns and the file the marketplace receives.",
+          });
+        }
+      }
+
       const qs = a.jobId ? `?jobId=${encodeURIComponent(String(a.jobId))}` : "";
       const res = await invokeAsUser(
         actor.id,
         `/api/projects/${encodeURIComponent(id)}/export${qs}`,
-        { method: "POST", body: { autoMatch: a.autoMatch !== false } },
+        {
+          method: "POST",
+          body: templateId
+            ? { templateId }
+            : { autoMatch: a.autoMatch !== false },
+        },
       );
       if (!res.ok) {
         const b = res.body as { error?: string };
