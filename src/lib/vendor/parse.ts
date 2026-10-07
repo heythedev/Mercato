@@ -534,11 +534,51 @@ function detectDelimiter(line: string): string {
   return (Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0]) ?? ",";
 }
 
+/**
+ * Split a CSV into records, honouring a newline INSIDE a quoted field.
+ *
+ * Splitting the text on newlines first and parsing each line is wrong, and it
+ * was wrong here: a vendor sheet whose description is an HTML <li> list spans
+ * several lines inside its quotes, so one record was cut into two. The first
+ * half came up short, the second half became a row of its own, and every value
+ * in it landed under the wrong header — a brand reading "7", a colour reading
+ * "US". The export then wrote faithfully what the parse had stored, so the
+ * damage surfaced at the end, in a file somebody had already reviewed.
+ *
+ * A quote only opens or closes a field at a field boundary, and a doubled
+ * quote inside one is an escaped quote — the same rules parseCsvLine applies
+ * within a line, applied to the whole text so a record can span lines.
+ */
+function splitCsvRecords(text: string): string[] {
+  const records: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (inQuotes && text[i + 1] === '"') { current += '""'; i++; continue; }
+      inQuotes = !inQuotes;
+      current += c;
+      continue;
+    }
+    if (!inQuotes && (c === "\n" || c === "\r")) {
+      // Swallow the \n of a \r\n pair rather than emitting an empty record.
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      records.push(current);
+      current = "";
+      continue;
+    }
+    current += c;
+  }
+  if (current !== "") records.push(current);
+  return records;
+}
+
 function parseCsv(buffer: Buffer): VendorRow[] {
   const text = buffer.toString("utf-8").replace(/^﻿/, "");
-  const lines = text.split(/\r?\n/);
-  const delim = detectDelimiter(lines[0] ?? "");
-  const grid = lines.map((l) => parseCsvLine(l, delim));
+  const records = splitCsvRecords(text);
+  const delim = detectDelimiter(records[0] ?? "");
+  const grid = records.map((r) => parseCsvLine(r, delim));
   return gridToRows(grid);
 }
 
