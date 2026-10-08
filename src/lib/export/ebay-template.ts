@@ -265,6 +265,29 @@ export function cleanDescriptionHtml(html: string): string {
     .trim();
 }
 
+/**
+ * The product field a "Variation Specific Value N" column should be filled
+ * from — the axis its paired NAME column declares — or null when the column
+ * is not one of those.
+ */
+export function variationAxisFor(column: string): string | null {
+  const m = /^Variation Specific Value (\d+)$/.exec(String(column ?? "").trim());
+  if (!m) return null;
+  return EBAY_FORMAT_CONSTANTS[`Variation Specific Name ${m[1]}`] ?? null;
+}
+
+/**
+ * A plain-text description given the paragraph wrapper eBay's accepted file
+ * uses. Already-marked-up text is left alone, and so is an empty cell — an
+ * empty `<p></p>` is markup claiming there is a description.
+ */
+export function wrapDescriptionParagraph(text: string): string {
+  const s = String(text ?? "").trim();
+  if (!s) return "";
+  if (/<[a-zA-Z][^>]*>/.test(s)) return s;
+  return `<p>${s}</p>`;
+}
+
 // ── Putting it together ──────────────────────────────────────────────────────
 
 export type EbayCellContext = {
@@ -277,6 +300,17 @@ export type EbayCellContext = {
   /** Restricted terms in force for this run: the seed plus anything the
    *  uploaded file's own Error column reported. */
   restricted?: readonly string[];
+  /**
+   * The exporter's own field resolution, for columns that name the field they
+   * want somewhere other than in their own header.
+   *
+   * "Variation Specific Value 1" is such a column: what belongs in it is
+   * whatever "Variation Specific Name 1" says, which is Color. Resolving the
+   * header text gets nothing, because no product has a field called
+   * "variationspecificvalue1" — and nothing errors, so the four variation
+   * columns shipped empty beside four correctly-filled name columns.
+   */
+  resolve?: (field: string) => unknown;
 };
 
 export type EbayCellResult = {
@@ -310,6 +344,12 @@ export function ebayCellValue(ctx: EbayCellContext): EbayCellResult {
     raw = path;
   } else if (column in EBAY_CONSTANTS) {
     raw = EBAY_CONSTANTS[column]!;
+  } else if (variationAxisFor(column)) {
+    // The value column takes whatever its NAME column declares. Falls back to
+    // the normal resolution when the product has nothing for that axis, which
+    // is the common case for Size, Material and Style.
+    const axis = variationAxisFor(column)!;
+    raw = String(ctx.resolve?.(axis) ?? ctx.value ?? "");
   } else {
     raw = String(ctx.value ?? "");
   }
@@ -323,7 +363,17 @@ export function ebayCellValue(ctx: EbayCellContext): EbayCellResult {
     raw = scrubbed.text;
     removed = scrubbed.removed;
   }
-
+  if (column === "Product Description") {
+    // Wrapped LAST, after the scrub, so a removal cannot leave a stray tag.
+    //
+    // The exporter strips HTML out of every description before this sees it,
+    // because Walmart wants plain text (see stripHtml in zip.ts). eBay does
+    // not: the file this seller's channel manager accepted carries
+    // `<p>Vickerman 72" …</p>`, and a bare paragraph of text renders as one
+    // unbroken block in an eBay listing. So a description that arrives
+    // without markup gets the wrapper the accepted file had.
+    raw = wrapDescriptionParagraph(raw);
+  }
   return { value: stripInvertedCommas(raw), removed };
 }
 

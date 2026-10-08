@@ -3582,6 +3582,7 @@ function generateCsv(products: Product[], columns: Column[], marketplace?: strin
             value: val,
             categoryPath: p.marketplaceCategory,
             restricted,
+            resolve: (field) => getProductField(p, field),
           }).value
         : String(val ?? "");
       return `"${out.replace(/"/g, '""')}"`;

@@ -10,6 +10,8 @@ import {
   restrictedWordsForRun,
   scrubRestricted,
   stripInvertedCommas,
+  variationAxisFor,
+  wrapDescriptionParagraph,
 } from "./ebay-template";
 
 // The product these cases are built from is real: a Vickerman 72" garland
@@ -242,5 +244,48 @@ describe("the description, as prose rather than as a page", () => {
     });
     expect(out.removed).toEqual([]);
     expect(out.value).toContain("Red Deluxe Mixed Berry");
+  });
+});
+
+describe("the variation value columns", () => {
+  it("take the field their own name column declares", () => {
+    // Nothing has a field called "variationspecificvalue1", so resolving the
+    // header text got nothing and nothing errored — four empty value columns
+    // beside four correctly-filled name columns, in the finished file.
+    expect(variationAxisFor("Variation Specific Value 1")).toBe("Color");
+    expect(variationAxisFor("Variation Specific Value 3")).toBe("Material");
+    expect(variationAxisFor("Variation Specific Name 1")).toBeNull();
+    expect(variationAxisFor("Title")).toBeNull();
+  });
+
+  it("resolves through the axis, not the header", () => {
+    const out = ebayCellValue({
+      column: "Variation Specific Value 1",
+      value: "",
+      resolve: (field) => (field === "Color" ? "Royal Blue" : ""),
+    });
+    expect(out.value).toBe("Royal Blue");
+  });
+
+  it("falls back to whatever was resolved when the product has no such axis", () => {
+    // Size, Material and Style are empty on most of this vendor's products.
+    const out = ebayCellValue({ column: "Variation Specific Value 3", value: "", resolve: () => "" });
+    expect(out.value).toBe("");
+  });
+});
+
+describe("the description wrapper", () => {
+  it("wraps plain text, because the exporter has already stripped the markup", () => {
+    expect(wrapDescriptionParagraph("Royal Blue Velvet.")).toBe("<p>Royal Blue Velvet.</p>");
+  });
+
+  it("leaves text that still has markup alone", () => {
+    expect(wrapDescriptionParagraph("<p>Already wrapped.</p>")).toBe("<p>Already wrapped.</p>");
+  });
+
+  it("leaves an empty cell empty", () => {
+    // An empty <p></p> is markup claiming there is a description.
+    expect(wrapDescriptionParagraph("")).toBe("");
+    expect(wrapDescriptionParagraph("   ")).toBe("");
   });
 });
