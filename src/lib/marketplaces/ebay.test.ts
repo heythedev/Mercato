@@ -4,7 +4,7 @@ import { isConstrainedMarketplace, taxonomyFor } from "./taxonomy-registry";
 import { profileFor } from "./profile";
 import { MARKETPLACE_IDS } from "./catalog";
 import { skipsVerification } from "@/lib/projects/marketplace-flow";
-import { ebayCategoryIdForPath, loadEbayCategories } from "@/lib/ai/ebay-taxonomy";
+import { clearEbayCache, ebayCategoryIdForPath, loadEbayCategories } from "@/lib/ai/ebay-taxonomy";
 
 // eBay is the first marketplace whose category list does not fit in a prompt,
 // and the first that is a flat CSV with no template describing its columns.
@@ -35,6 +35,15 @@ describe("its category list", () => {
     // not enough to UPLOAD one with, so an id-less row would surface as a
     // rejected file after everything else was already right.
     expect(rows.filter((r) => r.id).length).toBe(rows.length);
+  });
+
+  it("answers from a cold cache, which is every cold start in production", () => {
+    // The id lookup used to assign its map and THEN load, and loading clears
+    // every cache on a miss — so the map was nulled underneath the loop that
+    // was filling it and the next write threw. Every test that ran after
+    // something else had already warmed the cache passed.
+    clearEbayCache();
+    expect(ebayCategoryIdForPath("Antiques > Architectural & Garden > Beams")).toBe("162927");
   });
 
   it("keeps a path whose own name contains a comma", () => {

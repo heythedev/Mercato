@@ -145,10 +145,16 @@ export function hasEbayTaxonomy(): boolean {
  */
 export function ebayCategoryIdForPath(path: string): string | null {
   if (!cachedIdByPath) {
-    cachedIdByPath = new Map();
-    for (const r of loadEbayCategories()) {
-      if (r.id && !cachedIdByPath.has(r.path)) cachedIdByPath.set(r.path, r.id);
+    // Load BEFORE the map exists, not into it. loadEbayCategories clears
+    // every cache on a miss — including this one — so a map assigned first
+    // was set to null underneath the loop that was filling it, and the next
+    // write threw on a cold cache. Which is every cold start in production.
+    const rows = loadEbayCategories();
+    const byPath = new Map<string, string>();
+    for (const r of rows) {
+      if (r.id && !byPath.has(r.path)) byPath.set(r.path, r.id);
     }
+    cachedIdByPath = byPath;
   }
   return cachedIdByPath.get(String(path ?? "").trim()) ?? null;
 }

@@ -31,6 +31,7 @@ type Product = Pick<
 import { hasRequirementMatrix, profileFor, toTemplateCategoryPath } from "@/lib/marketplaces/profile";
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
+import { ebayCellValue, restrictedWordsForRun } from "./ebay-template";
 import { loadExportDefaults, defaultFor, settingEnabled, SETTING_KEYS, type ExportDefaults } from "./defaults";
 import { loadProductAttributes, saveProductAttributes, storedAttribute, type AttributeSource } from "./product-attributes";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
@@ -824,7 +825,7 @@ export async function generateCategoryZip(
     const fileName = sanitize(catLabel);
 
     if (template.fileFormat === "csv") {
-      zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns));
+      zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns, marketplace));
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
       const fileIssues: ComplianceIssue[] = [];
@@ -1306,7 +1307,7 @@ export async function generateSingleTemplateExport(
     : eligible;
 
   if (template.fileFormat === "csv") {
-    zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns));
+    zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns, marketplace));
   } else if (fileData) {
     // Preserve original template formatting, dropdowns, validations
     const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace, undefined,
@@ -1342,7 +1343,7 @@ export async function generateExportZip(
     const fileData = template.fileData ? (template.fileData as Buffer) : null;
 
     if (template.fileFormat === "csv") {
-      zip.file(`${fileName}.csv`, generateCsv(filtered, columns));
+      zip.file(`${fileName}.csv`, generateCsv(filtered, columns, marketplace));
     } else if (fileData) {
       const buffer = await fillTemplateXlsx(filtered, columns, fileData, marketplace, undefined,
         await loadExportDefaults(marketplace).catch(() => new Map()), new Map(), [], dropdownOptions);
@@ -3540,12 +3541,50 @@ function generateUncategorizedCsv(products: Product[]): string {
   return [header.map(esc).join(","), ...rows].join("\n");
 }
 
-function generateCsv(products: Product[], columns: Column[]): string {
+/**
+ * A CSV-format template, filled.
+ *
+ * `marketplace` is here for eBay, which is the only marketplace whose column
+ * rules cannot be read out of its template: a flat 149-column CSV with no
+ * requirement sheet and no dropdowns, so the rules are stated in
+ * ebay-template.ts and applied per cell here. Every other marketplace is
+ * unaffected — the eBay branch is entered on the profile id alone.
+ *
+ * Fields stay quoted for every marketplace. That is CSV's own escaping, not
+ * data: a category called "Chandeliers, Sconces & Lighting Fixtures" has to
+ * survive the comma in its name. eBay's no-inverted-commas rule is about the
+ * VALUE, and stripInvertedCommas has already applied it by the time the
+ * value arrives here.
+ */
+function generateCsv(products: Product[], columns: Column[], marketplace?: string): string {
+  const isEbay = !!marketplace && profileFor(marketplace).id === "ebay";
+
+  // The uploaded file's own Error column is this channel manager naming the
+  // terms it refused, which beats any list we could assemble. Collected once
+  // for the whole file rather than per product: a term that got one SKU
+  // refused will get the next one refused too.
+  const restricted = isEbay
+    ? restrictedWordsForRun(
+        products.map((p) => {
+          const vd = (p.vendorData ?? {}) as Record<string, unknown>;
+          return String(getVdNorm(vd).get(normalizeKey("Error")) ?? "");
+        }),
+      )
+    : undefined;
+
   const header = columns.map((c) => `"${c.label}"`).join(",");
   const rows = products.map((p) =>
     columns.map((c) => {
       const val = getProductField(p, c.key);
-      return `"${String(val ?? "").replace(/"/g, '""')}"`;
+      const out = isEbay
+        ? ebayCellValue({
+            column: c.label,
+            value: val,
+            categoryPath: p.marketplaceCategory,
+            restricted,
+          }).value
+        : String(val ?? "");
+      return `"${out.replace(/"/g, '""')}"`;
     }).join(",")
   );
   return [header, ...rows].join("\n");
