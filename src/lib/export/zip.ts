@@ -3582,7 +3582,17 @@ function generateCsv(products: Product[], columns: Column[], marketplace?: strin
             value: val,
             categoryPath: p.marketplaceCategory,
             restricted,
+            brand: p.brand,
             resolve: (field) => getProductField(p, field),
+            // vendorData ALONE. getProductField derives a value from whatever
+            // identifier is to hand, which is the behaviour that put a UPC in
+            // Variation Group ID and in EAN.
+            vendorValue: (field) => {
+              const vd = p.vendorData as Record<string, unknown> | null;
+              if (!vd) return undefined;
+              const hit = getVdNorm(vd).get(normalizeKey(field));
+              return hit === "" ? undefined : hit;
+            },
           }).value
         : String(val ?? "");
       return `"${out.replace(/"/g, '""')}"`;

@@ -311,7 +311,67 @@ export type EbayCellContext = {
    * columns shipped empty beside four correctly-filled name columns.
    */
   resolve?: (field: string) => unknown;
+  /**
+   * The vendor sheet alone, with none of the exporter's derivation.
+   *
+   * Needed because several columns must be filled ONLY from what the vendor
+   * actually supplied, and the normal resolution cannot tell you that — it
+   * answers with a value either way. See EBAY_VENDOR_ONLY_COLUMNS.
+   */
+  vendorValue?: (field: string) => unknown;
+  /** The product's own brand, for the Additional Info bullets. */
+  brand?: string | null;
 };
+
+/**
+ * Columns eBay must take from the vendor sheet or leave empty.
+ *
+ * The exporter's field map is shared by every marketplace and fills these
+ * from whatever identifier is to hand. That is right for the marketplace it
+ * was written for and wrong here:
+ *
+ *   Variation Group ID — mapped as `upcNorm ?? vendorSku ?? anyVendorId` for
+ *     Sears, where it groups variants. eBay reads it as "these rows are
+ *     variations of one another", so a per-product UPC declares every product
+ *     to be its own group of one. The accepted file leaves it empty.
+ *
+ *   EAN, ISBN — both fall back to the UPC. A 12-digit UPC is not an EAN and
+ *     is certainly not an ISBN; the accepted file fills UPC and leaves these
+ *     two blank. Writing a barcode into the wrong identifier field is how a
+ *     listing gets matched to somebody else's catalogue product.
+ *
+ * Each is still filled when the vendor sheet genuinely carries that column —
+ * a real EAN belongs in the EAN field. What is refused is the back-fill.
+ */
+export const EBAY_VENDOR_ONLY_COLUMNS: readonly string[] = [
+  "Variation Group ID",
+  "EAN",
+  "ISBN",
+] as const;
+
+/**
+ * The attributes eBay's Additional Info bullets carry, in order.
+ *
+ * The accepted file's bullets read `<li>LightColor Unlit</li><li>Brand
+ * Vickerman</li>` — the attribute's name, a space, its value. An attribute
+ * the product has no value for is skipped rather than emitted empty.
+ */
+export const EBAY_ADDITIONAL_INFO_ATTRIBUTES: readonly string[] = ["LightColor", "Brand"] as const;
+
+/** The Additional Info cell: one `<li>` per attribute the product answers. */
+export function additionalInfoBullets(
+  lookup: (field: string) => unknown,
+  brand?: string | null,
+): string {
+  const parts: string[] = [];
+  for (const attr of EBAY_ADDITIONAL_INFO_ATTRIBUTES) {
+    const value = attr === "Brand"
+      ? String(brand ?? lookup(attr) ?? "").trim()
+      : String(lookup(attr) ?? "").trim();
+    if (value) parts.push(`<li>${attr} ${value}</li>`);
+  }
+  return parts.join("");
+}
 
 export type EbayCellResult = {
   value: string;
@@ -344,6 +404,15 @@ export function ebayCellValue(ctx: EbayCellContext): EbayCellResult {
     raw = path;
   } else if (column in EBAY_CONSTANTS) {
     raw = EBAY_CONSTANTS[column]!;
+  } else if (column === "Additional Info") {
+    raw = additionalInfoBullets(
+      (field) => ctx.vendorValue?.(field) ?? ctx.resolve?.(field),
+      ctx.brand,
+    );
+  } else if (EBAY_VENDOR_ONLY_COLUMNS.includes(column)) {
+    // The vendor sheet or nothing. Checked BEFORE the normal resolution,
+    // because that resolution is exactly what would hand back a UPC here.
+    raw = String(ctx.vendorValue?.(column) ?? "");
   } else if (variationAxisFor(column)) {
     // The value column takes whatever its NAME column declares. Falls back to
     // the normal resolution when the product has nothing for that axis, which

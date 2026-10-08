@@ -166,3 +166,76 @@ describe("an eBay listing file, as the export actually produces it", () => {
     expect(row!["Product Description"]).toBe("<p>Royal Blue Velvet with Gold Trim.</p>");
   });
 });
+
+describe("identifiers, which the shared field map fills too eagerly", () => {
+  // The exporter's field map is shared by every marketplace and answers an
+  // identifier column from whatever identifier is to hand. Right for the
+  // marketplace each rule was written for; wrong here, and invisible until a
+  // finished file is read column by column.
+  const identifierColumns = [
+    "SKU", "Variation Group ID", "UPC", "ISBN", "EAN", "MPN", "Brand", "Additional Info",
+  ].map((h) => ({ key: h, label: h, required: false }));
+
+  async function identifiers(p: unknown): Promise<Record<string, string>> {
+    const buf = await generateSingleTemplateExport(
+      [p] as never,
+      { id: "t2", name: "eBay ids", columns: identifierColumns, fileFormat: "csv", category: null } as never,
+      "ebay",
+    );
+    const zip = await JSZip.loadAsync(buf);
+    const csv = await zip.file(Object.keys(zip.files)[0]!)!.async("string");
+    const [head, row] = csv.split("\n");
+    const cells = splitRow(row!);
+    return Object.fromEntries(splitRow(head!).map((h, i) => [h, cells[i] ?? ""]));
+  }
+
+  const vickerman = {
+    ...product,
+    vendorData: { Color: "Red", "Model No.": "A118314LED", LightColor: "Unlit" },
+  };
+
+  it("does not write the UPC into Variation Group ID", async () => {
+    // Mapped as `upcNorm ?? vendorSku ?? anyVendorId` for Sears, where it
+    // groups variants. eBay reads it as "these rows are variations of one
+    // another", so a per-product UPC declares every product its own group of
+    // one. The accepted file leaves it empty.
+    const row = await identifiers(vickerman);
+    expect(row["Variation Group ID"]).toBe("");
+    expect(row["UPC"]).toBe("734205765975");
+  });
+
+  it("does not write the UPC into EAN or ISBN", async () => {
+    // Both fall back to the UPC in the shared map. A 12-digit UPC is not an
+    // EAN and is certainly not an ISBN, and a barcode in the wrong field is
+    // how a listing gets matched to somebody else's catalogue product.
+    const row = await identifiers(vickerman);
+    expect(row["EAN"]).toBe("");
+    expect(row["ISBN"]).toBe("");
+  });
+
+  it("still writes them when the vendor sheet really carries them", async () => {
+    // What is refused is the back-fill, not the column.
+    const row = await identifiers({
+      ...vickerman,
+      vendorData: { ...vickerman.vendorData, EAN: "5012345678900", "Variation Group ID": "GRP-9" },
+    });
+    expect(row["EAN"]).toBe("5012345678900");
+    expect(row["Variation Group ID"]).toBe("GRP-9");
+  });
+
+  it("puts the model number in MPN, not a barcode", async () => {
+    const row = await identifiers(vickerman);
+    expect(row["MPN"]).toBe("A118314LED");
+  });
+
+  it("builds the Additional Info bullets the accepted file uses", async () => {
+    const row = await identifiers(vickerman);
+    expect(row["Additional Info"]).toBe("<li>LightColor Unlit</li><li>Brand Vickerman</li>");
+  });
+
+  it("skips an attribute the product has no value for", async () => {
+    // An empty <li>LightColor </li> is a bullet that says nothing.
+    const row = await identifiers({ ...vickerman, vendorData: { Color: "Red" } });
+    expect(row["Additional Info"]).toBe("<li>Brand Vickerman</li>");
+  });
+});
