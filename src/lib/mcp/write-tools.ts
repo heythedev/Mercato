@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_INLINE_UPLOAD_BYTES, MAX_WRITE } from "./limits";
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { toUnfilledReport } from "@/lib/export/job-store";
@@ -35,7 +36,7 @@ import { toTileId } from "@/lib/marketplaces/catalog";
  * re-emitting the text becomes slow and expensive. Past it the link is
  * the right answer, and the refusal says so.
  */
-const MAX_INLINE_UPLOAD_B64 = 8 * 1024 * 1024;
+const MAX_INLINE_UPLOAD_B64 = MAX_INLINE_UPLOAD_BYTES;
 
 const UPLOAD_TICKET_TTL_MS = 30 * 60 * 1000;
 import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
@@ -67,7 +68,7 @@ import { vendorCategoryOf, type McpTool, type ToolResult } from "./tools";
  *      is more likely a mistake than a plan.
  */
 
-const MAX_WRITE = 500;
+
 
 const ok = (data: unknown): ToolResult => ({
   content: [{ type: "text", text: JSON.stringify(data, null, 2) }],

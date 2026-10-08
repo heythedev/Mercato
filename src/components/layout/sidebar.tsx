@@ -11,6 +11,7 @@ import {
   ChevronsRight,
   Plug,
   Sparkles,
+  LifeBuoy,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -32,10 +33,15 @@ type Props = {
 // safety the tools do not already enforce.
 const connectNav = { href: "/settings/connect-claude", label: "Connect to Claude", icon: Plug };
 
+// Last in both lists, and in both for the same reason Connect to Claude is:
+// the people most likely to need it are the ones with the least support.
+const helpNav = { href: "/help", label: "Help", icon: LifeBuoy };
+
 const userNav = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/templates", label: "Templates", icon: FileText },
   connectNav,
+  helpNav,
 ];
 
 const adminNav = [
@@ -48,6 +54,7 @@ const adminNav = [
   // connected Claude, what they did with it, and what it changed.
   { href: "/admin/mcp-usage", label: "Claude usage", icon: Sparkles },
   connectNav,
+  helpNav,
 ];
 
 export function Sidebar({ role, showAmazonSources = false }: Props) {

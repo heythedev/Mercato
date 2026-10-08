@@ -104,7 +104,8 @@ export async function invokeAsUser(
  * balance is too low; this is the other half — a limit on how often, per
  * person, regardless of what the balance says.
  */
-export const RUNS_PER_DAY = 20;
+import { RUNS_PER_DAY } from "./limits";
+export { RUNS_PER_DAY };
 
 export async function runQuotaRemaining(userId: string, tools: string[]): Promise<number> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);

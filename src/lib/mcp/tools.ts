@@ -1,4 +1,10 @@
 ﻿import { z } from "zod";
+import {
+  CATEGORIZE_BATCH,
+  CATEGORIZE_BATCH_MAX,
+  DOWNLOAD_TICKET_TTL_MS,
+  MAX_ROWS,
+} from "./limits";
 import { prisma } from "@/lib/db";
 import {
   adminUserIds,
@@ -48,7 +54,7 @@ const ok = (data: unknown): ToolResult => ({
 });
 
 /** Caps exist so a tool cannot return a reply nothing can read. */
-const MAX_ROWS = 200;
+
 
 export type McpTool = {
   name: string;
@@ -66,8 +72,7 @@ export type McpTool = {
  * hundreds. The caller loops until nothing is left, exactly as the export's
  * client does.
  */
-const CATEGORIZE_BATCH = 40;
-const CATEGORIZE_BATCH_MAX = 100;
+
 
 /**
  * A vendor-supplied category, if the upload carried one.
@@ -142,9 +147,6 @@ export function columnsAnsweredByProduct(p: {
   return keys;
 }
 
-/** Long enough to click, or to run a curl; short enough that a link left in
- *  a transcript stops working before it matters. */
-const DOWNLOAD_TICKET_TTL_MS = 15 * 60 * 1000;
 
 export const TOOLS: McpTool[] = [
   {
