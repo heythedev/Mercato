@@ -141,6 +141,12 @@ const PROFILES: Record<string, Partial<MarketplaceProfile>> = {
   // decision that was made: these templates were checked and carry none.
   temu: {},
   sears: {},
+  // eBay's upload file is a flat CSV with no "Columns" sheet and no
+  // per-category matrix, so every trait here stays off. What it DOES carry
+  // that no other marketplace does — required columns the template itself
+  // never describes — is read from a filled reference file instead; see
+  // ebay-reference.ts.
+  ebay: {},
   amazon: {},
   wayfair: {},
 };

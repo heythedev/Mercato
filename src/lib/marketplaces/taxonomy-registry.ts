@@ -8,6 +8,11 @@ import {
   loadWayfairCategoryPaths,
   hasWayfairTaxonomy,
 } from "@/lib/ai/wayfair-taxonomy";
+import {
+  formatEbayTaxonomyForPrompt,
+  hasEbayTaxonomy,
+  loadEbayCategoryPaths,
+} from "@/lib/ai/ebay-taxonomy";
 import { profileFor } from "./profile";
 
 /**
@@ -52,6 +57,19 @@ const SOURCES: Record<string, TaxonomySource> = {
   sears: { load: loadSearsCategoryPaths, format: formatSearsTaxonomyForPrompt },
   mathis: { load: loadMathisCategoryPaths, format: formatMathisTaxonomyForPrompt, batchSize: 40 },
   walmart: { load: loadWalmartCategoryPaths, format: formatWalmartTaxonomyForPrompt, batchSize: 40 },
+  ebay: {
+    load: loadEbayCategoryPaths,
+    format: formatEbayTaxonomyForPrompt,
+    // Declared BEFORE the CSV arrives, and refusing until it does. Leaving
+    // eBay out of this map would have been worse than wrong: taxonomyFor
+    // returns null for an unknown marketplace, isConstrainedMarketplace goes
+    // false, and the model free-forms categories eBay does not have.
+    unavailableReason: () =>
+      hasEbayTaxonomy()
+        ? null
+        : "eBay categorization is not configured yet: src/lib/ai/data/ebay_categories.csv "
+          + "has not been supplied. Add eBay's category export before categorizing eBay projects.",
+  },
   wayfair: {
     load: loadWayfairCategoryPaths,
     format: formatWayfairTaxonomyForPrompt,

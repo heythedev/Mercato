@@ -19,6 +19,7 @@ export const MARKETPLACE_TILES: readonly MarketplaceTile[] = [
   { id: "mathis", label: "Mathis", domain: "mathishome.com" },
   { id: "sears", label: "Sears", domain: "sears.com" },
   { id: "wayfair", label: "Wayfair", domain: "wayfair.com" },
+  { id: "ebay", label: "eBay", domain: "ebay.com" },
 ] as const;
 
 /** All grantable top-level marketplace ids. */

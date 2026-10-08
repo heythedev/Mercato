@@ -1,7 +1,7 @@
 // Which marketplaces skip the Verify step. These have no public listing API to
 // check catalog data against, so a project goes Upload → Categorize directly.
 // Keep this in sync with the client-side SKIP_VERIFY set in project-detail.tsx.
-export const SKIP_VERIFY_MARKETPLACES = new Set(["temu", "bestbuy", "mathis", "sears", "wayfair"]);
+export const SKIP_VERIFY_MARKETPLACES = new Set(["temu", "bestbuy", "mathis", "sears", "wayfair", "ebay"]);
 
 /** True when this marketplace has no Verify step (Upload → Categorize directly). */
 export function skipsVerification(marketplace: string): boolean {
