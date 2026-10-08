@@ -15,6 +15,7 @@ import { VerifyStep } from "./steps/verify-step";
 import { CategorizeStep } from "./steps/categorize-step";
 import { ExportStep } from "./steps/export-step";
 import { SKIP_VERIFY_MARKETPLACES } from "@/lib/projects/marketplace-flow";
+import { marketplaceDomain, marketplaceLabel } from "@/lib/marketplaces/catalog";
 import { startPolling, sleepForPoll } from "@/lib/poll-scheduler";
 import { LottieLoader } from "@/components/ui/lottie-loader";
 
@@ -70,18 +71,9 @@ function stepIndex(status: string) {
   return 0;
 }
 
-const MARKETPLACE_LABELS: Record<string, string> = {
-  amazon_us: "Amazon US", amazon: "Amazon", bestbuy: "Best Buy", walmart: "Walmart",
-  temu: "Temu", mathis: "Mathis", sears: "Sears", wayfair: "Wayfair",
-};
-
-const MARKETPLACE_DOMAIN: Record<string, string> = {
-  amazon_us: "amazon.com", amazon: "amazon.com", bestbuy: "bestbuy.com", walmart: "walmart.com",
-  temu: "temu.com", mathis: "mathishome.com", sears: "sears.com", wayfair: "wayfair.com",
-};
 
 function MarketplaceLogo({ marketplace, className }: { marketplace: string; className?: string }) {
-  const domain = MARKETPLACE_DOMAIN[marketplace];
+  const domain = marketplaceDomain(marketplace);
   if (!domain) return null;
   return (
     <img
@@ -820,7 +812,7 @@ export function ProjectDetail({ project: initial, productCount }: {
                 <h1 className="font-bold text-lg truncate">{project.name}</h1>
                 <span className="flex items-center gap-1.5 text-muted-foreground text-sm shrink-0">
                   <MarketplaceLogo marketplace={project.marketplace} className="w-4 h-4" />
-                  {MARKETPLACE_LABELS[project.marketplace]}
+                  {marketplaceLabel(project.marketplace)}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">

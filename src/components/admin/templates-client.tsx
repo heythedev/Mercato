@@ -4,7 +4,7 @@ import { useState, useRef, useCallback } from "react";
 import { FileText, Plus, Trash2, X, ChevronDown, ChevronUp, Upload, FileSpreadsheet, Pencil, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { toTileId } from "@/lib/marketplaces/catalog";
+import { MARKETPLACE_IDS_WITH_VARIANTS, marketplaceDomain, toTileId } from "@/lib/marketplaces/catalog";
 import { Card, EmptyState, Notice, Pill } from "@/components/ui/primitives";
 
 type Template = {
@@ -18,17 +18,15 @@ type Template = {
   userId: string | null;
 };
 
-const MARKETPLACES = ["amazon_us", "amazon", "walmart", "bestbuy", "temu", "mathis", "sears"];
-
-// Group keys can be a marketplace id or the fallback "other". Domains drive the
-// favicon logos (same source used elsewhere in the app).
-const MARKETPLACE_DOMAIN: Record<string, string> = {
-  amazon_us: "amazon.com", amazon: "amazon.com", bestbuy: "bestbuy.com", walmart: "walmart.com",
-  temu: "temu.com", mathis: "mathishome.com", sears: "sears.com",
-};
+// From the catalogue, not a copy of it. The copy that used to live here was
+// written with seven entries and never updated: Wayfair could not be picked
+// from the day Wayfair shipped, and eBay could not be picked the day after it
+// was added. Neither failed — the marketplace simply was not in the list, so
+// it looked like the deploy had not landed.
+const MARKETPLACES = MARKETPLACE_IDS_WITH_VARIANTS;
 
 function MarketplaceLogo({ marketplace, className }: { marketplace: string; className?: string }) {
-  const domain = MARKETPLACE_DOMAIN[marketplace];
+  const domain = marketplaceDomain(marketplace);
   if (!domain) return null;
   return (
     // eslint-disable-next-line @next/next/no-img-element
