@@ -162,11 +162,13 @@ describe("how big each list actually is", () => {
   // its 5,242-line file is a product-type mapping, not assignable paths.
   it("matches what the loaders return", () => {
     const sizes = Object.fromEntries(
-      ["sears", "walmart", "mathis", "temu", "bestbuy"].map((mp) => [mp, categoryPathsFor(mp)!.length]),
+      ["sears", "walmart", "mathis", "temu", "bestbuy", "ebay"].map((mp) => [mp, categoryPathsFor(mp)!.length]),
     );
-    expect(sizes).toEqual({ sears: 329, walmart: 492, mathis: 504, temu: 717, bestbuy: 1450 });
+    expect(sizes).toEqual({ sears: 329, walmart: 492, mathis: 504, temu: 717, bestbuy: 1450, ebay: 18095 });
   });
 
+  // eBay is deliberately absent. At 18,095 paths it is the first list that
+  // has to be drilled rather than sent, which is what the block below covers.
   it("every one of them fits in a batch today", () => {
     for (const mp of ["sears", "walmart", "mathis", "temu", "bestbuy"]) {
       expect(categoryPathsFor(mp)!.length, mp).toBeLessThanOrEqual(INLINE_TAXONOMY_MAX);
@@ -183,9 +185,11 @@ describe("how big each list actually is", () => {
 });
 
 describe("drilling into a list too large to send whole", () => {
-  // Nothing needs this today — Best Buy at 1,450 is the largest and still
-  // fits — but it is one CSV update away, and the alternative when a list
-  // does not fit is truncation, which hides the right answer.
+  // Written before anything needed it, on the grounds that the alternative
+  // when a list does not fit is truncation, which hides the right answer.
+  // eBay needs it: 18,095 paths against a 1,500 inline ceiling. The Best Buy
+  // cases below stay as they are — they cover the mechanics on a list small
+  // enough to assert against exhaustively.
   const bestbuy = categoryIndex("bestbuy")!;
 
   it("offers only real prefixes of real paths", () => {

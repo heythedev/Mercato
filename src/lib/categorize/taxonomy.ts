@@ -4,6 +4,7 @@ import { loadSearsCategoryPaths } from "@/lib/ai/sears-taxonomy";
 import { loadTemuCategoryPaths } from "@/lib/ai/temu-taxonomy";
 import { loadWayfairCategoryPaths } from "@/lib/ai/wayfair-taxonomy";
 import { loadWalmartCategoryPaths } from "@/lib/ai/walmart-taxonomy";
+import { loadEbayCategoryPaths } from "@/lib/ai/ebay-taxonomy";
 
 /**
  * The closed set of categories a product may be given, per marketplace.
@@ -35,6 +36,12 @@ const LOADERS: Record<string, Loader> = {
   temu: loadTemuCategoryPaths,
   wayfair: loadWayfairCategoryPaths,
   walmart: loadWalmartCategoryPaths,
+  // 18,095 paths — twelve times the next largest, and the first list that
+  // does not fit in one prompt. It is here anyway: this map is what makes a
+  // proposed category checkable, and the drill-down caller needs the full set
+  // to narrow against. Sending it whole is the caller's decision, not this
+  // map's, and INLINE_TAXONOMY_MAX is where that decision is made.
+  ebay: loadEbayCategoryPaths,
 };
 
 /**
