@@ -483,7 +483,18 @@ export async function generateCategoryZip(
   // the 366 Best Buy products in the live project has ever been verified, so
   // there is no liveData to read them from. Identifier coverage is what makes
   // the lookup worth making — 354 of those 366 carry a UPC and 303 an ASIN.
-  if (["mathis", "bestbuy"].includes(marketplace.toLowerCase())) {
+  // eBay needs it for a third reason again: its template asks for Colour,
+  // Size and Style per product, and this vendor's sheets carry Material and
+  // almost nothing else — so those columns shipped empty with nothing wrong
+  // anywhere. The wiring worked; there was nothing to read. Synccentric
+  // returns colour and size in the same response as the dimensions, so the
+  // answer was already being fetched for two marketplaces and discarded for
+  // the third.
+  //
+  // Read from the profile rather than a list here, because a list here is
+  // what left eBay out: a new marketplace inherits the `else` branch, and the
+  // `else` branch is silent.
+  if (profileFor(marketplace).enrichesFromCatalog) {
     // "0" is not a width. The vendor sheet carries a Width column filled with
     // zeros on every row, and a truthiness test read that as "already known",
     // so the lookup was skipped for exactly the products that needed it most.
@@ -498,7 +509,12 @@ export async function generateCategoryZip(
         blank(vd["Width"]) ||
         // Colour is REQUIRED on most Best Buy categories and blank on most
         // vendor rows; it comes back in the same lookup as the dimensions.
-        blank(vd["Color"] ?? vd["Colour"] ?? vd["color"])
+        blank(vd["Color"] ?? vd["Colour"] ?? vd["color"]) ||
+        // And size with it. Required on Best Buy, an eBay variation axis, and
+        // returned by the same call — a product short of only its size was
+        // being left short for no reason at all. It does mean a few more
+        // lookups: a row complete but for Size now qualifies where it did not.
+        blank(vd["Size"] ?? vd["size"])
       );
     });
     if (needing.length) {

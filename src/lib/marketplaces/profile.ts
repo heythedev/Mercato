@@ -91,6 +91,18 @@ export type MarketplaceProfile = {
   dimensionsAsDecimal: boolean;
 
   /**
+   * Mandatory cells this marketplace cannot get from the vendor sheet are
+   * looked up in a product catalogue (Synccentric for identity and
+   * attributes, Keepa for measurements) before the export runs.
+   *
+   * On where the sheet is thin and the template is demanding, and that is a
+   * judgement about the TEMPLATE, not about the data — every lookup costs a
+   * Synccentric search, so a marketplace whose templates ask for little
+   * should not be paying for one.
+   */
+  enrichesFromCatalog: boolean;
+
+  /**
    * A product with no category of its own inherits the category the template
    * declares. Right where one template serves one category; wrong where a
    * template spans many, which is why it is not the default.
@@ -117,12 +129,14 @@ export const DEFAULT_PROFILE: Omit<MarketplaceProfile, "id"> = {
   categoryDropdownFromTaxonomy: false,
   categoryScopedColumnCodes: false,
   dimensionsAsDecimal: false,
+  enrichesFromCatalog: false,
   templateCategoryFallback: false,
 };
 
 const PROFILES: Record<string, Partial<MarketplaceProfile>> = {
   mathis: {
     requirementMatrix: true,
+    enrichesFromCatalog: true,
     categoryRoot: "Mathis Home",
     excludesOfferColumns: true,
     dropdownsByDefinedName: true,
@@ -132,6 +146,7 @@ const PROFILES: Record<string, Partial<MarketplaceProfile>> = {
   bestbuy: {
     requirementMatrix: true,
     categoryScopedColumnCodes: true,
+    enrichesFromCatalog: true,
   },
   walmart: {
     templateCategoryFallback: true,
@@ -145,8 +160,15 @@ const PROFILES: Record<string, Partial<MarketplaceProfile>> = {
   // per-category matrix, so every trait here stays off. What it DOES carry
   // that no other marketplace does — required columns the template itself
   // never describes — is read from a filled reference file instead; see
-  // ebay-reference.ts.
-  ebay: {},
+  // ebay-template.ts.
+  //
+  // Catalogue enrichment is on. eBay asks for Colour, Size and Style per
+  // product and this vendor's sheets carry Material and little else, so the
+  // columns were shipping empty with nothing wrong anywhere — the wiring
+  // worked, there was simply nothing to read. Synccentric returns colour and
+  // size in the same response as everything else, so the answer was already
+  // being fetched for two other marketplaces and thrown away for this one.
+  ebay: { enrichesFromCatalog: true },
   amazon: {},
   wayfair: {},
 };

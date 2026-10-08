@@ -18,6 +18,26 @@ describe("eBay is a marketplace Mercato knows about", () => {
     expect(skipsVerification("ebay")).toBe(true);
   });
 
+  it("looks missing attributes up in the catalogue", () => {
+    // eBay asks for Colour, Size and Style per product and this vendor's
+    // sheets carry Material and little else, so those columns shipped empty
+    // with nothing wrong anywhere — the wiring worked, there was nothing to
+    // read. Synccentric returns colour and size in the same response as the
+    // dimensions, so the answer was already being fetched for Mathis and
+    // Best Buy and discarded here.
+    expect(profileFor("ebay").enrichesFromCatalog).toBe(true);
+    expect(profileFor("mathis").enrichesFromCatalog).toBe(true);
+    expect(profileFor("bestbuy").enrichesFromCatalog).toBe(true);
+  });
+
+  it("does not turn catalogue lookups on for a marketplace nobody has declared", () => {
+    // Every lookup costs a Synccentric search against a daily quota, so this
+    // is one trait where the conservative default is about money as well as
+    // correctness.
+    expect(profileFor("etsy").enrichesFromCatalog).toBe(false);
+    expect(profileFor("walmart").enrichesFromCatalog).toBe(false);
+  });
+
   it("claims no template capability it has not demonstrated", () => {
     const p = profileFor("ebay");
     // A flat CSV: no "Columns" sheet, no per-category matrix, no scoped codes.
