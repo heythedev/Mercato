@@ -1,6 +1,7 @@
 import { expect, it, describe } from "vitest";
 import JSZip from "jszip";
 import { generateSingleTemplateExport } from "./zip";
+import { exportGroupOf } from "./category-group";
 
 /**
  * The export, driven the way the Export button drives it.
@@ -18,7 +19,8 @@ import { generateSingleTemplateExport } from "./zip";
 const COLUMNS = [
   "SKU", "Localized For", "Variation Specific Name 1", "Variation Specific Value 1",
   "Title", "Product Description", "UPC", "Brand", "Condition", "Measurement System",
-  "Channel ID", "Category", "Payment Policy", "Store Category Name 1", "Active",
+  "Channel ID", "Category", "Payment Policy", "Store Category Name 1", "Active", "EPID",
+  "Attribute Name 2", "Attribute Value 2", "Attribute Name 5", "Attribute Value 5",
 ].map((h) => ({ key: h, label: h, required: false }));
 
 function splitRow(line: string): string[] {
@@ -84,7 +86,9 @@ async function exportRows(products: unknown[]): Promise<Record<string, string>[]
   const zip = await JSZip.loadAsync(buf);
   const name = Object.keys(zip.files).find((n) => n.endsWith(".csv"))!;
   const csv = await zip.file(name)!.async("string");
-  const lines = csv.split("\n");
+  // The file opens with a byte-order mark so Excel reads it as UTF-8.
+  expect(csv.charCodeAt(0)).toBe(0xfeff);
+  const lines = csv.slice(1).split("\n");
   const head = splitRow(lines[0]!);
   return lines.slice(1).filter((l) => l.trim()).map((l) => {
     const cells = splitRow(l);
@@ -93,10 +97,24 @@ async function exportRows(products: unknown[]): Promise<Record<string, string>[]
 }
 
 describe("an eBay listing file, as the export actually produces it", () => {
-  it("writes the category as an id and as a path", async () => {
+  it("writes the category as eBay's id, and leaves the store category empty", async () => {
     const [row] = await exportRows([product]);
     expect(row!["Category"]).toBe("162927");
-    expect(row!["Store Category Name 1"]).toBe("Antiques > Architectural & Garden > Beams");
+    expect(row!["Store Category Name 1"]).toBe("");
+  });
+
+  it("spells the header ePID, as the seller's file does", async () => {
+    const [row] = await exportRows([product]);
+    expect(Object.keys(row!)).toContain("ePID");
+    expect(Object.keys(row!)).not.toContain("EPID");
+  });
+
+  it("writes the item specifics from the row's own cells", async () => {
+    const [row] = await exportRows([product]);
+    expect(row!["Attribute Name 2"]).toBe("UPC");
+    expect(row!["Attribute Value 2"]).toBe("734205765975");
+    expect(row!["Attribute Name 5"]).toBe("Color");
+    expect(row!["Attribute Value 5"]).toBe("Red");
   });
 
   it("keeps a category whose name contains a comma intact through the CSV", async () => {
@@ -104,16 +122,17 @@ describe("an eBay listing file, as the export actually produces it", () => {
     // file while carrying no quote marks in its data. Both at once.
     const rows = await exportRows([product, withComma]);
     expect(rows[1]!["Category"]).toBe("63516");
-    expect(rows[1]!["Store Category Name 1"]).toBe(
-      "Antiques > Architectural & Garden > Chandeliers, Sconces & Lighting Fixtures",
-    );
+    expect(rows[1]!["SKU"]).toBe("VICK-QK242550");
   });
 
-  it("leaves no quote mark in any cell", async () => {
+  it("leaves no quote mark in any cell's data", async () => {
     const rows = await exportRows([product, withComma]);
     for (const row of rows) {
       for (const [col, val] of Object.entries(row)) {
-        expect(String(val), col).not.toContain('"');
+        // The description's own heading markup is the one place quotes
+        // belong; its text is checked with the rest.
+        const data = col === "Product Description" ? String(val).replace(/<[^>]*>/g, "") : String(val);
+        expect(data, col).not.toContain('"');
       }
     }
     expect(rows[0]!["Title"]).toBe("72 Red Deluxe Mixed Berry");
@@ -126,9 +145,10 @@ describe("an eBay listing file, as the export actually produces it", () => {
     expect(row!["Channel ID"]).toBe("EBAY_US");
     expect(row!["Condition"]).toBe("NEW");
     expect(row!["Measurement System"]).toBe("ENGLISH");
-    expect(row!["Payment Policy"]).toBe("PayPal:Immediate pay");
+    expect(row!["Payment Policy"]).toBe("eBay managed Payment");
     expect(row!["Active"]).toBe("1");
-    expect(row!["Variation Specific Name 1"]).toBe("Color");
+    // Every product is its own listing, not a variation of one.
+    expect(row!["Variation Specific Name 1"]).toBe("");
   });
 
   it("still fills the per-product columns beside the constants", async () => {
@@ -136,21 +156,20 @@ describe("an eBay listing file, as the export actually produces it", () => {
     expect(row!["SKU"]).toBe("VICK-P240772");
     expect(row!["UPC"]).toBe("734205765975");
     expect(row!["Brand"]).toBe("Vickerman");
-    expect(row!["Variation Specific Value 1"]).toBe("Red");
+    expect(row!["Variation Specific Value 1"]).toBe("");
   });
 
-  it("ships a description as a paragraph, not a page fragment", async () => {
+  it("lays the description out as the seller's file does", async () => {
     const [row] = await exportRows([product]);
     const desc = row!["Product Description"]!;
-    // The Knockout binding is gone.
-    expect(desc).not.toContain("data-bind");
-    expect(desc).not.toContain("product-name");
-    // And it is wrapped the way the accepted file wraps it. This is the bug
-    // the unit tests missed: the exporter strips HTML from every description
-    // for Walmart's sake, so by the time eBay's rules run there is no markup
-    // left to keep — the wrapper has to be put back.
-    expect(desc.startsWith("<p>")).toBe(true);
-    expect(desc.endsWith("</p>")).toBe(true);
+    // The row's own title as the heading — not the vendor page's heading,
+    // whose binding is cleaned out of the copy.
+    expect(desc.startsWith(
+      '<h1 class="product-name" data-bind="text: product().displayName()">72 Red Deluxe Mixed Berry</h1><p>',
+    )).toBe(true);
+    expect(desc).not.toContain("product().name");
+    expect(desc).toContain("</p><li>LightColor Unlit</li><li>Brand Vickerman</li><p>Return Policy</p>");
+    expect(desc.endsWith("return shipping charges</li>")).toBe(true);
   });
 
   it("removes the term the channel manager refused, taking it from the file's own error", async () => {
@@ -163,7 +182,7 @@ describe("an eBay listing file, as the export actually produces it", () => {
 
   it("leaves a product with no error text alone", async () => {
     const [row] = await exportRows([withComma]);
-    expect(row!["Product Description"]).toBe("<p>Royal Blue Velvet with Gold Trim.</p>");
+    expect(row!["Product Description"]).toContain("<p>Royal Blue Velvet with Gold Trim.</p>");
   });
 });
 
@@ -184,7 +203,7 @@ describe("identifiers, which the shared field map fills too eagerly", () => {
     );
     const zip = await JSZip.loadAsync(buf);
     const csv = await zip.file(Object.keys(zip.files)[0]!)!.async("string");
-    const [head, row] = csv.split("\n");
+    const [head, row] = csv.replace(/^\uFEFF/, "").split("\n");
     const cells = splitRow(row!);
     return Object.fromEntries(splitRow(head!).map((h, i) => [h, cells[i] ?? ""]));
   }
@@ -228,14 +247,20 @@ describe("identifiers, which the shared field map fills too eagerly", () => {
     expect(row["MPN"]).toBe("A118314LED");
   });
 
-  it("builds the Additional Info bullets the accepted file uses", async () => {
+  it("leaves Additional Info empty — its bullets are in the description now", async () => {
     const row = await identifiers(vickerman);
-    expect(row["Additional Info"]).toBe("<li>LightColor Unlit</li><li>Brand Vickerman</li>");
+    expect(row["Additional Info"]).toBe("");
   });
+});
 
-  it("skips an attribute the product has no value for", async () => {
-    // An empty <li>LightColor </li> is a bullet that says nothing.
-    const row = await identifiers({ ...vickerman, vendorData: { Color: "Red" } });
-    expect(row["Additional Info"]).toBe("<li>Brand Vickerman</li>");
+describe("one file for the whole catalogue", () => {
+  it("puts every eBay category in the same export group", () => {
+    // The category travels in each row's Category column; five files split
+    // by category only have to be joined again before upload.
+    const a = exportGroupOf("Home & Garden > Holiday & Seasonal Décor > Christmas Trees", "ebay");
+    const b = exportGroupOf("Home & Garden > Home Décor > Floral Décor", "ebay");
+    expect(a).toBe(b);
+    // Other marketplaces keep their own grouping.
+    expect(exportGroupOf("Rugs > Indoor", "mathis")).toBe("Rugs");
   });
 });

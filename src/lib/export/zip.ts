@@ -3588,33 +3588,53 @@ function generateCsv(products: Product[], columns: Column[], marketplace?: strin
       )
     : undefined;
 
-  const header = columns.map((c) => `"${c.label}"`).join(",");
-  const rows = products.map((p) =>
-    columns.map((c) => {
-      const val = getProductField(p, c.key);
-      const out = isEbay
-        ? ebayCellValue({
-            column: c.label,
-            value: val,
-            categoryPath: p.marketplaceCategory,
-            restricted,
-            brand: p.brand,
-            resolve: (field) => getProductField(p, field),
-            // vendorData ALONE. getProductField derives a value from whatever
-            // identifier is to hand, which is the behaviour that put a UPC in
-            // Variation Group ID and in EAN.
-            vendorValue: (field) => {
-              const vd = p.vendorData as Record<string, unknown> | null;
-              if (!vd) return undefined;
-              const hit = getVdNorm(vd).get(normalizeKey(field));
-              return hit === "" ? undefined : hit;
-            },
-          }).value
-        : String(val ?? "");
+  // eBay's header is the seller's own spelling, ePID — some stored copies of
+  // the template carry EPID, and a strict importer keys on the exact text.
+  const headerLabel = (label: string) => (isEbay && /^epid$/i.test(label.trim()) ? "ePID" : label);
+  const header = columns.map((c) => `"${headerLabel(c.label)}"`).join(",");
+  const rows = products.map((p) => {
+    // One eBay row, cell by cell, where a cell may read another cell of the
+    // same row (the item specifics repeat UPC, MPN and the dimensions; the
+    // description's heading is the title). Memoised, and seeded empty before
+    // it is computed so a cell that somehow reads itself ends instead of
+    // recursing.
+    const done = new Map<string, string>();
+    const ebayCell = (label: string): string => {
+      const hit = done.get(label);
+      if (hit !== undefined) return hit;
+      done.set(label, "");
+      const col = columns.find((c) => c.label === label);
+      const out = ebayCellValue({
+        column: label,
+        value: getProductField(p, col?.key ?? label),
+        categoryPath: p.marketplaceCategory,
+        restricted,
+        brand: p.brand,
+        sku: p.vendorSku,
+        imageUrl: p.imageUrl,
+        resolve: (field) => getProductField(p, field),
+        // vendorData ALONE. getProductField derives a value from whatever
+        // identifier is to hand, which is the behaviour that put a UPC in
+        // Variation Group ID and in EAN.
+        vendorValue: (field) => {
+          const vd = p.vendorData as Record<string, unknown> | null;
+          if (!vd) return undefined;
+          const hit = getVdNorm(vd).get(normalizeKey(field));
+          return hit === "" ? undefined : hit;
+        },
+        cell: ebayCell,
+      }).value;
+      done.set(label, out);
+      return out;
+    };
+    return columns.map((c) => {
+      const out = isEbay ? ebayCell(c.label) : String(getProductField(p, c.key) ?? "");
       return `"${out.replace(/"/g, '""')}"`;
-    }).join(",")
-  );
-  return [header, ...rows].join("\n");
+    }).join(",");
+  });
+  // A byte-order mark on eBay's file: without one Excel opens a UTF-8 CSV as
+  // Windows-1252 and "Décor" in a category or a title arrives as "DÃ©cor".
+  return (isEbay ? "﻿" : "") + [header, ...rows].join("\n");
 }
 
 // ── Field resolver ────────────────────────────────────────────────────────────

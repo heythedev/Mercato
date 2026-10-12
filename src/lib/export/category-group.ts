@@ -28,6 +28,18 @@ export function groupsByDepartment(marketplace: string): boolean {
 }
 
 /**
+ * eBay takes the whole catalogue as ONE sheet — the seller's channel manager
+ * is fed a single file, and the category travels in each row's own Category
+ * column, so splitting by category only hands them five files to re-join.
+ */
+export function singleFile(marketplace: string): boolean {
+  return marketplace.toLowerCase() === "ebay";
+}
+
+/** The one group, and so the one file name, of a single-file marketplace. */
+export const SINGLE_FILE_GROUP = "eBay Listings";
+
+/**
  * The export-file group a category belongs to for the given marketplace.
  * Mathis  → top-level department  ("Rugs > Rug Type > Indoor Rugs" → "Rugs")
  * Temu    → Category > Sub-Category (drops Product Type to avoid hundreds of tiny files)
@@ -38,6 +50,7 @@ export function groupsByDepartment(marketplace: string): boolean {
  */
 export function exportGroupOf(category: string, marketplace: string): string {
   if (groupsByDepartment(marketplace)) return departmentOf(category);
+  if (singleFile(marketplace)) return SINGLE_FILE_GROUP;
   if (marketplace.toLowerCase() === "temu") {
     const parts = category.split(" > ");
     return parts.length >= 2 ? `${parts[0]} > ${parts[1]}` : category;

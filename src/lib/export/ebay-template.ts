@@ -9,18 +9,23 @@ import { ebayCategoryIdForPath } from "@/lib/ai/ebay-taxonomy";
  * rules cannot be read out of the template; they have to be stated, and this
  * is where they are stated.
  *
+ * The shape of a row is the seller's own filled file (vidhi_3.xlsx, October
+ * 2026): one sheet for the whole catalogue, item specifics in Attribute
+ * Name/Value 1–14, the description as heading + paragraph + bullets + the
+ * return policy, and the variation, EAN and store-category columns left
+ * empty. Where this file and that one disagree, that one is right.
+ *
  * The four:
  *
- *   1. The category goes in TWO columns, as an id and as a path. CT
- *      ("Category") takes eBay's numeric id; DC ("Store Category Name 1")
- *      takes the human path. An id alone is unreadable to the person checking
- *      the file; a path alone is not what eBay keys on. Both, or neither is
- *      much use.
+ *   1. The category is eBay's numeric id, in "Category". The seller's file
+ *      leaves "Store Category Name 1" empty, so the readable path no longer
+ *      goes there — it is a store category to eBay, not a label.
  *
  *   2. No inverted commas in any cell. A 72" garland ships as `72`, not
  *      `72"`. This is a house rule rather than an eBay one, and it is applied
  *      at the point every cell is written rather than per column, because a
- *      per-column rule is one that gets forgotten on column 150.
+ *      per-column rule is one that gets forgotten on column 150. The one
+ *      exception is the description's own markup — see ebayDescriptionHtml.
  *
  *   3. Some columns are the same on every row forever. They are declared
  *      below rather than asked of a model — a constant is not a question, and
@@ -37,8 +42,6 @@ import { ebayCategoryIdForPath } from "@/lib/ai/ebay-taxonomy";
 
 /** CT — eBay's numeric category id. */
 export const EBAY_CATEGORY_ID_COLUMN = "Category";
-/** DC — the same category as a readable path. */
-export const EBAY_CATEGORY_PATH_COLUMN = "Store Category Name 1";
 
 // ── 2. No inverted commas ────────────────────────────────────────────────────
 
@@ -73,10 +76,10 @@ export function stripInvertedCommas(value: string): string {
  * look when a file is rejected for a reason that has nothing to do with the
  * product.
  *
- * Nothing vendor-specific is here. The reference file also had `Warehouse
- * Location ID` = VICK and a cost price in TBP; those belong to one vendor and
- * one commercial arrangement, and writing them onto every product of every
- * vendor would be wrong in a way nothing downstream would catch.
+ * Nothing vendor-specific is here. `Warehouse Location ID` is VICK in the
+ * reference file because VICK is that vendor's SKU prefix, so it is derived
+ * from each product's own SKU (warehouseLocationId) rather than written as a
+ * constant onto every vendor's products.
  */
 export const EBAY_FORMAT_CONSTANTS: Record<string, string> = {
   "Localized For": "en_US",
@@ -84,20 +87,16 @@ export const EBAY_FORMAT_CONSTANTS: Record<string, string> = {
   "Measurement System": "ENGLISH",
   "Channel ID": "EBAY_US",
   "Active": "1",
-  "Minimum Advertised Price": "0",
-  // The four variation axes eBay expects named, even on a product that has no
-  // variations: the NAME column is the axis, the VALUE column beside it is
-  // the product's own answer and is filled per product.
-  "Variation Specific Name 1": "Color",
-  "Variation Specific Name 2": "Size",
-  "Variation Specific Name 3": "Material",
-  "Variation Specific Name 4": "Style",
+  "Total Ship To Home Quantity": "1",
+  "CANA Price": "0",
 };
 
 /** Constants that follow the seller's account setup rather than the format. */
 export const EBAY_ACCOUNT_CONSTANTS: Record<string, string> = {
-  "Shipping Policy": "2",
-  "Payment Policy": "PayPal:Immediate pay",
+  // The policy NAMES as they exist on the seller's eBay account. A name eBay
+  // cannot find is a rejected row, so these follow the account, not a guess.
+  "Shipping Policy": "2 business days GS",
+  "Payment Policy": "eBay managed Payment",
   "Return Policy": "Returns Accepted 30 days",
   // A carrier service, in a column eBay's own schema calls a cost. That is
   // how the accepted file had it; it is not a typo here.
@@ -108,6 +107,40 @@ export const EBAY_CONSTANTS: Record<string, string> = {
   ...EBAY_FORMAT_CONSTANTS,
   ...EBAY_ACCOUNT_CONSTANTS,
 };
+
+/**
+ * Columns the seller's file leaves empty, written empty whatever the shared
+ * field map would have put there.
+ *
+ *   Variation columns — a filled Variation Specific pair, or a Variation Group
+ *     ID, tells eBay the row is one variation of a multi-variation listing.
+ *     Every product here is its own listing; Colour and Size go in the item
+ *     specifics instead.
+ *   Store Category Name 1 — a store category on the seller's eBay shop, not a
+ *     label for the eBay category.
+ *   Additional Info — its bullets now live inside the description.
+ *   Weight Minor — the seller's file states weight in whole pounds.
+ *   Minimum Advertised Price — 0 is a price.
+ *   Error — the channel manager's column, filled by it on the way back.
+ */
+export const EBAY_BLANK_COLUMNS: ReadonlySet<string> = new Set([
+  ...[1, 2, 3, 4, 5].flatMap((n) => [`Variation Specific Name ${n}`, `Variation Specific Value ${n}`]),
+  "Store Category Name 1",
+  "Additional Info",
+  "Weight Minor",
+  "Minimum Advertised Price",
+  "Error",
+]);
+
+/**
+ * The return policy every description ends with, as the seller's file has it.
+ * An account-level text, like the policy names above.
+ */
+export const EBAY_RETURN_POLICY_HTML =
+  "<p>Return Policy</p>"
+  + "<li>Remorse Returns- Return Shipping Buyer Pays + 20% Restocking Fees</li>"
+  + "<li>For Damaged/defective items received- contact us within 48 hrs of the receipt of the item</li>"
+  + "<li>Non-availability/ incorrect address we charge restocking fees of 20% + return shipping charges</li>";
 
 // ── 4. Restricted keywords ───────────────────────────────────────────────────
 
@@ -230,6 +263,54 @@ export function scrubRestricted(
   };
 }
 
+/**
+ * Plain-English stand-ins for the terms this seller's channel manager has
+ * refused, for use in descriptions.
+ *
+ * Removal was the rule and it read badly at scale: Vickerman's copy says
+ * "garland" in nearly every sentence about a garland, and deleting it left
+ * "This durable is maintenance free" and "shape the to fit" in 154 places in
+ * one 159-product file. These two terms have a word that is right in every
+ * sentence they appear in, so they are swapped rather than deleted. Every
+ * other restricted term is still removed — no single stand-in is right for
+ * "apple" or "shell".
+ */
+export const EBAY_RESTRICTED_REPLACEMENTS: Readonly<Record<string, string>> = {
+  garland: "trim",
+  garlands: "trims",
+  ensure: "make sure",
+  ensures: "makes sure",
+  ensured: "made sure",
+};
+
+/**
+ * Text with the replaceable restricted terms swapped for their stand-ins, and
+ * any other restricted term removed. Reports every term it touched.
+ */
+export function rewordRestricted(
+  text: string,
+  words: readonly string[],
+): { text: string; removed: string[] } {
+  let out = String(text ?? "");
+  const touched: string[] = [];
+  const restricted = new Set(words.map((w) => w.toLowerCase()));
+  for (const [term, stand] of Object.entries(EBAY_RESTRICTED_REPLACEMENTS)) {
+    // "garlands" is replaceable because "garland" is restricted.
+    const root = term.replace(/(s|d)$/, "");
+    if (!restricted.has(term) && !restricted.has(root)) continue;
+    const re = new RegExp(`(^|[^A-Za-z0-9])(${escapeRe(term)})(?=[^A-Za-z0-9]|$)`, "gi");
+    out = out.replace(re, (_m, before: string, found: string) => {
+      touched.push(restricted.has(term) ? term : root);
+      const cased = found[0] === found[0]!.toUpperCase()
+        ? stand[0]!.toUpperCase() + stand.slice(1)
+        : stand;
+      return `${before}${cased}`;
+    });
+  }
+  const rest = scrubRestricted(out, words);
+  return { text: rest.text, removed: [...new Set([...touched, ...rest.removed])] };
+}
+
 // ── The description, as prose rather than as a page ──────────────────────────
 
 const KEEP_TAGS = new Set(["p", "br", "ul", "ol", "li", "strong", "em", "b", "i"]);
@@ -266,17 +347,6 @@ export function cleanDescriptionHtml(html: string): string {
 }
 
 /**
- * The product field a "Variation Specific Value N" column should be filled
- * from — the axis its paired NAME column declares — or null when the column
- * is not one of those.
- */
-export function variationAxisFor(column: string): string | null {
-  const m = /^Variation Specific Value (\d+)$/.exec(String(column ?? "").trim());
-  if (!m) return null;
-  return EBAY_FORMAT_CONSTANTS[`Variation Specific Name ${m[1]}`] ?? null;
-}
-
-/**
  * A plain-text description given the paragraph wrapper eBay's accepted file
  * uses. Already-marked-up text is left alone, and so is an empty cell — an
  * empty `<p></p>` is markup claiming there is a description.
@@ -286,6 +356,155 @@ export function wrapDescriptionParagraph(text: string): string {
   if (!s) return "";
   if (/<[a-zA-Z][^>]*>/.test(s)) return s;
   return `<p>${s}</p>`;
+}
+
+/**
+ * The whole Product Description cell, laid out as the seller's file lays it:
+ *
+ *   <h1 class="product-name" data-bind="…">Title</h1>
+ *   <p>the product copy</p>
+ *   <li>LightColor …</li><li>Brand …</li>
+ *   the return policy
+ *
+ * The heading is copied attribute for attribute, binding included. It looks
+ * like a stray page fragment (cleanDescriptionHtml strips exactly that from a
+ * vendor's own copy), but it is what the seller's channel manager is fed, and
+ * with the title inside it renders as a heading.
+ *
+ * Its quote marks are the reason the no-inverted-commas rule is applied to
+ * the PARTS here — title, copy, bullet values — and not to the finished cell:
+ * stripped, `class="product-name"` becomes an attribute no browser parses.
+ */
+export function ebayDescriptionHtml(parts: {
+  title: string;
+  body: string;
+  lightColor: string;
+  brand: string;
+}): string {
+  const title = stripInvertedCommas(parts.title);
+  const body = wrapDescriptionParagraph(stripInvertedCommas(parts.body));
+  const bullets = [
+    parts.lightColor ? `<li>LightColor ${stripInvertedCommas(parts.lightColor)}</li>` : "",
+    parts.brand ? `<li>Brand ${stripInvertedCommas(parts.brand)}</li>` : "",
+  ].join("");
+  return (
+    `<h1 class="product-name" data-bind="text: product().displayName()">${title}</h1>`
+    + body
+    + bullets
+    + EBAY_RETURN_POLICY_HTML
+  );
+}
+
+type ItemSpecificSource = { column: string } | { field: string } | { typeSlug: true } | null;
+
+/**
+ * The item specifics, in the order the seller's file writes them into
+ * Attribute Name/Value 1–14. `from` names the source: another column of the
+ * same row, a product field, the product type, or nothing (Installation No is
+ * named and left empty, as the seller's file has it).
+ *
+ * `unknown` is what the seller's own blank row writes when the product has no
+ * answer — eBay treats an empty specific as missing, and these read as an
+ * answer to a shopper filtering by it.
+ */
+export const EBAY_ITEM_SPECIFICS: readonly { name: string; from: ItemSpecificSource; unknown?: string }[] = [
+  { name: "Brand", from: { column: "Brand" } },
+  { name: "UPC", from: { column: "UPC" } },
+  { name: "MPN", from: { column: "MPN" } },
+  { name: "Model No.", from: { column: "MPN" } },
+  { name: "Color", from: { field: "Color" }, unknown: "As shown" },
+  { name: "Size", from: { field: "Size" }, unknown: "As described" },
+  { name: "Item Length", from: { column: "Length" }, unknown: "As described" },
+  { name: "Item Width", from: { column: "Width" }, unknown: "As described" },
+  { name: "Item Height", from: { column: "Height" }, unknown: "As described" },
+  { name: "Type", from: { typeSlug: true } },
+  { name: "Material", from: { field: "Material" }, unknown: "As described" },
+  { name: "Model", from: { column: "MPN" } },
+  { name: "Installation No", from: null },
+  { name: "Product", from: { typeSlug: true } },
+];
+
+/** `"Attribute Value 7"` → `{ kind: "Value", index: 6 }`; null for any other column. */
+export function itemSpecificSlot(column: string): { kind: "Name" | "Value"; index: number } | null {
+  const m = /^Attribute (Name|Value) (\d+)$/.exec(String(column ?? "").trim());
+  if (!m) return null;
+  return { kind: m[1] as "Name" | "Value", index: Number(m[2]) - 1 };
+}
+
+/**
+ * A vendor value that means "nothing". Vendor exports write 0 into an empty
+ * text column often enough (material, product_type) that a 0 in Colour or
+ * Material is never a colour or a material.
+ */
+function meaningful(v: unknown): string {
+  const s = String(v ?? "").trim();
+  return s === "0" || /^n\/?a$/i.test(s) || /^null$/i.test(s) ? "" : s;
+}
+
+/** "Wreaths, Garlands & Plants" → "wreaths-garlands-plants". */
+export function slugify(text: string): string {
+  return String(text ?? "")
+    .toLowerCase()
+    .replace(/&/g, " ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * The Type / Product specific: the vendor's own product type when it has one
+ * (Vickerman's `christmas-garlands`, `fabric-ribbons`), otherwise the eBay
+ * category's leaf as a slug.
+ */
+export function productTypeSlug(vendorType: unknown, categoryPath: string | null | undefined): string {
+  const own = meaningful(vendorType);
+  if (own) return slugify(own);
+  const leaf = String(categoryPath ?? "").split(">").pop()?.trim() ?? "";
+  return slugify(leaf);
+}
+
+/**
+ * The warehouse a product ships from, as the seller's file names it: the
+ * vendor prefix of the SKU (`VICK-A801000` → `VICK`). A SKU with no prefix
+ * gives nothing rather than a guess.
+ */
+export function warehouseLocationId(sku: string | null | undefined): string {
+  const m = /^([A-Za-z]{2,10})-./.exec(String(sku ?? "").trim());
+  return m ? m[1]!.toUpperCase() : "";
+}
+
+/**
+ * The light colour bullet. The vendor's own column when it has one; otherwise
+ * the `Light_Color: …` line Vickerman writes into its feature bullets;
+ * otherwise Unlit, which is what the seller's file says for every product
+ * that has no lights.
+ */
+export function lightColorOf(direct: unknown, features: unknown): string {
+  const own = meaningful(direct);
+  if (own) return own;
+  const m = /Light[_ ]?Colou?r\s*:\s*([^<\n]+)/i.exec(String(features ?? ""));
+  return m ? m[1]!.trim() : "Unlit";
+}
+
+/**
+ * Weight Major, in whole pounds rounded UP — what the seller's file writes,
+ * and the safe direction for a shipping weight. Reads a value already split
+ * into pounds and ounces as well as a plain weight.
+ */
+export function wholePounds(major: unknown, minor: unknown, plain: unknown): string {
+  const num = (v: unknown) => {
+    const n = parseFloat(String(v ?? "").replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) ? n : 0;
+  };
+  let lbs = num(major) + num(minor) / 16;
+  if (lbs <= 0) lbs = num(plain);
+  if (lbs <= 0) return "";
+  return String(Math.max(1, Math.ceil(lbs - 1e-9)));
+}
+
+/** A cell value only when it is a web address — never a stray flag or count. */
+function urlOnly(v: unknown): string {
+  const s = String(v ?? "").trim();
+  return /^https?:\/\//i.test(s) ? s : "";
 }
 
 // ── Putting it together ──────────────────────────────────────────────────────
@@ -301,14 +520,9 @@ export type EbayCellContext = {
    *  uploaded file's own Error column reported. */
   restricted?: readonly string[];
   /**
-   * The exporter's own field resolution, for columns that name the field they
-   * want somewhere other than in their own header.
-   *
-   * "Variation Specific Value 1" is such a column: what belongs in it is
-   * whatever "Variation Specific Name 1" says, which is Color. Resolving the
-   * header text gets nothing, because no product has a field called
-   * "variationspecificvalue1" — and nothing errors, so the four variation
-   * columns shipped empty beside four correctly-filled name columns.
+   * The exporter's own field resolution, for columns that need a field other
+   * than the one their header names (an item specific's value, the light
+   * colour inside the description).
    */
   resolve?: (field: string) => unknown;
   /**
@@ -319,8 +533,19 @@ export type EbayCellContext = {
    * answers with a value either way. See EBAY_VENDOR_ONLY_COLUMNS.
    */
   vendorValue?: (field: string) => unknown;
-  /** The product's own brand, for the Additional Info bullets. */
+  /**
+   * The FINISHED value of another column on the same row. The item specifics
+   * repeat the row's UPC, MPN and dimensions, and the description's heading
+   * is the row's title; reading the finished cell keeps each pair identical
+   * rather than two resolutions that can drift apart.
+   */
+  cell?: (column: string) => string;
+  /** The product's own brand. */
   brand?: string | null;
+  /** The product's SKU, for the warehouse prefix and the MPN fallback. */
+  sku?: string | null;
+  /** The product's main image, for Picture URL 1. */
+  imageUrl?: string | null;
 };
 
 /**
@@ -349,33 +574,9 @@ export const EBAY_VENDOR_ONLY_COLUMNS: readonly string[] = [
   "ISBN",
 ] as const;
 
-/**
- * The attributes eBay's Additional Info bullets carry, in order.
- *
- * The accepted file's bullets read `<li>LightColor Unlit</li><li>Brand
- * Vickerman</li>` — the attribute's name, a space, its value. An attribute
- * the product has no value for is skipped rather than emitted empty.
- */
-export const EBAY_ADDITIONAL_INFO_ATTRIBUTES: readonly string[] = ["LightColor", "Brand"] as const;
-
-/** The Additional Info cell: one `<li>` per attribute the product answers. */
-export function additionalInfoBullets(
-  lookup: (field: string) => unknown,
-  brand?: string | null,
-): string {
-  const parts: string[] = [];
-  for (const attr of EBAY_ADDITIONAL_INFO_ATTRIBUTES) {
-    const value = attr === "Brand"
-      ? String(brand ?? lookup(attr) ?? "").trim()
-      : String(lookup(attr) ?? "").trim();
-    if (value) parts.push(`<li>${attr} ${value}</li>`);
-  }
-  return parts.join("");
-}
-
 export type EbayCellResult = {
   value: string;
-  /** Restricted terms removed from this cell, for the review file. */
+  /** Restricted terms removed or reworded in this cell, for the review file. */
   removed: string[];
 };
 
@@ -383,67 +584,113 @@ export type EbayCellResult = {
  * One cell of an eBay listing file.
  *
  * Order matters and is deliberate: a constant wins over whatever was
- * resolved, because the constant IS the answer for that column; the category
- * columns are answered from the assigned path; the description is cleaned
- * before anything looks for keywords in it, or the scrub reads attribute
- * values as prose; and the quote strip runs last so nothing written above can
- * reintroduce one.
+ * resolved, because the constant IS the answer for that column; the
+ * vendor-only identifiers are checked before the blank columns so a real
+ * Variation Group ID survives; the description is cleaned before anything
+ * looks for keywords in it, or the scrub reads attribute values as prose; and
+ * every value is quote-stripped on its way out.
  */
 export function ebayCellValue(ctx: EbayCellContext): EbayCellResult {
   const column = String(ctx.column ?? "").trim();
   const words = ctx.restricted ?? RESTRICTED_SEED;
   const path = String(ctx.categoryPath ?? "").trim();
+  const field = (name: string) => meaningful(ctx.vendorValue?.(name) ?? ctx.resolve?.(name));
 
-  let raw: string;
   if (column === EBAY_CATEGORY_ID_COLUMN) {
-    // No category, or one the file has no id for: empty, never a guess and
-    // never the 0 the reference file carried. A 0 here is a real eBay
-    // category to somebody.
-    raw = path ? (ebayCategoryIdForPath(path) ?? "") : "";
-  } else if (column === EBAY_CATEGORY_PATH_COLUMN) {
-    raw = path;
-  } else if (column in EBAY_CONSTANTS) {
-    raw = EBAY_CONSTANTS[column]!;
-  } else if (column === "Additional Info") {
-    raw = additionalInfoBullets(
-      (field) => ctx.vendorValue?.(field) ?? ctx.resolve?.(field),
-      ctx.brand,
-    );
-  } else if (EBAY_VENDOR_ONLY_COLUMNS.includes(column)) {
+    // No category, or one the file has no id for: empty, never a guess. A 0
+    // here is a real eBay category to somebody.
+    return { value: path ? (ebayCategoryIdForPath(path) ?? "") : "", removed: [] };
+  }
+  if (column in EBAY_CONSTANTS) return { value: EBAY_CONSTANTS[column]!, removed: [] };
+  if (EBAY_VENDOR_ONLY_COLUMNS.includes(column)) {
     // The vendor sheet or nothing. Checked BEFORE the normal resolution,
     // because that resolution is exactly what would hand back a UPC here.
-    raw = String(ctx.vendorValue?.(column) ?? "");
-  } else if (variationAxisFor(column)) {
-    // The value column takes whatever its NAME column declares. Falls back to
-    // the normal resolution when the product has nothing for that axis, which
-    // is the common case for Size, Material and Style.
-    const axis = variationAxisFor(column)!;
-    raw = String(ctx.resolve?.(axis) ?? ctx.value ?? "");
-  } else {
-    raw = String(ctx.value ?? "");
+    return { value: stripInvertedCommas(String(ctx.vendorValue?.(column) ?? "")), removed: [] };
+  }
+  if (EBAY_BLANK_COLUMNS.has(column)) return { value: "", removed: [] };
+
+  const slot = itemSpecificSlot(column);
+  if (slot) {
+    const spec = EBAY_ITEM_SPECIFICS[slot.index];
+    if (!spec) return { value: "", removed: [] };
+    if (slot.kind === "Name") return { value: spec.name, removed: [] };
+    const from = spec.from;
+    let v = "";
+    if (from && "column" in from) v = ctx.cell?.(from.column) ?? "";
+    else if (from && "field" in from) v = field(from.field);
+    else if (from && "typeSlug" in from) v = productTypeSlug(field("product_type"), path);
+    return { value: stripInvertedCommas(v || spec.unknown || ""), removed: [] };
   }
 
-  let removed: string[] = [];
+  const pic = /^Picture URL (\d+)$/.exec(column);
+  if (pic) {
+    // The main image first, then the vendor's numbered extras (ImageUrl1 is
+    // the SECOND picture). Web addresses only: the shared lookup's numbered
+    // image match will otherwise return a flag column such as isMatchImage.
+    const n = Number(pic[1]);
+    const v = n === 1
+      ? urlOnly(ctx.imageUrl) || urlOnly(ctx.vendorValue?.("ImageUrl")) || urlOnly(ctx.value)
+      : urlOnly(ctx.vendorValue?.(`ImageUrl${n - 1}`));
+    return { value: v, removed: [] };
+  }
+
+  if (column === "MPN") {
+    // The vendor's model number, or the SKU without its vendor prefix — which
+    // is what the vendor's own catalogue calls the item.
+    const sku = String(ctx.sku ?? "");
+    const v = meaningful(ctx.value) || field("model")
+      || (warehouseLocationId(sku) ? sku.slice(sku.indexOf("-") + 1) : "");
+    return { value: stripInvertedCommas(v), removed: [] };
+  }
+  if (column === "Warehouse Location ID") {
+    const own = meaningful(ctx.value);
+    return { value: own ? stripInvertedCommas(own) : warehouseLocationId(ctx.sku), removed: [] };
+  }
+  if (column === "Weight Major") {
+    return {
+      value: wholePounds(
+        ctx.value,
+        ctx.resolve?.("Weight Minor"),
+        // The catalogue lookup writes its answer as Product Weight.
+        meaningful(ctx.resolve?.("Product Weight")) || ctx.resolve?.("weight"),
+      ),
+      removed: [],
+    };
+  }
+  if (column === "Length" || column === "Width" || column === "Height") {
+    // A vendor sheet's column of zeros is not a measurement, and a 0 here
+    // would be repeated into the item specifics as one. Length falls back to
+    // Depth, which is what the catalogue lookup calls it.
+    const dim = (v: unknown) => {
+      const n = parseFloat(String(v ?? ""));
+      return Number.isFinite(n) && n > 0 ? stripInvertedCommas(String(v).trim()) : "";
+    };
+    const v = dim(ctx.value) || (column === "Length" ? dim(ctx.resolve?.("Depth")) : "");
+    return { value: v, removed: [] };
+  }
+
+  if (column === "Title" || column === "Brand") {
+    const scrubbed = scrubRestricted(String(ctx.value ?? ""), words);
+    return { value: stripInvertedCommas(scrubbed.text), removed: scrubbed.removed };
+  }
+
   if (column === "Product Description") {
-    raw = cleanDescriptionHtml(raw);
+    const reworded = rewordRestricted(cleanDescriptionHtml(String(ctx.value ?? "")), words);
+    // The heading is the row's own finished title, so the two never differ.
+    const title = ctx.cell?.("Title") ?? String(ctx.resolve?.("Title") ?? "");
+    const html = ebayDescriptionHtml({
+      title,
+      body: reworded.text,
+      lightColor: lightColorOf(
+        ctx.vendorValue?.("LightColor") ?? ctx.vendorValue?.("Light Color"),
+        ctx.vendorValue?.("features") ?? ctx.resolve?.("features"),
+      ),
+      brand: String(ctx.brand || field("Brand")),
+    });
+    return { value: html, removed: reworded.removed };
   }
-  if (column === "Title" || column === "Product Description" || column === "Brand") {
-    const scrubbed = scrubRestricted(raw, words);
-    raw = scrubbed.text;
-    removed = scrubbed.removed;
-  }
-  if (column === "Product Description") {
-    // Wrapped LAST, after the scrub, so a removal cannot leave a stray tag.
-    //
-    // The exporter strips HTML out of every description before this sees it,
-    // because Walmart wants plain text (see stripHtml in zip.ts). eBay does
-    // not: the file this seller's channel manager accepted carries
-    // `<p>Vickerman 72" …</p>`, and a bare paragraph of text renders as one
-    // unbroken block in an eBay listing. So a description that arrives
-    // without markup gets the wrapper the accepted file had.
-    raw = wrapDescriptionParagraph(raw);
-  }
-  return { value: stripInvertedCommas(raw), removed };
+
+  return { value: stripInvertedCommas(String(ctx.value ?? "")), removed: [] };
 }
 
 /**
