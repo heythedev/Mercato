@@ -97,10 +97,10 @@ async function exportRows(products: unknown[]): Promise<Record<string, string>[]
 }
 
 describe("an eBay listing file, as the export actually produces it", () => {
-  it("writes the category as eBay's id, and leaves the store category empty", async () => {
+  it("writes the category as an id and as a path", async () => {
     const [row] = await exportRows([product]);
     expect(row!["Category"]).toBe("162927");
-    expect(row!["Store Category Name 1"]).toBe("");
+    expect(row!["Store Category Name 1"]).toBe("Antiques > Architectural & Garden > Beams");
   });
 
   it("spells the header ePID, as the seller's file does", async () => {

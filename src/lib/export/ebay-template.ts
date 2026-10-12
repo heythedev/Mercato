@@ -12,14 +12,17 @@ import { ebayCategoryIdForPath } from "@/lib/ai/ebay-taxonomy";
  * The shape of a row is the seller's own filled file (vidhi_3.xlsx, October
  * 2026): one sheet for the whole catalogue, item specifics in Attribute
  * Name/Value 1–14, the description as heading + paragraph + bullets + the
- * return policy, and the variation, EAN and store-category columns left
- * empty. Where this file and that one disagree, that one is right.
+ * return policy, and the variation and EAN columns left empty. Where this
+ * file and that one disagree, that one is right — with one exception, the
+ * store category, which the seller asked to have filled (see rule 1).
  *
  * The four:
  *
- *   1. The category is eBay's numeric id, in "Category". The seller's file
- *      leaves "Store Category Name 1" empty, so the readable path no longer
- *      goes there — it is a store category to eBay, not a label.
+ *   1. The category goes in TWO columns, as an id and as a path. CT
+ *      ("Category") takes eBay's numeric id; DC ("Store Category Name 1")
+ *      takes the readable path. The seller's sample file left DC empty; the
+ *      seller asked for it filled, and an id alone is unreadable to the
+ *      person checking the file.
  *
  *   2. No inverted commas in any cell. A 72" garland ships as `72`, not
  *      `72"`. This is a house rule rather than an eBay one, and it is applied
@@ -42,6 +45,21 @@ import { ebayCategoryIdForPath } from "@/lib/ai/ebay-taxonomy";
 
 /** CT — eBay's numeric category id. */
 export const EBAY_CATEGORY_ID_COLUMN = "Category";
+/** DC — the same category as a readable path. */
+export const EBAY_CATEGORY_PATH_COLUMN = "Store Category Name 1";
+
+/**
+ * A stored category path with its accents put back.
+ *
+ * The taxonomy was imported through a Windows-1252 read, so every "é" in it
+ * is stored as U+FFFD, the replacement character. The id lookup copes;
+ * a person reading the column sees a box. "Décor" is the only accented word
+ * in eBay's US category names, so it is repaired by name rather than by
+ * guessing what any replacement character once was.
+ */
+export function readableCategoryPath(path: string): string {
+  return String(path ?? "").replace(/D�cor/g, "Décor").trim();
+}
 
 // ── 2. No inverted commas ────────────────────────────────────────────────────
 
@@ -116,8 +134,6 @@ export const EBAY_CONSTANTS: Record<string, string> = {
  *     ID, tells eBay the row is one variation of a multi-variation listing.
  *     Every product here is its own listing; Colour and Size go in the item
  *     specifics instead.
- *   Store Category Name 1 — a store category on the seller's eBay shop, not a
- *     label for the eBay category.
  *   Additional Info — its bullets now live inside the description.
  *   Weight Minor — the seller's file states weight in whole pounds.
  *   Minimum Advertised Price — 0 is a price.
@@ -125,7 +141,6 @@ export const EBAY_CONSTANTS: Record<string, string> = {
  */
 export const EBAY_BLANK_COLUMNS: ReadonlySet<string> = new Set([
   ...[1, 2, 3, 4, 5].flatMap((n) => [`Variation Specific Name ${n}`, `Variation Specific Value ${n}`]),
-  "Store Category Name 1",
   "Additional Info",
   "Weight Minor",
   "Minimum Advertised Price",
@@ -600,6 +615,9 @@ export function ebayCellValue(ctx: EbayCellContext): EbayCellResult {
     // No category, or one the file has no id for: empty, never a guess. A 0
     // here is a real eBay category to somebody.
     return { value: path ? (ebayCategoryIdForPath(path) ?? "") : "", removed: [] };
+  }
+  if (column === EBAY_CATEGORY_PATH_COLUMN) {
+    return { value: stripInvertedCommas(readableCategoryPath(path)), removed: [] };
   }
   if (column in EBAY_CONSTANTS) return { value: EBAY_CONSTANTS[column]!, removed: [] };
   if (EBAY_VENDOR_ONLY_COLUMNS.includes(column)) {

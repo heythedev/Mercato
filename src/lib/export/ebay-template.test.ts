@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EBAY_CATEGORY_ID_COLUMN,
+  EBAY_CATEGORY_PATH_COLUMN,
   EBAY_CONSTANTS,
   EBAY_ITEM_SPECIFICS,
   cleanDescriptionHtml,
@@ -11,6 +12,7 @@ import {
   scrubRestricted,
   lightColorOf,
   productTypeSlug,
+  readableCategoryPath,
   rewordRestricted,
   stripInvertedCommas,
   warehouseLocationId,
@@ -52,10 +54,19 @@ describe("the category", () => {
     expect(ebayCellValue({ ...ctx, column: EBAY_CATEGORY_ID_COLUMN }).value).toBe("162927");
   });
 
-  it("leaves Store Category Name 1 empty, as the seller's file does", () => {
-    // A store category on the seller's eBay shop, not a label for the eBay
-    // category.
-    expect(ebayCellValue({ ...ctx, column: "Store Category Name 1", value: "Beams" }).value).toBe("");
+  it("puts the readable path in Store Category Name 1", () => {
+    expect(ebayCellValue({ ...ctx, column: EBAY_CATEGORY_PATH_COLUMN, value: "Beams" }).value).toBe(
+      "Antiques > Architectural & Garden > Beams",
+    );
+    // Empty for an uncategorised product, never a guess.
+    expect(ebayCellValue({ column: EBAY_CATEGORY_PATH_COLUMN, value: "x", categoryPath: null }).value).toBe("");
+  });
+
+  it("puts back the accent the stored taxonomy lost", () => {
+    // Stored as U+FFFD; the id lookup copes, a reader would see a box.
+    const stored = "Home & Garden > Holiday & Seasonal D�cor > Christmas Trees";
+    expect(readableCategoryPath(stored)).toBe("Home & Garden > Holiday & Seasonal Décor > Christmas Trees");
+    expect(ebayCellValue({ column: EBAY_CATEGORY_ID_COLUMN, value: "", categoryPath: stored }).value).toBe("117414");
   });
 
   it("keeps a category whose own name contains a comma", () => {
