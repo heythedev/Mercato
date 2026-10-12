@@ -37,24 +37,33 @@ const connectNav = { href: "/settings/connect-claude", label: "Connect to Claude
 // the people most likely to need it are the ones with the least support.
 const helpNav = { href: "/help", label: "Help", icon: LifeBuoy };
 
-const userNav = [
-  { href: "/projects", label: "Projects", icon: FolderOpen },
-  { href: "/templates", label: "Templates", icon: FileText },
-  connectNav,
-  helpNav,
+type NavItem = { href: string; label: string; icon: typeof FolderOpen };
+type NavSection = { title: string; items: NavItem[] };
+
+// Grouped so the list reads as three kinds of place rather than one long
+// column: the work itself, running the workspace, and getting help.
+const userNav: NavSection[] = [
+  { title: "Workspace", items: [
+    { href: "/projects", label: "Projects", icon: FolderOpen },
+    { href: "/templates", label: "Templates", icon: FileText },
+  ] },
+  { title: "Support", items: [connectNav, helpNav] },
 ];
 
-const adminNav = [
-  { href: "/projects", label: "Projects", icon: FolderOpen },
-  { href: "/admin/users", label: "Users", icon: Users },
-  { href: "/admin/templates", label: "Templates", icon: FileText },
-  { href: "/admin/usage", label: "Usage & credits", icon: Activity },
-  // Separate from "Usage & credits" on purpose: that page is about money
-  // spent with Kimi, Keepa and Synccentric. This one is about people — who
-  // connected Claude, what they did with it, and what it changed.
-  { href: "/admin/mcp-usage", label: "Claude usage", icon: Sparkles },
-  connectNav,
-  helpNav,
+const adminNav: NavSection[] = [
+  { title: "Workspace", items: [
+    { href: "/projects", label: "Projects", icon: FolderOpen },
+    { href: "/admin/templates", label: "Templates", icon: FileText },
+  ] },
+  { title: "Admin", items: [
+    { href: "/admin/users", label: "Users", icon: Users },
+    { href: "/admin/usage", label: "Usage & credits", icon: Activity },
+    // Separate from "Usage & credits" on purpose: that page is about money
+    // spent with Kimi, Keepa and Synccentric. This one is about people — who
+    // connected Claude, what they did with it, and what it changed.
+    { href: "/admin/mcp-usage", label: "Claude usage", icon: Sparkles },
+  ] },
+  { title: "Support", items: [connectNav, helpNav] },
 ];
 
 export function Sidebar({ role, showAmazonSources = false }: Props) {
@@ -139,26 +148,41 @@ export function Sidebar({ role, showAmazonSources = false }: Props) {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 space-y-1.5 overflow-y-auto overflow-x-hidden px-3 py-4">
-          {navItems.map(({ href, label, icon: Icon }) => {
-            const active = path.startsWith(href);
-            return (
-              <Link
-                key={href}
-                href={href}
-                onClick={closeMobile}
-                className={cn(
-                  "flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-                  active
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                )}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span>{label}</span>
-              </Link>
-            );
-          })}
+        <nav className="flex-1 space-y-5 overflow-y-auto overflow-x-hidden px-3 py-4">
+          {navItems.map((section) => (
+            <div key={section.title}>
+              <p className="mb-1.5 px-4 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+                {section.title}
+              </p>
+              <div className="space-y-0.5">
+                {section.items.map(({ href, label, icon: Icon }) => {
+                  const active = path.startsWith(href);
+                  return (
+                    <Link
+                      key={href}
+                      href={href}
+                      onClick={closeMobile}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "group/nav flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium transition-colors",
+                        active
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "h-4 w-4 shrink-0 transition-transform",
+                          !active && "group-hover/nav:scale-110",
+                        )}
+                      />
+                      <span>{label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
 
         {/* Data-source balances — pinned to the card footer. The Kimi (AI)

@@ -268,17 +268,33 @@ export function EmptyState({
   className?: string;
 }) {
   return (
-    <div className={cn("rounded-xl border border-dashed border-border px-6 py-14 text-center", className)}>
-      {Icon ? (
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-          <Icon className="h-5 w-5 text-muted-foreground" />
-        </div>
-      ) : null}
-      <p className="text-sm font-medium">{title}</p>
-      {children ? (
-        <p className="mx-auto mt-1.5 max-w-sm text-[13px] leading-relaxed text-muted-foreground">{children}</p>
-      ) : null}
-      {action ? <div className="mt-5">{action}</div> : null}
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-2xl border border-dashed border-border px-6 py-14 text-center",
+        className,
+      )}
+    >
+      {/* A faint dot grid behind the icon, fading out toward the edges — enough
+          texture that an empty page reads as "nothing here yet" rather than
+          "failed to load". */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-[0.35] [background-image:radial-gradient(hsl(var(--muted-foreground)/0.35)_1px,transparent_1px)] [background-size:16px_16px] [mask-image:radial-gradient(ellipse_at_center,black_10%,transparent_65%)]"
+      />
+      <div className="relative">
+        {Icon ? (
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-muted/60 ring-8 ring-muted/30">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-card shadow-sm">
+              <Icon className="h-5 w-5 text-foreground/70" />
+            </div>
+          </div>
+        ) : null}
+        <p className="text-[15px] font-semibold tracking-tight">{title}</p>
+        {children ? (
+          <p className="mx-auto mt-1.5 max-w-sm text-[13px] leading-relaxed text-muted-foreground">{children}</p>
+        ) : null}
+        {action ? <div className="mt-6">{action}</div> : null}
+      </div>
     </div>
   );
 }

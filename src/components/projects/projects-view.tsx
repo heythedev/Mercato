@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import {
   Plus, FolderOpen, Package, Clock, CheckCircle2, Loader2, Trash2,
   Search, ChevronLeft, ChevronRight, X, ChevronDown, Check, Square, CheckSquare,
-  CalendarDays, Play, User,
+  CalendarDays, Play, User, AlertTriangle, AlertCircle, Sparkles,
 } from "lucide-react";
+import { healthBadges, pipelineSteps, type HealthBadge, type ProjectHealth, type StepState } from "@/lib/projects/health";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { formatDateTime, formatDayMonth } from "@/lib/format-date";
@@ -41,6 +42,8 @@ type Project = {
   ownerEmail: string;
   teamName: string | null;
   isMine: boolean;
+  /** Counts behind the card's health badges. */
+  health: ProjectHealth;
 };
 
 type FilterOption = {
@@ -127,9 +130,17 @@ function MarketplaceLogo({ marketplace, className }: { marketplace: string; clas
   );
 }
 
-const PROGRESS: Record<string, number> = {
-  uploading: 7, uploaded: 14, verifying: 28, verified: 42,
-  categorizing: 57, categorized: 71, exporting: 85, done: 100,
+const BADGE_TONE: Record<HealthBadge["tone"], { className: string; icon: React.ElementType }> = {
+  critical: { className: "bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900", icon: AlertTriangle },
+  warning:  { className: "bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900", icon: AlertCircle },
+  good:     { className: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900", icon: Sparkles },
+};
+
+const STEP_SEGMENT: Record<StepState, string> = {
+  done: "bg-primary",
+  running: "bg-amber-400 animate-pulse",
+  current: "bg-primary/25",
+  todo: "bg-muted",
 };
 
 const fieldClass =
@@ -832,10 +843,8 @@ export function ProjectsView({
             // "verified" is never a legitimate state for them — an old failed
             // categorization could have left it there. Show it as "uploaded"
             // instead of a misleading green "Verified" badge.
-            const displayStatus =
-              p.status === "verified" && SKIP_VERIFY_MARKETPLACES.has(p.marketplace.toLowerCase())
-                ? "uploaded"
-                : p.status;
+            const skipsVerify = SKIP_VERIFY_MARKETPLACES.has(p.marketplace.toLowerCase());
+            const displayStatus = p.status === "verified" && skipsVerify ? "uploaded" : p.status;
             const status = STATUS_CONFIG[displayStatus] ?? { label: displayStatus, color: "bg-muted text-muted-foreground", icon: Clock };
             const StatusIcon = status.icon;
             const isDeleting = deleting === p.id;
@@ -846,11 +855,11 @@ export function ProjectsView({
             // page — a server-side transient status covers that last case).
             const runAction = SERVER_BUSY_STATUSES.has(p.status)
               ? null
-              : nextActionFor(displayStatus, SKIP_VERIFY_MARKETPLACES.has(p.marketplace.toLowerCase()));
+              : nextActionFor(displayStatus, skipsVerify);
             const runQueued = runAction ? runQueue.isBusy(p.id) : false;
 
             return (
-              <div key={p.id} className="relative group">
+              <div key={p.id} className="relative group h-full">
                 {/* Hover-reveal checkbox — top-left corner */}
                 <button
                   type="button"
@@ -869,7 +878,7 @@ export function ProjectsView({
                 <Link
                   href={`/projects/${p.id}`}
                   className={cn(
-                    "flex flex-col gap-4 p-5 rounded-2xl border bg-card transition-all duration-150",
+                    "flex h-full flex-col gap-4 p-5 rounded-2xl border bg-card transition-all duration-150",
                     "hover:shadow-md hover:border-primary/30",
                     isSelected && "border-primary/40 bg-primary/[0.02] shadow-sm"
                   )}
@@ -965,31 +974,64 @@ export function ProjectsView({
                     )}
                   </div>
 
-                  {/* A bare bar told you a proportion of nothing nameable.
-                      The step it belongs to is the thing worth reading. */}
+                  {/* What is wrong inside, before you open it. Only problems
+                      whose step has already run — see healthBadges. */}
                   {(() => {
-                    const step = STATUS_STEP[displayStatus];
-                    const pct = PROGRESS[displayStatus] ?? 0;
+                    const badges = healthBadges(p.health, displayStatus, skipsVerify);
+                    if (!badges.length) return null;
                     return (
-                      <div className="w-full">
-                        <div className="mb-1 flex items-baseline justify-between gap-2 text-[10px] text-muted-foreground">
-                          <span className="truncate">{step ? step.name : "Not started"}</span>
-                          <span className="shrink-0 tabular-nums">
-                            {step ? `Step ${step.step} of 4` : ""}
-                          </span>
+                      <div className="-mt-1 flex flex-wrap gap-1.5">
+                        {badges.map((b) => {
+                          const tone = BADGE_TONE[b.tone];
+                          const Icon = tone.icon;
+                          return (
+                            <span
+                              key={b.label}
+                              title={b.hint}
+                              className={cn(
+                                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset",
+                                tone.className,
+                              )}
+                            >
+                              <Icon className="h-3 w-3 shrink-0" />
+                              {b.label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* One segment per step this marketplace actually has, so a
+                      skip-verify project is not shown a step it will never take. */}
+                  {(() => {
+                    const steps = pipelineSteps(displayStatus, skipsVerify);
+                    const at = Math.max(
+                      0,
+                      steps.findLastIndex((s) => s.state === "done" || s.state === "running"),
+                    );
+                    const label = STATUS_STEP[displayStatus] ? steps[at]!.name : "Not started";
+                    return (
+                      <div className="mt-auto w-full">
+                        <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[10px] text-muted-foreground">
+                          <span className="truncate">{label}</span>
+                          <span className="shrink-0 tabular-nums">Step {at + 1} of {steps.length}</span>
                         </div>
                         <div
-                          className="w-full bg-muted rounded-full h-1"
+                          className="flex w-full gap-1"
                           role="progressbar"
-                          aria-valuenow={pct}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-label={step ? `${step.name}, step ${step.step} of 4` : "Not started"}
+                          aria-valuenow={at + 1}
+                          aria-valuemin={1}
+                          aria-valuemax={steps.length}
+                          aria-label={`${label}, step ${at + 1} of ${steps.length}`}
                         >
-                          <div
-                            className="bg-primary h-1 rounded-full transition-all"
-                            style={{ width: `${pct}%` }}
-                          />
+                          {steps.map((s) => (
+                            <div
+                              key={s.name}
+                              title={`${s.name}: ${s.state === "todo" ? "not yet" : s.state === "current" ? "next" : s.state}`}
+                              className={cn("h-1.5 flex-1 rounded-full transition-colors", STEP_SEGMENT[s.state])}
+                            />
+                          ))}
                         </div>
                       </div>
                     );

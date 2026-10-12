@@ -622,11 +622,17 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           });
 
           const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = filename;
-          a.click();
-          URL.revokeObjectURL(url);
+          const save = () => {
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            a.click();
+          };
+          save();
+          // Kept alive for the toast's "Download again" — a blocked or
+          // mis-saved download used to mean running the whole export again.
+          // Released after a few minutes; the file lives on in the job store.
+          setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
 
           // Check if any Temu categories were excluded due to missing templates
           const missingHeader = pollRes.headers.get("X-Missing-Template-Categories") ?? "";
@@ -647,12 +653,12 @@ export function ExportStep({ projectId, projectName, marketplace, products, proj
           setUnfilledRequired(unfilled);
           setUnfilledAiDown(pollRes.headers.get("X-Unfilled-Ai-Down") === "1");
 
-          if (isZip) {
-            const fileCount = usesCategoryZip ? categories.length : 1;
-            toast.success(`ZIP downloaded — ${fileCount} file${fileCount !== 1 ? "s" : ""}`);
-          } else {
-            toast.success(`Downloaded ${filename}`);
-          }
+          const fileCount = isZip && usesCategoryZip ? categories.length : 1;
+          toast.success(isZip ? `Export ready — ${fileCount} file${fileCount !== 1 ? "s" : ""}` : "Export ready", {
+            description: filename,
+            duration: 12_000,
+            action: { label: "Download again", onClick: save },
+          });
           return;
         }
 

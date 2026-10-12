@@ -4,6 +4,7 @@ import { recoverStaleProjects } from "@/lib/projects/recover-stale";
 import { ProjectsView } from "@/components/projects/projects-view";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 import { actorOf, allowedMarketplacesFor, isAnyAdmin, projectListScope } from "@/lib/authz";
+import { EMPTY_HEALTH, type ProjectHealth } from "@/lib/projects/health";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +59,8 @@ export default async function ProjectsPage() {
   // be the same word repeated down the page.
   const showsOthersWork = isAnyAdmin(actor);
 
+  const health = await loadHealth(projects.map((p) => p.id));
+
   return (
     <ProjectsView
       allowedTiles={allowedTiles}
@@ -78,7 +81,59 @@ export default async function ProjectsPage() {
         ownerEmail: p.user?.email ?? "",
         teamName: p.team?.name ?? null,
         isMine: p.userId === user.id,
+        health: health.get(p.id) ?? EMPTY_HEALTH,
       }))}
     />
   );
+}
+
+/**
+ * The card health counts for every listed project, in two grouped queries
+ * rather than one per card. Both filter on projectId, which is indexed.
+ *
+ * Best-effort: the counts decorate the cards, so a failure here costs the
+ * badges and never the page.
+ */
+async function loadHealth(ids: string[]): Promise<Map<string, ProjectHealth>> {
+  const out = new Map<string, ProjectHealth>();
+  if (!ids.length) return out;
+  try {
+    const counts = await prisma.$queryRaw<
+      { projectId: string; uncategorized: bigint; verifyIssues: bigint; missingImage: bigint }[]
+    >`
+      SELECT "projectId",
+        COUNT(*) FILTER (WHERE "marketplaceCategory" IS NULL OR "marketplaceCategory" = '' OR "marketplaceCategory" = 'Uncategorized') AS "uncategorized",
+        COUNT(*) FILTER (WHERE "verifyStatus" IN ('mismatch', 'not_found')) AS "verifyIssues",
+        COUNT(*) FILTER (WHERE "imageUrl" IS NULL OR "imageUrl" = '') AS "missingImage"
+      FROM "Product"
+      WHERE "projectId" = ANY(${ids})
+      GROUP BY "projectId"`;
+    // A UPC on more than one product in the same project. Nearly always the
+    // vendor file's UPC column saved by Excel as a number (7.34205E+11), which
+    // rounds many real codes onto one.
+    const shared = await prisma.$queryRaw<{ projectId: string; n: bigint }[]>`
+      SELECT "projectId", SUM(c) AS n FROM (
+        SELECT "projectId", "upc", COUNT(*) AS c
+        FROM "Product"
+        WHERE "projectId" = ANY(${ids}) AND "upc" IS NOT NULL AND "upc" <> ''
+        GROUP BY "projectId", "upc"
+        HAVING COUNT(*) > 1
+      ) dup
+      GROUP BY "projectId"`;
+    for (const r of counts) {
+      out.set(r.projectId, {
+        uncategorized: Number(r.uncategorized),
+        verifyIssues: Number(r.verifyIssues),
+        missingImage: Number(r.missingImage),
+        sharedUpc: 0,
+      });
+    }
+    for (const r of shared) {
+      const h = out.get(r.projectId) ?? { ...EMPTY_HEALTH };
+      out.set(r.projectId, { ...h, sharedUpc: Number(r.n) });
+    }
+  } catch (e) {
+    console.warn("[projects] health counts unavailable:", (e as Error).message);
+  }
+  return out;
 }
