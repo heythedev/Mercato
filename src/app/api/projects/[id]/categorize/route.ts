@@ -29,6 +29,7 @@ import {
 } from "@/lib/ai/walmart-taxonomy";
 import { findReusableCategories, normalizeProductName } from "@/lib/categorize/category-reuse";
 import { checkAiAvailable } from "@/lib/ai/moonshot";
+import { isConstrainedMarketplace } from "@/lib/marketplaces/taxonomy-registry";
 import { checkSpendBudget, estimateRunCostUsd } from "@/lib/ai/spend-guard";
 
 // ── PUT /api/projects/[id]/categorize ─────────────────────────────────────────
@@ -715,7 +716,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // can ONLY return valid paths from a fixed list, so hallucinated names are already
     // rejected; a low floor (0.2) lets legitimate niche matches survive while a truly
     // random guess ("Acid Brush" → Home Theater at 0.05) is excluded.
-    const isConstrainedTaxonomy = ["temu", "bestbuy", "sears", "mathis", "walmart"].includes(mpLower);
+    // Was a hardcoded list of five, written before the registry existed and
+    // never updated: Wayfair and eBay both have fixed category lists and both
+    // got the 0.6 floor meant for a model free-forming a category name. That
+    // floor is wrong for them in the safe direction — a legitimate niche match
+    // at 0.4 was being thrown away as Uncategorized — but wrong is wrong, and
+    // the registry already knows the answer.
+    const isConstrainedTaxonomy = isConstrainedMarketplace(mpLower);
     const MIN_CONFIDENCE = Number(process.env.CATEGORIZE_MIN_CONFIDENCE ?? 0.6);
     const CONSTRAINED_MIN_CONFIDENCE = Number(process.env.CATEGORIZE_CONSTRAINED_MIN_CONFIDENCE ?? 0.2);
 

@@ -1,4 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
+import { INLINE_TAXONOMY_MAX } from "@/lib/categorize/taxonomy";
 import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotTemperature } from "@/lib/ai/moonshot";
 import { taxonomyFor } from "@/lib/marketplaces/taxonomy-registry";
@@ -267,6 +268,141 @@ function classifySystemicError(reason: unknown): CategorizationServiceError | nu
 
 export type CategorizeProgress = (done: number, total: number, note?: string) => void;
 
+/**
+ * The top-level segment of every path, and the paths under each.
+ *
+ * Exported for the tests, which assert the split against the real eBay file
+ * rather than a fixture — a branch map that drifts from the CSV would send
+ * the model a department whose leaves it is then not offered.
+ */
+export function branchesOf(paths: string[], depth = 1): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const p of paths) {
+    const segments = p.split(" > ").map((s) => s.trim()).filter(Boolean);
+    if (!segments.length) continue;
+    // A path shorter than the depth asked for IS its own group: it has no
+    // further level to narrow by, and dropping it would make it a category
+    // the model can never be offered.
+    const key = segments.slice(0, depth).join(" > ");
+    const list = out.get(key);
+    if (list) list.push(p);
+    else out.set(key, [p]);
+  }
+  return out;
+}
+
+/**
+ * Categorise against a taxonomy too large to send whole: choose the top
+ * level, then the leaf within it.
+ *
+ * The first pass is the ordinary batch call with the 36 top-level names AS
+ * the category list, so it inherits the on-list validation already written —
+ * a department the file does not have is refused the same way an invented
+ * leaf is, and nothing new had to be trusted.
+ *
+ * A product whose department comes back "Uncategorized" is NOT sent to a
+ * second pass. There is no branch to narrow to, and asking a branch anyway
+ * would mean picking the best of a list the product has already been judged
+ * not to belong in — which is how a garland ends up under Antiques with a
+ * plausible confidence.
+ *
+ * It narrows REPEATEDLY, not once. One level was the obvious implementation
+ * and it was not enough: four of eBay's 36 departments are still over the
+ * ceiling on their own — Collectibles 3,128, eBay Motors 2,971, Business &
+ * Industrial 2,767, Home & Garden 1,612 — and Home & Garden is where this
+ * client's garlands actually are. Splitting once would have moved the
+ * problem into the department that mattered most.
+ */
+async function categoriseByBranch(
+  marketplace: string,
+  products: ProductInput[],
+  allPaths: string[],
+  model: string,
+  onProgress?: CategorizeProgress,
+  onResults?: (results: CategorizeResult[]) => void | Promise<void>,
+  /** How many leading segments the groups below are keyed on. */
+  depth = 1,
+): Promise<CategorizeResult[]> {
+  const branches = branchesOf(allPaths, depth);
+  const tops = [...branches.keys()];
+  const total = products.length;
+  console.log(
+    `[categorize] ${allPaths.length} categories is over the ${INLINE_TAXONOMY_MAX} that fit one prompt — `
+      + `choosing among ${tops.length} groups at level ${depth} first`,
+  );
+
+  // Already as narrow as this taxonomy goes and still too long. Sending it is
+  // the lesser evil: the alternative is refusing to categorise a branch that
+  // genuinely has this many leaves, and the provider's own error is clearer
+  // than a silent skip.
+  if (tops.length <= 1) {
+    console.warn(
+      `[categorize] ${allPaths.length} categories under one group at level ${depth} — cannot narrow further`,
+    );
+  }
+
+  // ── Pass 1: the department ──────────────────────────────────────────────
+  onProgress?.(0, total, `Choosing a department for ${total} products`);
+  const byTop = new Map<string, ProductInput[]>();
+  const unplaced: CategorizeResult[] = [];
+  const TOP_BATCH = 40;
+
+  for (let i = 0; i < products.length; i += TOP_BATCH) {
+    const slice = products.slice(i, i + TOP_BATCH);
+    let picks: CategorizeResult[];
+    try {
+      picks = await categorizeBatch(slice, marketplace, model, tops);
+    } catch (e) {
+      // A failed department batch must not invent one. These products come
+      // back uncategorised and a later run retries them, which is the same
+      // thing the main pipeline does with a failed batch.
+      console.warn(`[categorize] department batch failed for ${slice.length} products:`, (e as Error).message);
+      picks = [];
+    }
+    const chosen = new Map(picks.map((r) => [r.productId, r.category]));
+    for (const p of slice) {
+      const top = chosen.get(p.id);
+      if (!top || top === "Uncategorized" || !branches.has(top)) {
+        unplaced.push({ productId: p.id, category: "Uncategorized", path: "Uncategorized", confidence: 0 });
+        continue;
+      }
+      const list = byTop.get(top);
+      if (list) list.push(p);
+      else byTop.set(top, [p]);
+    }
+    onProgress?.(0, total, `Department chosen for ${Math.min(i + TOP_BATCH, total)} of ${total}`);
+  }
+
+  if (unplaced.length) await onResults?.(unplaced);
+
+  // ── Pass 2: the leaf, within that department only ───────────────────────
+  const results: CategorizeResult[] = [...unplaced];
+  let done = unplaced.length;
+
+  for (const [top, group] of byTop) {
+    const paths = branches.get(top)!;
+    console.log(`[categorize] ${top}: ${group.length} products against ${paths.length} categories`);
+    const offset = done;
+    // Each branch counts from zero; the caller is told where the WHOLE run
+    // is, or a 5,000-product job appears to restart at every department.
+    const progress: CategorizeProgress = (d, _t, note) =>
+      onProgress?.(offset + d, total, note ? `${top}: ${note}` : top);
+
+    const sub = paths.length > INLINE_TAXONOMY_MAX && tops.length > 1
+      // Still too long on its own. Narrow again on the next segment rather
+      // than sending it — this is the Home & Garden case.
+      ? await categoriseByBranch(marketplace, group, paths, model, progress, onResults, depth + 1)
+      : await categorizeProducts(marketplace, group, undefined, progress, onResults, {
+          branch: { top, paths },
+        });
+
+    results.push(...sub);
+    done += group.length;
+  }
+
+  return results;
+}
+
 export async function categorizeProducts(
   marketplace: string,
   products: ProductInput[],
@@ -281,6 +417,16 @@ export async function categorizeProducts(
    * the last emission wins.
    */
   onResults?: (results: CategorizeResult[]) => void | Promise<void>,
+  /**
+   * Internal. Set by the two-pass narrowing below when it re-enters this
+   * function with one branch of a large taxonomy, and by nothing else.
+   *
+   * It has to exist because the taxonomy load a few lines down OVERWRITES
+   * whatever the caller passed — correct for every ordinary call, and exactly
+   * wrong for a recursive one, which would get the whole 18,095-path list
+   * handed back to it and loop.
+   */
+  opts?: { branch?: { top: string; paths: string[] } },
 ): Promise<CategorizeResult[]> {
   enterAiFeature("categorize");
 
@@ -298,7 +444,11 @@ export async function categorizeProducts(
   // exist. Now a marketplace either has a taxonomy or it does not, and one
   // answer drives both.
   const taxonomy = taxonomyFor(marketplace);
-  if (taxonomy) {
+  if (opts?.branch) {
+    // One branch of a taxonomy too large to send whole. The list is already
+    // decided; reloading it here is what the branch exists to avoid.
+    availableCategories = opts.branch.paths;
+  } else if (taxonomy) {
     // Checked BEFORE loading: Wayfair's CSV ships empty on purpose and its
     // loader throws, so the guard has to come first to produce the banner the
     // route shows rather than a stack trace.
@@ -322,6 +472,35 @@ export async function categorizeProducts(
   // difference between a ~5 minute and a ~12 minute run on a 7k catalog.
   // Override with CATEGORIZE_MODEL.
   const model = process.env.CATEGORIZE_MODEL ?? "kimi-k2.7-code-highspeed";
+
+  // ── A taxonomy too large to put in one prompt ─────────────────────────────
+  //
+  // Every marketplace here but one fits: Sears 329 paths, Mathis 504, Temu
+  // 717, Best Buy 1,450. eBay has 18,095, which is ~400k tokens of category
+  // list on every call before a single product is added — it fits in no
+  // context, and the run would die at the provider with a length error that
+  // reads like an outage.
+  //
+  // So the question is asked in two parts, which is what the MCP tool has
+  // always done for Claude: choose the top level from 36, then choose a leaf
+  // from that branch alone. eBay averages ~500 leaves per branch, which is
+  // Mathis-sized — the size the full pipeline below was built for and is
+  // measured at.
+  //
+  // Nothing about THAT pipeline changes. The narrowing hands each group a
+  // smaller availableCategories and re-enters here, so validation, the retry,
+  // the rescue pass and the confidence floor all apply per branch exactly as
+  // they do for a small taxonomy.
+  if (!opts?.branch && isConstrained && availableCategories!.length > INLINE_TAXONOMY_MAX) {
+    return categoriseByBranch(
+      marketplace,
+      products,
+      availableCategories!,
+      model,
+      onProgress,
+      onResults,
+    );
+  }
 
   // Batch size is bounded by output tokens, not speed: ~110 tokens per item and
   // an 8000-token cap means 40 is close to the ceiling before the JSON array

@@ -101,11 +101,12 @@ describe("being too large to send whole", () => {
     for (const t of inAntiques) expect(t.startsWith("Antiques > ")).toBe(true);
   });
 
-  it("refuses in-app categorisation with a reason, rather than failing at the provider", () => {
-    const reason = taxonomyFor("ebay")!.unavailableReason!();
-    expect(reason).toMatch(/18,095 categories/);
-    // The refusal has to name the route that does work, or it reads as
-    // "eBay is broken" rather than "use Claude for this one".
-    expect(reason).toMatch(/Claude/);
+  it("no longer refuses in-app categorisation on the size of its list", () => {
+    // It used to, and that was right while the categoriser sent the list
+    // whole: 18,095 paths in one prompt fits in no context, and refusing with
+    // a reason beat dying at the provider with a length error. The
+    // categoriser now chooses the department first and the leaf within it, so
+    // the refusal has nothing left to refuse.
+    expect(taxonomyFor("ebay")!.unavailableReason?.()).toBeNull();
   });
 });

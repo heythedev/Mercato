@@ -13,7 +13,6 @@ import {
   hasEbayTaxonomy,
   loadEbayCategoryPaths,
 } from "@/lib/ai/ebay-taxonomy";
-import { INLINE_TAXONOMY_MAX } from "@/lib/categorize/taxonomy";
 import { profileFor } from "./profile";
 
 /**
@@ -61,34 +60,22 @@ const SOURCES: Record<string, TaxonomySource> = {
   ebay: {
     load: loadEbayCategoryPaths,
     format: formatEbayTaxonomyForPrompt,
-    // Two refusals, and the second one is the live one.
+    // One refusal left: no CSV, nothing to pick from. Leaving eBay out of
+    // this map instead would have been worse than wrong — taxonomyFor returns
+    // null for an unknown marketplace, isConstrainedMarketplace goes false,
+    // and the model free-forms categories eBay does not have, silently, until
+    // upload.
     //
-    // No CSV: nothing to pick from. Leaving eBay out of this map instead
-    // would have been worse than wrong — taxonomyFor returns null for an
-    // unknown marketplace, isConstrainedMarketplace goes false, and the model
-    // free-forms categories eBay does not have, silently, until upload.
-    //
-    // CSV present but too large: eBay ships 18,095 paths against Best Buy's
-    // 1,450, and this categoriser puts the whole list in one prompt — about
-    // 400k tokens of category list per call, which fits in no context. The
-    // run would fail at the provider with a length error that reads like an
-    // outage. Refusing here says what is actually wrong and names the route
-    // that works today: Claude, through MCP, which drills the list a level
-    // at a time.
-    unavailableReason: () => {
-      if (!hasEbayTaxonomy()) {
-        return "eBay categorization is not configured yet: src/lib/ai/data/ebay_categories.csv "
-          + "has not been supplied. Add eBay's category export before categorizing eBay projects.";
-      }
-      const count = loadEbayCategoryPaths().length;
-      if (count > INLINE_TAXONOMY_MAX) {
-        return `eBay has ${count.toLocaleString()} categories and this categoriser sends the whole `
-          + `list in one prompt, which holds about ${INLINE_TAXONOMY_MAX.toLocaleString()}. `
-          + "Categorise eBay projects through Claude for now — it narrows the list a level at a "
-          + "time. A two-pass categoriser here is the fix.";
-      }
-      return null;
-    },
+    // The second refusal that used to live here — 18,095 paths will not fit
+    // one prompt, categorise through Claude instead — is gone because the
+    // categoriser no longer sends the list whole. It chooses the department
+    // first and the leaf within it, which is what the MCP tool has always
+    // done for Claude. See categoriseByBranch.
+    unavailableReason: () =>
+      hasEbayTaxonomy()
+        ? null
+        : "eBay categorization is not configured yet: src/lib/ai/data/ebay_categories.csv "
+          + "has not been supplied. Add eBay's category export before categorizing eBay projects.",
   },
   wayfair: {
     load: loadWayfairCategoryPaths,
