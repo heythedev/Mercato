@@ -11,6 +11,7 @@ import {
   ChevronsRight,
   Plug,
   Sparkles,
+  ScrollText,
   LifeBuoy,
   X,
 } from "lucide-react";
@@ -58,6 +59,9 @@ const adminNav: NavSection[] = [
   { title: "Admin", items: [
     { href: "/admin/users", label: "Users", icon: Users },
     { href: "/admin/usage", label: "Usage & credits", icon: Activity },
+  // Where a standing rule is written down. Beside Templates on purpose: a
+  // template says which columns exist, this says how to fill them.
+  { href: "/admin/instructions", label: "Marketplace rules", icon: ScrollText },
     // Separate from "Usage & credits" on purpose: that page is about money
     // spent with Kimi, Keepa and Synccentric. This one is about people — who
     // connected Claude, what they did with it, and what it changed.

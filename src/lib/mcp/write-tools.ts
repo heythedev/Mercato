@@ -11,7 +11,8 @@ import {
   type Actor,
 } from "@/lib/authz";
 import { defaultKey } from "@/lib/export/defaults";
-import { saveProductAttributes } from "@/lib/export/product-attributes";
+import { loadProductAttributes, saveProductAttributes, storedAttribute } from "@/lib/export/product-attributes";
+import { recordCorrections } from "@/lib/export/corrections";
 import { neverInventColumn } from "@/lib/ai/match-dropdown";
 import { normalizeKey } from "@/lib/export/zip";
 import {
@@ -330,7 +331,7 @@ export const WRITE_TOOLS: McpTool[] = [
       const id = String(a.projectId);
       const project = await prisma.project.findUnique({
         where: { id },
-        select: { id: true, name: true, userId: true, teamId: true },
+        select: { id: true, name: true, marketplace: true, userId: true, teamId: true },
       });
       if (!project) return ok({ error: "No such project" });
       if (!canOperateProject(actor, project)) {
@@ -434,6 +435,51 @@ export const WRITE_TOOLS: McpTool[] = [
         accepted.push({ productId, attribute: column, value, source: "ai" });
       }
 
+      // A value replacing one a model or the catalogue already produced is a
+      // CORRECTION, and until now it was indistinguishable from a first fill:
+      // the upsert overwrote the old answer and nothing recorded that there
+      // had been one. Read before writing, so the disagreement is kept.
+      //
+      // Nothing acts on these yet, deliberately — the record is what has to
+      // exist first, because a day without it is a day of signal thrown away.
+      let corrections = 0;
+      if (accepted.length) {
+        try {
+          const ids = [...new Set(accepted.map((r) => r.productId))];
+          const [existing, cats] = await Promise.all([
+            loadProductAttributes(ids),
+            prisma.product.findMany({
+              where: { id: { in: ids } },
+              select: { id: true, marketplaceCategory: true },
+            }),
+          ]);
+          const categoryOf = new Map(cats.map((c) => [c.id, c.marketplaceCategory]));
+          corrections = await recordCorrections(
+            accepted.flatMap((r) => {
+              const was = storedAttribute(existing.get(r.productId), r.attribute);
+              // No previous answer means this filled a gap, not corrected one.
+              if (!was) return [];
+              return [{
+                productId: r.productId,
+                marketplace: project.marketplace,
+                category: categoryOf.get(r.productId) ?? null,
+                attribute: r.attribute,
+                was,
+                corrected: r.value,
+                // What it REPLACED, which is what this is evidence about.
+                // ProductAttribute keeps the source, so a bad catalogue
+                // lookup is not read as a bad guess.
+                wasSource: "ai" as const,
+                userId: actor.id,
+              }];
+            }),
+          );
+        } catch (e) {
+          // Recording must never cost somebody their write.
+          console.warn("[submit_export_values] could not record corrections:", (e as Error).message);
+        }
+      }
+
       // The same store the catalog lookup and the AI fill write to, keyed the
       // same way, so the export reads these exactly as it reads its own.
       const saved = accepted.length ? await saveProductAttributes(accepted) : 0;
@@ -441,6 +487,7 @@ export const WRITE_TOOLS: McpTool[] = [
       return ok({
         saved,
         rejected,
+        ...(corrections ? { corrected: corrections } : {}),
         note:
           saved > 0
             ? "Stored. The next export fills these cells from here — no AI call, so they work with no credit at all."

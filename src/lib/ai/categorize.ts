@@ -1,5 +1,6 @@
 import { generateText, type ModelMessage } from "ai";
 import { INLINE_TAXONOMY_MAX } from "@/lib/categorize/taxonomy";
+import { instructionBlock, instructionFor } from "@/lib/marketplaces/instructions";
 import { enterAiFeature } from "@/lib/ai/usage-context";
 import { moonshot, moonshotTemperature } from "@/lib/ai/moonshot";
 import { taxonomyFor } from "@/lib/marketplaces/taxonomy-registry";
@@ -322,6 +323,8 @@ async function categoriseByBranch(
   onResults?: (results: CategorizeResult[]) => void | Promise<void>,
   /** How many leading segments the groups below are keyed on. */
   depth = 1,
+  /** Read once by the caller; passed down rather than re-read per branch. */
+  instruction?: string | null,
 ): Promise<CategorizeResult[]> {
   const branches = branchesOf(allPaths, depth);
   const tops = [...branches.keys()];
@@ -351,7 +354,7 @@ async function categoriseByBranch(
     const slice = products.slice(i, i + TOP_BATCH);
     let picks: CategorizeResult[];
     try {
-      picks = await categorizeBatch(slice, marketplace, model, tops);
+      picks = await categorizeBatch(slice, marketplace, model, tops, false, false, instruction);
     } catch (e) {
       // A failed department batch must not invent one. These products come
       // back uncategorised and a later run retries them, which is the same
@@ -391,9 +394,10 @@ async function categoriseByBranch(
     const sub = paths.length > INLINE_TAXONOMY_MAX && tops.length > 1
       // Still too long on its own. Narrow again on the next segment rather
       // than sending it — this is the Home & Garden case.
-      ? await categoriseByBranch(marketplace, group, paths, model, progress, onResults, depth + 1)
+      ? await categoriseByBranch(marketplace, group, paths, model, progress, onResults, depth + 1, instruction)
       : await categorizeProducts(marketplace, group, undefined, progress, onResults, {
           branch: { top, paths },
+          instruction,
         });
 
     results.push(...sub);
@@ -426,7 +430,15 @@ export async function categorizeProducts(
    * wrong for a recursive one, which would get the whole 18,095-path list
    * handed back to it and loop.
    */
-  opts?: { branch?: { top: string; paths: string[] } },
+  opts?: {
+    branch?: { top: string; paths: string[] };
+    /** Whose team is running this, so their marketplace rule can be read.
+     *  Null is the global rule; undefined means do not look one up. */
+    teamId?: string | null;
+    /** Already-loaded rule, passed down by the branch narrowing so the text
+     *  is read once for a run rather than once per department. */
+    instruction?: string | null;
+  },
 ): Promise<CategorizeResult[]> {
   enterAiFeature("categorize");
 
@@ -473,6 +485,16 @@ export async function categorizeProducts(
   // Override with CATEGORIZE_MODEL.
   const model = process.env.CATEGORIZE_MODEL ?? "kimi-k2.7-code-highspeed";
 
+  // The account's standing rule for this marketplace, if an admin wrote one.
+  // Read ONCE per run — a branch-narrowed run passes it down rather than
+  // re-reading it for each of eBay's 36 departments.
+  const instruction =
+    opts?.instruction !== undefined
+      ? opts.instruction
+      : opts?.teamId !== undefined
+        ? await instructionFor(marketplace, opts.teamId)
+        : null;
+
   // ── A taxonomy too large to put in one prompt ─────────────────────────────
   //
   // Every marketplace here but one fits: Sears 329 paths, Mathis 504, Temu
@@ -499,6 +521,8 @@ export async function categorizeProducts(
       model,
       onProgress,
       onResults,
+      1,
+      instruction,
     );
   }
 
@@ -625,7 +649,7 @@ export async function categorizeProducts(
         let batchResults: CategorizeResult[];
         try {
           batchResults = await withRateLimitRetry(() =>
-            categorizeBatch(b, marketplace, model, availableCategories),
+            categorizeBatch(b, marketplace, model, availableCategories, false, false, instruction),
           );
         } catch (reason) {
           failedBatches++;
@@ -697,7 +721,7 @@ export async function categorizeProducts(
         await Promise.all(wave.map(async (batch) => {
           const changed: CategorizeResult[] = [];
           try {
-            const retryResults = await categorizeBatch(batch, marketplace, model, availableCategories, true);
+            const retryResults = await categorizeBatch(batch, marketplace, model, availableCategories, true, false, instruction);
             for (const r of retryResults) {
               if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; r.confidence = 0.1; }
               const idx = allResults.findIndex((a) => a.productId === r.productId);
@@ -762,7 +786,7 @@ export async function categorizeProducts(
         await Promise.all(wave.map(async (batch) => {
           const changed: CategorizeResult[] = [];
           try {
-            const rescueResults = await categorizeBatchWithContext(batch, marketplace, model, availableCategories);
+            const rescueResults = await categorizeBatchWithContext(batch, marketplace, model, availableCategories, false, false, instruction);
             for (const r of rescueResults) {
               if (!allowed.has(r.category)) { r.category = "Uncategorized"; r.path = "Uncategorized"; }
               const idx = allResults.findIndex((a) => a.productId === r.productId);
@@ -807,7 +831,7 @@ export async function categorizeProducts(
         await Promise.all(wave.map(async (batch) => {
           const changed: CategorizeResult[] = [];
           try {
-            const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true);
+            const forced = await categorizeBatch(batch, marketplace, model, availableCategories, false, true, instruction);
             for (const r of forced) {
               // Accept only a verbatim on-list path; anything else stays Uncategorized.
               if (r.category === "Uncategorized" || !allowed.has(r.category)) continue;
@@ -843,6 +867,7 @@ async function categorizeBatch(
   availableCategories?: string[],
   strictMode = false,
   forceNearest = false,
+  instruction?: string | null,
 ): Promise<CategorizeResult[]> {
   return categorizeBatchWithContext(
     products.map((p) => ({ ...p, searchContext: undefined })),
@@ -851,6 +876,7 @@ async function categorizeBatch(
     availableCategories,
     strictMode,
     forceNearest,
+    instruction,
   );
 }
 
@@ -872,6 +898,10 @@ export function buildCategorizationPrompt(
   availableCategories?: string[],
   strictMode = false,
   forceNearest = false,
+  /** The account's standing rule for this marketplace, if one is set. Appended
+   *  AFTER the category list and the rules, so it can add to them and never
+   *  silently replace the constraint the whole pipeline rests on. */
+  instruction?: string | null,
 ): {
   systemPrompt: string;
   userPrompt: string;
@@ -1111,19 +1141,21 @@ ${noInventRule}
   // product list — keeping the reason-first behavior without the ordering hack.
   const useStepByStep = isTemu || isBestBuy || isSears;
 
+  const houseRules = instructionBlock(instruction ?? null);
+
   const systemPrompt = useStepByStep
     ? `${storeContext}
 
 ${reasoningInstruction}
 
 You will assign each product into ${categorySection}
-${rules}`
+${rules}${houseRules}`
     : `${storeContext}
 
 ${reasoningInstruction}
 
 You will categorize each product into ${categorySection}
-${rules}`;
+${rules}${houseRules}`;
 
   const userPrompt = useStepByStep
     ? `Work through STEP 1→2→3 for EACH product below before answering.
@@ -1198,9 +1230,10 @@ async function categorizeBatchWithContext(
   availableCategories?: string[],
   strictMode = false,
   forceNearest = false,
+  instruction?: string | null,
 ): Promise<CategorizeResult[]> {
   const { systemPrompt, userPrompt, usesTaxonomySheet, walmartFlat, maxOutputTokens } =
-    buildCategorizationPrompt(products, marketplace, model, availableCategories, strictMode, forceNearest);
+    buildCategorizationPrompt(products, marketplace, model, availableCategories, strictMode, forceNearest, instruction);
 
   const messages: ModelMessage[] = [
     { role: "system", content: systemPrompt },

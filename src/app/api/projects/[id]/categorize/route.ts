@@ -378,7 +378,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Lightweight check — ownership only, no heavy product data loaded yet.
   const projectMeta = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, userId: true, marketplace: true, categorizeMs: true },
+    select: { id: true, userId: true, marketplace: true, teamId: true, categorizeMs: true },
   });
   if (!projectMeta) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (!canOperateProject(actorOf(user), projectMeta)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -850,6 +850,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             async (wave) => {
               await bulkUpdateCategories(wave).catch(() => {});
             },
+            // The account's standing rule for this marketplace, if an admin
+            // wrote one. Read inside, once per run.
+            { teamId: projectMeta?.teamId ?? null },
           )
         : [];
       // Never sent to the model — write the same verdict the gate would have

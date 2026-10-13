@@ -28,10 +28,11 @@ model Team {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  users     User[]
-  projects  Project[]
-  templates ExportTemplate[]
-  defaults  ExportDefault[]
+  users        User[]
+  projects     Project[]
+  templates    ExportTemplate[]
+  defaults     ExportDefault[]
+  instructions MarketplaceInstruction[]
 
   @@index([slug])
 }
@@ -60,15 +61,15 @@ model User {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  accounts  Account[]
-  sessions  Session[]
-  projects  Project[]
-  templates ExportTemplate[]
-  mcpTokens McpToken[]
-  oauthGrants OAuthGrant[]
-  uploadTickets UploadTicket[]
+  accounts        Account[]
+  sessions        Session[]
+  projects        Project[]
+  templates       ExportTemplate[]
+  mcpTokens       McpToken[]
+  oauthGrants     OAuthGrant[]
+  uploadTickets   UploadTicket[]
   downloadTickets DownloadTicket[]
-  team      Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  team            Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
 
   @@index([teamId])
 }
@@ -554,16 +555,16 @@ model DownloadTicket {
 }
 
 model UploadTicket {
-  tokenHash   String    @id
-  userId      String
-  name        String
-  marketplace String
+  tokenHash    String    @id
+  userId       String
+  name         String
+  marketplace  String
   /// Walmart new-listing projects skip verification; fixed at issue time for
   /// the same reason the name is.
-  isNewListing Boolean  @default(false)
-  expiresAt   DateTime
-  usedAt      DateTime?
-  createdAt   DateTime  @default(now())
+  isNewListing Boolean   @default(false)
+  expiresAt    DateTime
+  usedAt       DateTime?
+  createdAt    DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -580,10 +581,10 @@ model UploadTicket {
 /// client's own unverified claim, since it is attacker-controlled and is
 /// exactly how a phishing connector would try to look like a real one.
 model OAuthClient {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   name         String
   redirectUris String[]
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   /// Set to stop a client being used without losing the record of it.
   disabledAt   DateTime?
 
@@ -594,7 +595,7 @@ model OAuthClient {
 /// A one-use authorization code, in flight between the consent screen and the
 /// token endpoint. Stored hashed, like every other credential here.
 model OAuthCode {
-  codeHash      String   @id
+  codeHash      String    @id
   clientId      String
   userId        String
   redirectUri   String
@@ -607,7 +608,7 @@ model OAuthCode {
   /// Redemption is single-use. A second attempt means the code leaked, and
   /// OAuth 2.1 requires the grant it came from to be revoked.
   usedAt        DateTime?
-  createdAt     DateTime @default(now())
+  createdAt     DateTime  @default(now())
 
   client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
@@ -619,19 +620,19 @@ model OAuthCode {
 /// This is what an admin revokes when somebody leaves — the thing personal
 /// tokens could not offer, because only their owner could revoke them.
 model OAuthGrant {
-  id          String    @id @default(cuid())
-  userId      String
-  clientId    String
-  scope       String
+  id               String    @id @default(cuid())
+  userId           String
+  clientId         String
+  scope            String
   /// SHA-256 of the refresh token. Null once it has been rotated away.
-  refreshHash String?   @unique
+  refreshHash      String?   @unique
   refreshExpiresAt DateTime?
-  createdAt   DateTime  @default(now())
-  lastUsedAt  DateTime?
-  revokedAt   DateTime?
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
 
-  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  client OAuthClient   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client OAuthClient  @relation(fields: [clientId], references: [id], onDelete: Cascade)
   tokens OAuthToken[]
 
   @@index([userId])
@@ -667,24 +668,24 @@ model OAuthToken {
 /// lives in Claude, not here. The tool trail says what a session was ABOUT;
 /// it is not a transcript, and nobody should be told otherwise.
 model McpCall {
-  id      String @id @default(cuid())
-  userId  String
+  id         String   @id @default(cuid())
+  userId     String
   /// Which token, so one laptop's activity can be told from another's — and
   /// so a leaked token's whole history is visible after it is revoked.
-  tokenId String
+  tokenId    String
   /// From the Mcp-Session-Id header when the client sends one. Null otherwise,
   /// and the usage screen falls back to grouping by gaps in time.
-  sessionId String?
-  tool      String
+  sessionId  String?
+  tool       String
   /// The project the call concerned, where the tool takes one.
-  projectId String?
-  ok        Boolean @default(true)
-  error     String?
-  durationMs Int    @default(0)
+  projectId  String?
+  ok         Boolean  @default(true)
+  error      String?
+  durationMs Int      @default(0)
   /// Rows a write tool changed. Null for reads — which is also how the two
   /// are told apart without trusting a name prefix.
-  rows      Int?
-  createdAt DateTime @default(now())
+  rows       Int?
+  createdAt  DateTime @default(now())
 
   @@index([userId, createdAt])
   @@index([createdAt])
@@ -710,4 +711,73 @@ model McpToken {
 
   @@index([userId])
   @@index([tokenHash])
+}
+
+// ── Standing instructions, written once ──────────────────────────────────────
+
+/// What a marketplace's files must always do, in the admin's own words.
+///
+/// Mercato learns nothing on its own and Claude remembers nothing between
+/// conversations, so a correction given in a chat helps that one project and
+/// then is gone. Every rule this client discovered — how an eBay description
+/// is laid out, which columns must stay empty — reached other users only by
+/// someone changing the exporter.
+///
+/// This is the place to write a rule down instead. The text is injected into
+/// the prompt for every run on that marketplace, whichever model is answering,
+/// so an admin can state a standing rule without a code change. It is not
+/// learning; it is a person writing the rule once somewhere the system reads.
+///
+/// Scoped like ExportDefault: a team's row overrides the global one.
+model MarketplaceInstruction {
+  id          String   @id @default(cuid())
+  /// Null = applies to every team.
+  teamId      String?
+  marketplace String
+  /// Free text, shown to the model verbatim.
+  text        String
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  team Team? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, marketplace])
+  @@index([marketplace])
+}
+
+// ── Corrections, kept ────────────────────────────────────────────────────────
+
+/// One value a person changed after a model or a catalogue lookup produced it.
+///
+/// Today a correction lives in one person's head: they fix a cell, the file
+/// ships, and nothing records that the answer was wrong. You cannot learn from
+/// data you never kept, so this keeps it — before anything consumes it.
+///
+/// Deliberately NOT a foreign key to Product and NOT cascade-deleted with it.
+/// The product row is the least durable thing in this system — projects are
+/// deleted routinely — and the correction is worth more than the row it came
+/// from. A correction whose product is gone still says what this marketplace
+/// wanted in that column.
+model AttributeCorrection {
+  id          String   @id @default(cuid())
+  /// The product it came from, if it still exists. No constraint: see above.
+  productId   String?
+  marketplace String
+  /// The product's category when it was corrected, so a later suggestion can
+  /// be scoped to products of the same kind rather than the whole catalogue.
+  category    String?
+  /// normalizeKey() of the column.
+  attribute   String
+  /// What the model or lookup produced.
+  was         String
+  /// What the person made it.
+  corrected   String
+  /// catalog | ai — which layer got it wrong, so a bad lookup and a bad guess
+  /// are not read as the same signal.
+  wasSource   String
+  userId      String?
+  createdAt   DateTime @default(now())
+
+  @@index([marketplace, attribute])
+  @@index([createdAt])
 }
