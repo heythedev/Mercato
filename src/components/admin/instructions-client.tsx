@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Save } from "lucide-react";
+import { Loader2, Plus, Save, Trash2 } from "lucide-react";
 import { Card, EmptyState, Notice, PageHeader } from "@/components/ui/primitives";
 import { marketplaceLabel } from "@/lib/marketplaces/catalog";
 import { cn } from "@/lib/utils";
@@ -13,6 +14,17 @@ export type InstructionRow = {
   teamId: string | null;
   updatedAt: string | Date;
   updatedBy: string | null;
+};
+
+export type ColumnRuleRow = {
+  id: string;
+  marketplace: string;
+  teamId: string | null;
+  column: string;
+  action: string;
+  find: string | null;
+  value: string | null;
+  note: string | null;
 };
 
 export type CorrectionRow = {
@@ -31,6 +43,183 @@ export type CorrectionRow = {
  * replacement is a rule somebody should write down, and a column corrected
  * twice is noise.
  */
+/**
+ * One stated change, and the form for adding another.
+ *
+ * Separate from the free-text rule above it because the two are answered by
+ * different things: that one is read by a model and interpreted per product,
+ * this one is applied by the exporter to every row without asking anybody.
+ */
+function ColumnRules({
+  marketplace,
+  rules,
+  onChanged,
+}: {
+  marketplace: string;
+  rules: ColumnRuleRow[];
+  onChanged: () => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ column: "", action: "replace", find: "", value: "", note: "" });
+
+  const field =
+    "rounded-md border border-border bg-background px-2 py-1.5 text-[13px] text-foreground outline-none focus:border-foreground/30";
+
+  async function add() {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/admin/column-rules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ marketplace, ...form }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Could not add");
+      toast.success("Rule added — every export applies it from now on");
+      setForm({ column: "", action: "replace", find: "", value: "", note: "" });
+      setAdding(false);
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/admin/column-rules?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        throw new Error(data.error ?? "Could not remove");
+      }
+      toast.success("Rule removed");
+      onChanged();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Read back as a sentence rather than as its stored fields. A rule somebody
+  // wrote months ago has to be judgeable without knowing the schema.
+  const describe = (r: ColumnRuleRow) => {
+    const where = r.column === "*" ? "every text column" : r.column;
+    if (r.action === "blank") return `${where} always ships empty`;
+    if (r.action === "append") return `add “${r.value}” to the end of ${where}`;
+    return r.value
+      ? `in ${where}, replace “${r.find}” with “${r.value}”`
+      : `in ${where}, remove “${r.find}”`;
+  };
+
+  return (
+    <div className="space-y-2 border-t border-border/60 pt-3">
+      {rules.map((r) => (
+        <div key={r.id} className="flex items-start justify-between gap-3 rounded-lg bg-muted/30 px-3 py-2">
+          <div className="min-w-0">
+            <p className="text-[13px] text-foreground">{describe(r)}</p>
+            {r.note ? <p className="text-[12px] text-muted-foreground">{r.note}</p> : null}
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => remove(r.id)}
+            aria-label="Remove rule"
+            className="shrink-0 text-muted-foreground transition hover:text-foreground"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ))}
+
+      {adding ? (
+        <div className="space-y-2 rounded-lg border border-border p-3">
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={form.column}
+              onChange={(e) => setForm((f) => ({ ...f, column: e.target.value }))}
+              placeholder="Column, e.g. Product Description"
+              className={cn(field, "min-w-48 flex-1")}
+            />
+            <select
+              value={form.action}
+              onChange={(e) => setForm((f) => ({ ...f, action: e.target.value }))}
+              className={field}
+            >
+              <option value="replace">replace / remove</option>
+              <option value="append">add to the end</option>
+              <option value="blank">always leave empty</option>
+            </select>
+          </div>
+
+          {form.action === "replace" ? (
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={form.find}
+                onChange={(e) => setForm((f) => ({ ...f, find: e.target.value }))}
+                placeholder="Find this word"
+                className={cn(field, "min-w-40 flex-1")}
+              />
+              <input
+                value={form.value}
+                onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
+                placeholder="Replace with — leave empty to remove"
+                className={cn(field, "min-w-40 flex-1")}
+              />
+            </div>
+          ) : null}
+
+          {form.action === "append" ? (
+            <input
+              value={form.value}
+              onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
+              placeholder="Text to add at the end"
+              className={cn(field, "w-full")}
+            />
+          ) : null}
+
+          <input
+            value={form.note}
+            onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+            placeholder="Why — so a rule nobody remembers writing can still be judged"
+            className={cn(field, "w-full")}
+          />
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={busy || !form.column.trim()}
+              onClick={add}
+              className="rounded-full bg-foreground px-4 py-1.5 text-[13px] font-medium text-background disabled:bg-muted disabled:text-muted-foreground"
+            >
+              {busy ? "Adding…" : "Add rule"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="rounded-full px-4 py-1.5 text-[13px] text-muted-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          className="inline-flex items-center gap-1.5 text-[13px] text-muted-foreground transition hover:text-foreground"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add a rule the exporter applies itself
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function InstructionsClient({
   marketplaces,
   maxChars,
@@ -38,6 +227,7 @@ export function InstructionsClient({
   teamId,
   instructions,
   corrections,
+  columnRules,
 }: {
   marketplaces: string[];
   maxChars: number;
@@ -45,7 +235,9 @@ export function InstructionsClient({
   teamId: string | null;
   instructions: InstructionRow[];
   corrections: CorrectionRow[];
+  columnRules: ColumnRuleRow[];
 }) {
+  const router = useRouter();
   const mine = (mp: string) =>
     instructions.find((i) => i.marketplace === mp && (canEditGlobal ? !i.teamId : i.teamId === teamId));
 
@@ -141,6 +333,12 @@ export function InstructionsClient({
                   {(draft[mp] ?? "").trim() ? "Save" : "Clear"}
                 </button>
               </div>
+
+              <ColumnRules
+                marketplace={mp}
+                rules={columnRules.filter((r) => r.marketplace === mp)}
+                onChanged={() => router.refresh()}
+              />
             </Card>
           );
         })}

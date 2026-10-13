@@ -33,6 +33,7 @@ model Team {
   templates    ExportTemplate[]
   defaults     ExportDefault[]
   instructions MarketplaceInstruction[]
+  columnRules  MarketplaceColumnRule[]
 
   @@index([slug])
 }
@@ -780,4 +781,48 @@ model AttributeCorrection {
 
   @@index([marketplace, attribute])
   @@index([createdAt])
+}
+
+// ── Column rules, applied without asking a model ─────────────────────────────
+
+/// A change to a cell that a person stated once and the exporter applies for
+/// ever after.
+///
+/// MarketplaceInstruction is guidance a model has to interpret per product.
+/// This is the other kind: "that word must never appear", "that column must
+/// ship empty", "that sentence goes on the end of every description". Those
+/// are not judgements and should never cost an AI call or depend on one
+/// having read the instruction properly — they are applied at the point the
+/// cell is written, deterministically, to every row.
+///
+/// ExportDefault already covers "this column always holds this value", so
+/// there is no `constant` action here. A default is written INTO the cell;
+/// these transform what is already there.
+model MarketplaceColumnRule {
+  id          String   @id @default(cuid())
+  /// Null = applies to every team.
+  teamId      String?
+  marketplace String
+  /// normalizeKey() of the column's label, or "*" for every text column.
+  /// "*" is deliberately awkward to choose in the UI: a replacement loose on
+  /// every column is the one that changes a cell nobody was thinking about.
+  column      String
+  /// blank | replace | append
+  action      String
+  /// What to look for. Matched as a whole word, case-insensitively.
+  find        String?
+  /// What to put there instead, or to append. Empty removes.
+  value       String?
+  /// Why, in the admin's words. Shown beside the rule so a rule nobody
+  /// remembers writing can still be judged.
+  note        String?
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  team Team? @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([marketplace, enabled])
+  @@index([teamId])
 }

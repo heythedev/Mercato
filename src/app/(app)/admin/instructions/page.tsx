@@ -3,6 +3,7 @@ import { requireUser } from "@/lib/auth-helpers";
 import { actorOf, isAdmin, isTeamAdmin } from "@/lib/authz";
 import { listInstructions, MAX_INSTRUCTION_CHARS } from "@/lib/marketplaces/instructions";
 import { correctionSummary } from "@/lib/export/corrections";
+import { prisma } from "@/lib/db";
 import { MARKETPLACE_IDS } from "@/lib/marketplaces/catalog";
 import { InstructionsClient } from "@/components/admin/instructions-client";
 
@@ -20,11 +21,17 @@ export default async function InstructionsPage() {
   const actor = actorOf(user);
   if (!isAdmin(actor) && !isTeamAdmin(actor)) redirect("/projects");
 
-  const [instructions, corrections] = await Promise.all([
+  const [instructions, corrections, columnRules] = await Promise.all([
     listInstructions(actor.teamId).catch(() => []),
     // Nothing is recorded until the migration runs, and a screen that 500s
     // because a table is not there yet is worse than one showing none.
     correctionSummary().catch(() => []),
+    prisma.marketplaceColumnRule
+      .findMany({
+        where: { OR: [{ teamId: null }, ...(actor.teamId ? [{ teamId: actor.teamId }] : [])] },
+        orderBy: [{ marketplace: "asc" }, { createdAt: "asc" }],
+      })
+      .catch(() => []),
   ]);
 
   return (
@@ -35,6 +42,16 @@ export default async function InstructionsPage() {
       teamId={actor.teamId}
       instructions={instructions.map((i) => ({ ...i, updatedAt: i.updatedAt.toISOString() }))}
       corrections={corrections}
+      columnRules={columnRules.map((r) => ({
+        id: r.id,
+        marketplace: r.marketplace,
+        teamId: r.teamId,
+        column: r.column,
+        action: r.action,
+        find: r.find,
+        value: r.value,
+        note: r.note,
+      }))}
     />
   );
 }

@@ -32,6 +32,7 @@ import { hasRequirementMatrix, profileFor, toTemplateCategoryPath } from "@/lib/
 import { loadMathisCategoryPaths } from "../ai/mathis-taxonomy";
 import { bestBuyFillKeyForCode, bestBuyBareAttribute, bestBuyCategoryScopeOf } from "./bestbuy-template";
 import { ebayCellValue, restrictedWordsForRun } from "./ebay-template";
+import { applyColumnRules, EMPTY_RULES, loadColumnRules, type ColumnRuleSet } from "./column-rules";
 import { loadExportDefaults, defaultFor, settingEnabled, SETTING_KEYS, type ExportDefaults } from "./defaults";
 import { loadProductAttributes, saveProductAttributes, storedAttribute, type AttributeSource } from "./product-attributes";
 import { bestBuyCodeForPath } from "../ai/bestbuy-taxonomy";
@@ -450,6 +451,12 @@ export async function generateCategoryZip(
   // Admin-set values for required columns nothing else can answer (compliance
   // declarations and the like). Loaded once per export, never per row, and
   // applied only where a REQUIRED cell would otherwise ship empty.
+  // Changes an admin stated once. Loaded with the defaults — once per export,
+  // never per row — and applied where every cell is written.
+  const columnRules = await loadColumnRules(marketplace, teamId ?? null).catch((e) => {
+    console.warn("[export] could not load column rules:", (e as Error).message);
+    return EMPTY_RULES;
+  });
   const exportDefaults = await loadExportDefaults(marketplace, teamId).catch((e) => {
     // A missing table or a database blip must not cost the client their ZIP.
     console.warn("[export] could not load export defaults:", (e as Error).message);
@@ -841,11 +848,11 @@ export async function generateCategoryZip(
     const fileName = sanitize(catLabel);
 
     if (template.fileFormat === "csv") {
-      zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns, marketplace));
+      zipOut.file(`${fileName}.csv`, generateCsv(catProducts, columns, marketplace, columnRules));
     } else if (template.fileData) {
       console.log(`[export] Filling template "${template.name}" (${marketplace}) fileData size=${Buffer.byteLength(template.fileData as Buffer)}`);
       const fileIssues: ComplianceIssue[] = [];
-      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults, storedAttrs, toPersist, dropdownOptions);
+      const buffer = await fillTemplateXlsx(catProducts, columns, template.fileData as Buffer, marketplace, fileIssues, exportDefaults, storedAttrs, toPersist, dropdownOptions, columnRules);
       zipOut.file(`${fileName}.xlsx`, buffer);
       for (const issue of fileIssues) complianceRows.push({ ...issue, file: `${fileName}.xlsx` });
     } else {
@@ -1309,9 +1316,14 @@ export async function generateSingleTemplateExport(
    * not only the ones routed through generateCategoryZip.
    */
   dropdownOptions?: Map<string, string[]>,
+  /** The project's team, so its own rules and defaults apply. Without it this
+   *  path saw only the global rows — a team's compliance declaration and its
+   *  stated changes were both silently skipped here. */
+  teamId?: string | null,
 ): Promise<Buffer> {
   const zip = new JSZip();
   const eligible = eligibleProducts(products, marketplace);
+  const columnRules = await loadColumnRules(marketplace, teamId ?? null).catch(() => EMPTY_RULES);
   const columns = template.columns as Column[];
   const fileName = sanitize(template.name);
 
@@ -1323,11 +1335,12 @@ export async function generateSingleTemplateExport(
     : eligible;
 
   if (template.fileFormat === "csv") {
-    zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns, marketplace));
+    zip.file(`${fileName}.csv`, generateCsv(withCategoryFallback, columns, marketplace, columnRules));
   } else if (fileData) {
     // Preserve original template formatting, dropdowns, validations
     const buffer = await fillTemplateXlsx(withCategoryFallback, columns, fileData, marketplace, undefined,
-      await loadExportDefaults(marketplace).catch(() => new Map()), new Map(), [], dropdownOptions);
+      await loadExportDefaults(marketplace, teamId).catch(() => new Map()), new Map(), [], dropdownOptions,
+      columnRules);
     zip.file(`${fileName}.xlsx`, buffer);
   } else {
     const buffer = await createXlsxFromScratch(withCategoryFallback, columns, template.name);
@@ -1345,9 +1358,14 @@ export async function generateExportZip(
   marketplace = "amazon",
   /** As generateSingleTemplateExport — the options this template accepts. */
   dropdownOptions?: Map<string, string[]>,
+  /** The project's team, so its own rules and defaults apply. Without it this
+   *  path saw only the global rows — a team's compliance declaration and its
+   *  stated changes were both silently skipped here. */
+  teamId?: string | null,
 ): Promise<Buffer> {
   const zip = new JSZip();
   const eligible = eligibleProducts(products, marketplace);
+  const columnRules = await loadColumnRules(marketplace, teamId ?? null).catch(() => EMPTY_RULES);
 
   for (const template of templates) {
     const columns = template.columns as Column[];
@@ -1487,6 +1505,8 @@ async function fillTemplateXlsx(
    * is offered is exactly what this export would accept.
    */
   dropdownOptions?: Map<string, string[]>,
+  /** Changes an admin stated once, applied where each cell is written. */
+  columnRules: ColumnRuleSet = EMPTY_RULES,
 ): Promise<Buffer> {
   console.log(`[export] fillTemplateXlsx called: ${products.length} products, fileData=${fileData?.length ?? 0} bytes, marketplace=${marketplace}`);
   const tplZip = await JSZip.loadAsync(fileData);
@@ -2509,7 +2529,7 @@ async function fillTemplateXlsx(
   };
 
   // Compute the final value for a column (dropdown-safe)
-  const colVal = (p: Product, col: Column, letter: string): string => {
+  const colValRaw = (p: Product, col: Column, letter: string): string => {
     // A Best Buy group template carries every covered category's columns side by
     // side, so a generic field lookup can land a value in ANOTHER category's
     // column — an image URL was reaching Digital_Photo_Frames.boxContents.1 on a
@@ -2763,6 +2783,17 @@ async function fillTemplateXlsx(
     }
     return value;
   };
+
+  /**
+   * The same value, with the account's own rules applied.
+   *
+   * A wrapper rather than an edit to each of the resolver's returns: it has
+   * several, and a rule that holds on some paths and not others is worse than
+   * no rule — it would hold until the day a cell happened to resolve down a
+   * different branch.
+   */
+  const colVal = (p: Product, col: Column, letter: string): string =>
+    applyColumnRules(columnRules, col.label ?? col.key, colValRaw(p, col, letter));
 
   // Category key for matrix lookups, WRITTEN value first: the category cell's
   // dropdown match can bridge naming drift between the taxonomy and the matrix
@@ -3572,7 +3603,12 @@ function generateUncategorizedCsv(products: Product[]): string {
  * VALUE, and stripInvertedCommas has already applied it by the time the
  * value arrives here.
  */
-function generateCsv(products: Product[], columns: Column[], marketplace?: string): string {
+function generateCsv(
+  products: Product[],
+  columns: Column[],
+  marketplace?: string,
+  columnRules: ColumnRuleSet = EMPTY_RULES,
+): string {
   const isEbay = !!marketplace && profileFor(marketplace).id === "ebay";
 
   // The uploaded file's own Error column is this channel manager naming the
@@ -3628,7 +3664,10 @@ function generateCsv(products: Product[], columns: Column[], marketplace?: strin
       return out;
     };
     return columns.map((c) => {
-      const out = isEbay ? ebayCell(c.label) : String(getProductField(p, c.key) ?? "");
+      const base = isEbay ? ebayCell(c.label) : String(getProductField(p, c.key) ?? "");
+      // Applied LAST, after the marketplace's own rules: an account's stated
+      // change is the final word on what ships in that cell.
+      const out = applyColumnRules(columnRules, c.label, base);
       return `"${out.replace(/"/g, '""')}"`;
     }).join(",");
   });

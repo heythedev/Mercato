@@ -680,7 +680,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // a manually chosen template instead of auto-matching by category.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink, projectMeta.teamId) as Buffer;
       } else if (isBestBuy) {
         // ── Best Buy: uploaded templates win per CATEGORY, Mirakl fills the rest ──
         //
@@ -758,7 +758,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         // No category-splitting needed since a single template covers the whole catalogue.
         const tpl = allTemplates[0];
         const templateFileData = tpl?.fileData ? Buffer.from(tpl.fileData as unknown as ArrayBuffer) : null;
-        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink) as Buffer;
+        zipBuffer = await generateSingleTemplateExport(products, tpl, projectMeta.marketplace, templateFileData, dropdownSink, projectMeta.teamId) as Buffer;
       } else if (!allTemplates.length) {
         // No templates → flat export (one file, standard columns)
         zipBuffer = await generateFlatExport(products, projectMeta.marketplace) as Buffer;
