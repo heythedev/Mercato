@@ -264,3 +264,43 @@ describe("one file for the whole catalogue", () => {
     expect(exportGroupOf("Rugs > Indoor", "mathis")).toBe("Rugs");
   });
 });
+
+describe("the template's own shape is what ships", () => {
+  // The worry this answers: that filling a file also reshapes it. It does
+  // not. The header is the stored template's columns, in the stored
+  // template's order, with the stored template's spelling — nothing added,
+  // nothing dropped, nothing moved.
+  const TEMPLATE_HEADER = [
+    "SKU", "Localized For", "Variation Group ID", "Variation Specific Name 1",
+    "Title", "Product Description", "UPC", "EAN", "MPN", "Brand",
+    "Condition", "Channel ID", "Category", "Store Category Name 1",
+    "Attribute Name 1", "Attribute Value 1", "Active", "Error",
+  ];
+
+  async function headerOf(columns: Array<{ key: string; label: string }>): Promise<string[]> {
+    const buf = await generateSingleTemplateExport(
+      [] as never,
+      { id: "t3", name: "eBay shape", columns, fileFormat: "csv", category: null } as never,
+      "ebay",
+    );
+    const zip = await JSZip.loadAsync(buf);
+    const name = Object.keys(zip.files).find((n) => n.endsWith(".csv"))!;
+    const csv = await zip.file(name)!.async("string");
+    // The BOM is stripped here because it is a file-encoding mark, not a
+    // column: Excel needs it or "Décor" arrives as "DÃ©cor".
+    return splitRow(csv.split("\n")[0]!.replace(/^\ufeff/, ""));
+  }
+
+  it("emits exactly the template's columns, in order", async () => {
+    const columns = TEMPLATE_HEADER.map((h) => ({ key: h, label: h, required: false }));
+    expect(await headerOf(columns)).toEqual(TEMPLATE_HEADER);
+  });
+
+  it("corrects only ePID's casing, and only for eBay", async () => {
+    // Some stored copies of the template carry EPID. A strict importer keys
+    // on the exact text, so the seller's own spelling is restored — the one
+    // header this export rewrites, deliberately.
+    const columns = [{ key: "EPID", label: "EPID", required: false }];
+    expect(await headerOf(columns)).toEqual(["ePID"]);
+  });
+});
